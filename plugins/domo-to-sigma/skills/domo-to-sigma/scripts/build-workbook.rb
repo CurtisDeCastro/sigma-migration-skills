@@ -2140,6 +2140,25 @@ def build_element_body(card, overrides)
         companion['name'] = card['title']
         el['name'] = ' '
       end
+      header_override_path = File.join(OUT, 'card-header-overrides.json')
+      header_overrides = (JSON.parse(File.read(header_override_path)) rescue {}) if
+        File.exist?(header_override_path)
+      header_rule = header_overrides && header_overrides[card['id'].to_s]
+      if header_rule.is_a?(Hash) && !header_rule['body'].to_s.empty?
+        verify_id = "#{eid(card, '-summary')}-verify"
+        unless $kpi_verification_elements.any? { |item| item['id'] == verify_id }
+          raw_companion = Marshal.load(Marshal.dump(companion))
+          raw_companion['id'] = verify_id
+          raw_companion['name'] = "#{card['title']} Summary (Parity)"
+          raw_companion.delete('visibleAsSource')
+          $kpi_verification_elements << raw_companion
+        end
+        companion = {
+          'id' => "header-#{card['id']}", 'kind' => 'text',
+          'body' => header_rule['body'].to_s
+        }
+        el['name'] = ' '
+      end
       $companion_elements << companion
       warn_card(card, "source Summary Number ALSO represented as a companion KPI element " \
                       "'#{companion['name']}' alongside this #{el['kind'] || kind || 'chart'} element " \
