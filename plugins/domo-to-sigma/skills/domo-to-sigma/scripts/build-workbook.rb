@@ -569,7 +569,9 @@ def build_scatter_chart(card, dims, meas)
   limit = card['limit'].to_i
   if limit.positive?
     order_name = Array(card['orderBy']).first.to_s
-    rank_source = meas.find { |m| m['column'].to_s == order_name } || meas.last
+    # When VALUE and BUBBLESIZE both bind the same source column (Avg Amount
+    # vs Sum Amount), Domo's top-N orders by the final size/total role.
+    rank_source = meas.reverse.find { |m| m['column'].to_s == order_name } || meas.last
     rank_col = rank_source && measure_by_source[rank_source]
     if rank_col
       helper['filters'] = [{
