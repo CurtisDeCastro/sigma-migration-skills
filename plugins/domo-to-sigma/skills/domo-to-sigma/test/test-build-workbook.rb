@@ -81,15 +81,19 @@ puts "== symbol line preserves source point markers =="
 symbol_line = build_element({
   'id' => 'c3-line', 'title' => 'Sales by Month',
   'chartType' => 'badge_symbolline', 'sigmaKindHint' => 'line-chart',
+  'dateGrain' => { 'column' => 'month', 'dateTimeElement' => 'MONTH' },
   'groupBy' => ['month'],
   'columns' => [
-    { 'column' => 'month', 'mapping' => 'ITEM' },
+    { 'column' => 'month', 'mapping' => 'ITEM', 'calendar' => true },
     { 'column' => 'sales_amount', 'aggregation' => 'SUM', 'mapping' => 'SERIES' }
   ]
 }, {})
 eq(symbol_line.dig('lineAreaStyle', 'points'),
    { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 },
    'badge_symbolline emits released lineAreaStyle point markers')
+eq(symbol_line['columns'].first['format'],
+   { 'kind' => 'datetime', 'formatString' => '%b %y' },
+   'calendar axes use compact source-like month labels')
 
 puts "== visual roles: aggregated XTIME is a measure, plain XTIME is a dimension =="
 dims, measures = split_cols({

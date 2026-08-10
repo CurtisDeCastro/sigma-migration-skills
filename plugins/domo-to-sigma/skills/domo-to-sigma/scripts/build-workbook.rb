@@ -589,6 +589,11 @@ end
 def build_scatter_chart(card, dims, meas)
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  dims.each_with_index do |source, i|
+    if source['calendar'] || source['column'].to_s == card.dig('dateGrain', 'column').to_s
+      dcols[i]['format'] = { 'kind' => 'datetime', 'formatString' => '%b %y' }
+    end
+  end
   meas.each_with_index do |source, i|
     if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
       mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$.3~s' }
@@ -736,11 +741,20 @@ def build_axis_chart(card, kind)
   if xcol
     xa = { 'columnId' => dcols[xidx]['id'], 'format' => AXIS_OFF }
     if kind == 'bar-chart' && !HORIZONTAL_CHART_TYPES.include?(ct)
-      xa['format'] = {
-        'marks' => 'none',
-        'labels' => { 'fontSize' => 9, 'labelAngle' => 0,
-                      'allowLongerLabels' => true }
-      }
+      time_axis = xcol['calendar'] || card['dateGrain'].is_a?(Hash)
+      xa['format'] = if time_axis
+                       {
+                         'marks' => 'none',
+                         'labels' => { 'fontSize' => 7, 'labelAngle' => -45,
+                                       'allowLongerLabels' => true }
+                       }
+                     else
+                       {
+                         'marks' => 'none',
+                         'labels' => { 'fontSize' => 9, 'labelAngle' => 0,
+                                       'allowLongerLabels' => true }
+                       }
+                     end
     end
     # Sort by the first measure if the card ordered by a measure, OR if this is
     # the badge_treemap degradation (no native treemap kind — see
