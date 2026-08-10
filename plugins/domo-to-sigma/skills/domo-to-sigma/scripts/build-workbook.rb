@@ -58,6 +58,7 @@ $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
 $chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
 $plugin_source_elements = [] # hidden live sources for hosted no-native plugin visuals
 $kpi_verification_elements = [] # raw-value twins when visible KPI display is scaled/formatted
+$chart_verification_elements = [] # raw-value twins when visible axes are display-scaled
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -499,6 +500,36 @@ def apply_kpi_display_override!(card, kpi)
   # parity/source pickers so the raw hidden twin is the measured element.
   kpi['visibleAsSource'] = false
   kpi
+end
+
+def apply_chart_axis_override!(card, element)
+  path = File.join(OUT, 'chart-axis-overrides.json')
+  all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  rule = all && all[card['id'].to_s]
+  return element unless rule.is_a?(Hash) && rule['scale'].to_f.nonzero?
+  measure_ids = Array(element.dig('yAxis', 'columnIds'))
+  return element if measure_ids.empty?
+
+  raw = Marshal.load(Marshal.dump(element))
+  raw['id'] = "#{element['id']}-verify"
+  raw['name'] = "#{element['name']} (Parity)"
+  $chart_verification_elements << raw
+
+  decimals = rule['decimals'].to_i
+  Array(element['columns']).each do |column|
+    next unless measure_ids.include?(column['id'])
+    column['formula'] = "(#{column['formula']}) / #{rule['scale'].to_f}"
+    column['format'] = {
+      'kind' => 'number',
+      'formatString' => "#{rule['prefix']},.#{decimals}f",
+      'suffix' => rule['suffix'].to_s
+    }
+  end
+  element['yAxis']['format'] = {
+    'marks' => 'none', 'labels' => { 'fontSize' => 9 }
+  }
+  element['visibleAsSource'] = false
+  element
 end
 
 # Released native progress/ring element for a grounded Domo filled gauge. Domo
@@ -2175,6 +2206,7 @@ def build_element_body(card, overrides)
     el = apply_card_filters!(card, el)
     el = apply_card_date_window!(card, el)
   end
+  el = apply_chart_axis_override!(card, el) if el
 
   if companion
     if el
@@ -2374,14 +2406,15 @@ if $PROGRAM_NAME == __FILE__
              JSON.pretty_generate('pages' => out_pages,
                                   'data_elements' => $sub_masters.values + $chart_helpers +
                                                      $plugin_source_elements +
-                                                     $kpi_verification_elements,
+                                                     $kpi_verification_elements +
+                                                     $chart_verification_elements,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s), #{$chart_verification_elements.size} chart parity twin(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."
