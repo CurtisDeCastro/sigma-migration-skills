@@ -183,9 +183,24 @@ def _textbox_body(visual):
     objs = visual.get("objects", {})
     for key in ("general", "text"):
         for item in objs.get(key, []):
-            t = item.get("properties", {}).get("text", {}).get("expr", {}).get("Literal", {}).get("Value")
+            props = item.get("properties", {})
+            t = props.get("text", {}).get("expr", {}).get("Literal", {}).get("Value")
             if t:
                 return t.strip("'")
+            # Modern PBIR textboxes store rich text as paragraphs[].textRuns[]
+            # instead of a scalar properties.text literal. Preserve paragraph
+            # boundaries so the builder can promote a title + subtitle together.
+            lines = []
+            for paragraph in props.get("paragraphs", []):
+                line = "".join(
+                    run.get("value", "")
+                    for run in paragraph.get("textRuns", [])
+                    if isinstance(run, dict)
+                ).strip()
+                if line:
+                    lines.append(line)
+            if lines:
+                return "\n".join(lines)
     return None
 
 

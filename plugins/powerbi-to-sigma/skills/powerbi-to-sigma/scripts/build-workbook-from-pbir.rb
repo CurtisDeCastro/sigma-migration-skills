@@ -1416,17 +1416,32 @@ def prepare_drill_control!(el, rec, fields, masters, master, active_qr, active_c
   end
 end
 
-def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_column_id)
+def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_column_id,
+                            source_column_id = nil)
   return if legend_qr.nil? || target_column_id.nil? || rec['legend'] == false
   # Sigma legend controls require a categorical color target and do not support
   # waterfall charts. Waterfall splitBy keeps its chart-local legend instead.
   return unless %w[bar-chart line-chart area-chart combo-chart scatter-chart
                    pie-chart donut-chart].include?(el['kind'])
 
+  # Pie/donut legends are presentation-first and already render in-panel in
+  # Sigma. A separate legend control consumes chart canvas height and shrinks the
+  # ring dramatically, so keep these chart-local. Cartesian legends retain the
+  # interactive companion control below.
+  if %w[pie-chart donut-chart].include?(el['kind'])
+    el['legend'] = { 'visibility' => 'shown' }
+    return
+  end
+
   fs = field_spec(legend_qr, fields, master)
   master_rec = master && masters[master]
-  source_col = master_rec && match_master_column(master_rec, qr_leaf(legend_qr),
-                                                  legend_qr.to_s.split('.').first)
+  source_col =
+    if source_column_id
+      Array(master_rec && master_rec['columns']).find { |c| c['id'] == source_column_id }
+    else
+      master_rec && match_master_column(master_rec, qr_leaf(legend_qr),
+                                        legend_qr.to_s.split('.').first)
+    end
   if source_col && fs['master'] == master
     el['_legend_control'] = {
       'sourceColumnId' => source_col['id'],
@@ -1560,17 +1575,17 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
 
   # Report-build hardening: in page-base mode every visual sources the PAGE's one
   # base master (forced_master) so a single control target propagates to all —
-  # but only when at least one of the visual's own fields resolves on that base
-  # (else a genuinely different-fact visual would lose all its data; it keeps its
-  # own master and is surfaced as out-of-scope for the page control instead).
-  resolves_on = lambda do |m|
-    (rec['bindings'] || {}).values.flatten.compact.any? do |qr|
-      fs = field_spec(qr, fields)
-      fs['master'] == m || Array(fs['alts']).any? { |a| a['master'] == m }
-    end
+  # but only when ALL of the visual's fields resolve there. A partial match must
+  # retain per-visual master selection or a specialized grouped series (such as
+  # prior-year revenue) is silently dropped.
+  bound_qrs = (rec['bindings'] || {}).values.flatten.compact
+  masters_for = lambda do |qr|
+    fs = field_spec(qr, fields)
+    ([fs['master']] + Array(fs['alts']).map { |a| a['master'] }).compact.uniq
   end
   master =
-    if forced_master && masters[forced_master] && resolves_on.call(forced_master)
+    if forced_master && masters[forced_master] &&
+       PbiReportBuild.all_fields_resolve_on?(bound_qrs, forced_master, masters_for)
       forced_master
     else
       visual_master(rec, fields)
@@ -2203,19 +2218,49 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     # the whole categoricalScheme on donut/pie (per-element color.scheme is dropped
     # there — theme palette is the only lever). Coalescing null -> "(Blank)" both
     # matches PBI's label and sorts ahead of letters ("(" < "A"), so every slice
-    # gets the same color PBI gave it. Only wrap a bare column ref.
+    # gets the same color PBI gave it. Materialize the coalesce on the workbook
+    # master when possible: Sigma otherwise preserves the source column's null
+    # color lineage and renders the dominant bucket gray/"Others" even though the
+    # chart-level display formula reads "(Blank)".
     dim_ref = dfs['ref']
-    dim_ref = %(Coalesce(#{dim_ref}, "(Blank)")) if dim_ref.to_s =~ /\A\[[^\]]+\]\z/
+    blank_safe_source_id = nil
+    if dim_ref.to_s =~ /\A\[[^\]]+\]\z/ && master && masters[master]
+      master_rec = masters[master]
+      source_col = match_master_column(master_rec, qr_leaf(dim), dim.to_s.split('.').first)
+      if source_col && source_col['formula']
+        blank_safe_source_id = "#{source_col['id']}-blank"
+        blank_name = "#{source_col['name']} (Blank-safe)"
+        unless Array(master_rec['columns']).any? { |c| c['id'] == blank_safe_source_id }
+          master_rec['columns'] << {
+            'id' => blank_safe_source_id,
+            'formula' => %(Coalesce(#{source_col['formula']}, "(Blank)")),
+            'name' => blank_name
+          }
+        end
+        dim_ref = "[#{master_rec['id']}/#{blank_name}]"
+      else
+        dim_ref = %(Coalesce(#{dim_ref}, "(Blank)"))
+      end
+    end
     cols << { 'id' => dcid, 'formula' => dim_ref, 'name' => qr_leaf(dim, 'Dim') }
     cv = { 'id' => vcid, 'formula' => measure_formula(vfs), 'name' => qr_leaf(val, 'Value') }
     apply_fmt(cv, val, fields, vfmts)
     cols << cv
     qr_cids[dim] = dcid if dim
     qr_cids[val] = vcid if val
-    el['color'] = { 'id' => dcid }
+    # Donut/pie colors come from the workbook categoricalScheme and are assigned
+    # positionally. Default Sigma ordering is value-descending; Power BI's
+    # categorical palette follows the category order (with "(Blank)" first).
+    # Seed that order here. An explicit source visual sort, when present, is
+    # applied later by apply_sort and overrides this default.
+    el['color'] = {
+      'id' => dcid,
+      'sort' => { 'by' => dcid, 'direction' => 'ascending' }
+    }
     el['value'] = { 'id' => vcid }
     prepare_drill_control!(el, rec, fields, masters, master, dim, dcid, cols)
-    prepare_legend_control!(el, rec, fields, masters, master, dim, dcid)
+    prepare_legend_control!(el, rec, fields, masters, master, dim, dcid,
+                            blank_safe_source_id)
     # value labels on pie/donut slices — honor an explicit PBI labels-off signal
     # (bead n9u9); default (nil/absent) keeps the labels shown as before.
     unless rec['data_labels'] == false
@@ -2885,13 +2930,32 @@ pages_xml = signals['pages'].map do |pg|
     if hdr_text_id
       hdr_el = page_spec && page_spec['elements'].find { |e| e['id'] == hdr_text_id }
       ttl = src_rec.call(hdr_text_id)['text'].to_s.strip
-      hdr_el['body'] = %(# <span style="color: #FFFFFF">#{ttl}</span>) if hdr_el
+      hdr_el['body'] = SigmaLayout.header_text_el(hdr_text_id, ttl)['body'] if hdr_el
       children << SigmaLayout.header_band_xml(hdr_id, hdr_text_id)
     else
       ttl = SigmaLayout.resolve_header_title(pg['page_title'], opts[:source_title], opts[:name]) || 'Dashboard'
       txt_id = "band-#{page_id}-hdrtext"
       extra << SigmaLayout.header_text_el(txt_id, ttl)
       children << SigmaLayout.header_band_xml(hdr_id, txt_id)
+    end
+
+    # A generated Sigma legend control represents the source chart's in-panel
+    # legend, not a page filter. Keep it beside its chart in one container so it
+    # does not become a full-width control strip above the dashboard.
+    legend_pairs = {}
+    Array(page_spec && page_spec['elements']).each do |legend|
+      next unless legend['kind'] == 'control' && legend['controlType'] == 'legend'
+      chart_id = legend.dig('targets', 0, 'source', 'elementId')
+      chart_item = items.find { |it| it[0] == chart_id }
+      legend_item = items.find { |it| it[0] == legend['id'] }
+      next unless chart_item && legend_item
+
+      container_id = "band-#{page_id}-legend-#{chart_id}"
+      items = items.reject { |it| it[0] == chart_id || it[0] == legend['id'] }
+      items << [container_id, chart_item[1], chart_item[2], chart_item[3], chart_item[4]]
+      kind_of[container_id] = 'container'
+      extra << SigmaLayout.container_el(container_id)
+      legend_pairs[container_id] = { 'chart' => chart_id, 'legend' => legend['id'] }
     end
 
     # 2) bands from the SOURCE rows, columns from the SOURCE x-positions
@@ -2961,7 +3025,22 @@ pages_xml = signals['pages'].map do |pg|
       cursor += band_h
     end
     page_spec['elements'] = page_spec['elements'] + extra if page_spec
-    inner = les.map { |i| SigmaLayout.le(i[0], i[1], i[2], i[3], i[4]) }.join("\n")
+    inner = les.map do |i|
+      pair = legend_pairs[i[0]]
+      if pair
+        nested = [
+          # Let the chart size from the full panel. The legend occupies the
+          # rightmost quarter as an overlay; reserving that width made Sigma
+          # shrink six-slice donuts to an unreadably small ring.
+          SigmaLayout.le(pair['chart'], 1, 25, 1, 9),
+          SigmaLayout.le(pair['legend'], 19, 25, 1, 9)
+        ].join("\n")
+        SigmaLayout.gc(i[0], i[1], i[2], i[3], i[4], nested,
+                       row_template: 'repeat(8, 1fr)')
+      else
+        SigmaLayout.le(i[0], i[1], i[2], i[3], i[4])
+      end
+    end.join("\n")
     next SigmaLayout.page_xml(page_id, children.join("\n"), inner)
   end
 
@@ -3055,7 +3134,7 @@ pages_xml = signals['pages'].map do |pg|
     items = items.reject { |i| i[0] == hdr_eid }
     next nil if items.empty?
     hdr_el = page_spec['elements'].find { |e| e['id'] == hdr_eid }
-    hdr_el['body'] = %(# <span style="color: #FFFFFF">#{hdr_vis['text']}</span>) if hdr_el
+    hdr_el['body'] = SigmaLayout.header_text_el(hdr_eid, hdr_vis['text'])['body'] if hdr_el
     xml, extra = banded_page(page_id, items, header_el: hdr_eid)
   else
     # No promotable source title — header text falls back, in priority order,
@@ -3121,9 +3200,7 @@ document = {
     'theme' => {
       'name' => 'Light',
       'overrides' => theme_overrides
-    },
-    # PBI page tabs/pageNavigator semantics map to Sigma workbook navigation.
-    'navigation' => { 'pageTabsInViewMode' => 'shown' }
+    }
   }
 }
 

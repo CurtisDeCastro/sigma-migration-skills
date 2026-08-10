@@ -119,6 +119,21 @@ check(epb._role_bindings(pbir_hierarchy) == {"Category": ["D.Month"]},
 check(epb._drill_signal(pbir_hierarchy) == {
           "role": "Category", "levels": ["D.Year", "D.Month"], "active": "D.Month"
       }, "PBIR extractor separately preserves full hierarchy for native drill")
+rich_textbox = {
+    "objects": {
+        "general": [{
+            "properties": {
+                "paragraphs": [
+                    {"textRuns": [{"value": "Retail Performance & Trends"}]},
+                    {"textRuns": [{"value": "Net revenue, profitability, and order mix"}]},
+                ]
+            }
+        }]
+    }
+}
+check(epb._textbox_body(rich_textbox) ==
+      "Retail Performance & Trends\nNet revenue, profitability, and order mix",
+      "PBIR rich-text paragraphs preserve title and subtitle")
 
 print(f"\n{'ALL PASS' if not fails else f'{len(fails)} FAILURE(S)'}")
 for f in fails:

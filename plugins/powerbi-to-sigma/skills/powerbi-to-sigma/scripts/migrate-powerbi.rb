@@ -1463,6 +1463,7 @@ conv_elements.each do |cel|
   hf = headline.call(pick['name'])
   ref['formula'] = hf if hf
   orig = ti_orig_table[mname]
+  route_table = PbiTimeIntelRoute.routing_table(orig, ti_fact)
   # route both the original-table queryRef and a self-named queryRef so whichever
   # form the PBIR binding used resolves to this element.
   field_map["#{orig}.#{mname}"] = ref if orig
@@ -1494,10 +1495,10 @@ conv_elements.each do |cel|
     valleaf  = base_val['name']
     valnorm  = valleaf.gsub(/\s+/, '').downcase
     all_measures.each do |t2, m2, e2|
-      next unless t2 == orig
+      next unless t2 == route_table
       enorm = e2.to_s.gsub(/\s+/, '').downcase
       agg_of_val = enorm =~ /(sum|average|avg|min|max|count|distinctcount)\([^)]*#{Regexp.escape(valnorm)}/
-      reg_alt.call("#{orig}.#{m2}", valleaf) if agg_of_val || m2 == valleaf
+      reg_alt.call("#{route_table}.#{m2}", valleaf) if agg_of_val || m2 == valleaf
     end
   end
   # The grouped element carries period dimension column(s) (Year and/or Month).
@@ -1506,7 +1507,7 @@ conv_elements.each do |cel|
   # date-dim queryRef forms (the calc-table date dim is the usual binding source).
   period_cols.each do |pc|
     %w[DATE_DIM DimDate DimMonth Date].each { |dt| reg_alt.call("#{dt}.#{pc['name']}", pc['name']) }
-    reg_alt.call("#{orig}.#{pc['name']}", pc['name'])
+    reg_alt.call("#{route_table}.#{pc['name']}", pc['name'])
   end
 end
 
@@ -1517,18 +1518,11 @@ end
 # the chart binds, but no field_map entry -> source:{} -> POST fails. Route every
 # remaining time-intel-shaped measure to the best-matching time-intel column.
 if ti_elements.any?
-  ti_re = /\b(SAMEPERIODLASTYEAR|TOTALYTD|TOTALQTD|TOTALMTD|DATESYTD|DATEADD|PARALLELPERIOD|PREVIOUSYEAR|PREVIOUSMONTH|PREVIOUSQUARTER)\b/i
   all_measures.each do |tbl, mname, expr|
     next if field_map.key?("#{tbl}.#{mname}")
-    e = expr.to_s
     # time-intel-shaped: a DAX time-intel function, OR a YoY/growth name, OR a
     # hand-rolled MAX(...)/ALL(...) prior-year ratio.
-    shape =
-      if e =~ ti_re then :generic
-      elsif mname =~ /YoY|Y\/Y|growth/i || e =~ /ALL\s*\([^)]*\[Year\]/i then :yoy
-      elsif mname =~ /\bYTD\b/i then :ytd
-      elsif mname =~ /\b(PY|Prior Year|Last Year|LY)\b/i then :prior
-      end
+    shape = PbiTimeIntelRoute.measure_shape(mname, expr)
     next unless shape
     # choose a target column across the emitted time-intel elements — but ONLY
     # those built from THIS measure's own fact. Cross-fact borrowing produced
@@ -1886,7 +1880,9 @@ cols = (Sigma.request(:get, "/v2/workbooks/#{wb_id}/columns") rescue { 'entries'
 err_cols = (cols['entries'] || []).select { |c| c.dig('type', 'type') == 'error' }
 total_cols = (cols['entries'] || []).size
 wb_pairs = Sigma::CodeRep.workbook_elements_with_pages(wb_rb)
-chart_els = wb_pairs.select { |_el, page| page && page['id'] != 'page-data' }.map(&:first)
+chart_pairs = wb_pairs.select { |_el, page| page && page['id'] != 'page-data' }
+chart_els = chart_pairs.map(&:first)
+chart_pages = chart_pairs.filter_map { |_el, page| page['id'] }.uniq
 
 # (2) warehouse-vs-snapshot compare (bead fmte). For every table the preflight
 # snapshotted, export the matching Data-page master element (Sigma = LIVE

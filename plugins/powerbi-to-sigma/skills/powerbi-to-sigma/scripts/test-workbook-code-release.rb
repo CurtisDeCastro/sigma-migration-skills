@@ -6,6 +6,8 @@ require 'json'
 require 'open3'
 require 'tmpdir'
 require 'rbconfig'
+require_relative 'lib/layout_lint'
+require_relative 'lib/layout'
 
 BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
 ASSEMBLE = File.join(__dir__, 'build-workbook-spec.rb')
@@ -64,7 +66,9 @@ signals = {
       visual.call('nav', 'pageNavigator', 'navigation', 'text', {}, 'Pages', 450),
       visual.call('ctl', 'slicer', 'control', 'control', { 'Values' => ['S.Region'] }, 'Region', 600),
       visual.call('tbl', 'tableEx', 'table', 'table',
-                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 750)
+                  { 'Values' => ['S.Region', 'S.Amount'] }, 'Details', 750),
+      visual.call('donut', 'donutChart', 'donut', 'chart',
+                  { 'Category' => ['S.Region'], 'Y' => ['S.Amount'] }, 'Regional Share', 900)
     ]
   }]
 }
@@ -116,14 +120,44 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
        legend.dig('targets', 0, 'source', 'elementId') == bar['id'] &&
        legend.dig('targets', 0, 'columnId') == bar.dig('color', 'column') &&
        bar['legend'] == { 'visibility' => 'hidden' })
+  legend_pair = bar && legend &&
+                doc['layout'].match?(
+                  %r{<Container elementId="band-page-p1-legend-#{Regexp.escape(bar['id'])}"[^>]*gridTemplateRows="repeat\(8, 1fr\)"[^>]*>.*?<Element elementId="#{Regexp.escape(bar['id'])}" gridColumn="1 / 25"[^>]*/>.*?<Element elementId="#{Regexp.escape(legend['id'])}" gridColumn="19 / 25"[^>]*/>}m
+                )
+  ok('visible legend control stays beside and fills its source chart panel', legend_pair)
+  donut = doc['elements'].find { |e| e['kind'] == 'donut-chart' }
+  ok('donut category sort pins the positional Power BI palette',
+     donut && donut.dig('color', 'sort') == {
+       'by' => donut.dig('color', 'id'), 'direction' => 'ascending'
+     })
+  donut_dim = donut && donut['columns'].find { |c| c['id'] == donut.dig('color', 'id') }
+  blank_safe = doc['elements'].find { |e| e['id'] == 'master-s' }
+                              &.fetch('columns', [])
+                              &.find { |c| c['id'] == 'm-region-blank' }
+  donut_legend = doc['elements'].find do |e|
+    e['controlType'] == 'legend' &&
+      e.dig('targets', 0, 'source', 'elementId') == donut&.fetch('id', nil)
+  end
+  ok('donut blank bucket is materialized on the master to avoid gray Others',
+     blank_safe &&
+       blank_safe['formula'] == 'Coalesce([S/Region], "(Blank)")' &&
+       donut_dim&.fetch('formula', nil) == '[master-s/Region (Blank-safe)]')
+  ok('donut keeps its legend chart-local so the ring fills the panel',
+     donut_legend.nil? && donut['legend'] == { 'visibility' => 'shown' })
   progress = doc['elements'].find { |e| e['kind'] == 'progress' }
   ok('gauge uses native ring progress', progress && progress['shape'] == 'ring' &&
      progress['mode'] == 'value' && progress['value'].to_s.include?('master-s'))
   nav = doc['elements'].find { |e| e['kind'] == 'navigation' }
   ok('page navigator uses native auto navigation', nav && nav['mode'] == 'auto')
+  ok('feature-gated workbook navigation setting is omitted',
+     !doc.fetch('settings', {}).key?('navigation'))
   ok('background and spacing survive', waterfall.dig('style', 'backgroundColor') == '#F8FAFC' &&
      doc.dig('settings', 'theme', 'overrides', 'colorOverrides', 'backgroundCanvas') == '#EEF2F7' &&
      doc.dig('settings', 'theme', 'overrides', 'space', 'unit') == 'small')
+  multiline_header = SigmaLayout.header_text_el('header', "Title\nSubtitle")
+  ok('multiline source header preserves a muted subtitle',
+     multiline_header['body'].include?('# <span style="color: #FFFFFF">Title</span>') &&
+       multiline_header['body'].include?('<span style="color: #94A3B8">Subtitle</span>'))
 
   control = doc['elements'].find { |e| e['controlType'] == 'list' }
   target_ids = Array(control && control['filters']).filter_map { |f| f.dig('source', 'elementId') }
@@ -139,6 +173,13 @@ Dir.mktmpdir('pbi-workbook-code') do |dir|
 
   _vo, ve, vst = Open3.capture3(RUBY, VALIDATE, '--type', 'workbook', out)
   ok('flat workbook passes validate-spec', vst.success? || (warn(ve) && false))
+  layout_violations = LayoutLint.lint(envelope)
+  legend_ids = doc['elements'].select { |e| e['controlType'] == 'legend' }.flat_map do |e|
+    [e['id'], e.dig('targets', 0, 'source', 'elementId')]
+  end.compact
+  legend_violations = layout_violations.select { |v| legend_ids.any? { |id| v.include?(id) } }
+  ok('chart-adjacent legend container passes layout lint',
+     legend_violations.empty? || (warn(legend_violations.join("\n")) && false))
 end
 
 Dir.mktmpdir('pbi-legacy-assembler') do |dir|

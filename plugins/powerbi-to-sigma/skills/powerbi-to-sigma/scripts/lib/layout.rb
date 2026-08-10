@@ -29,10 +29,10 @@ module SigmaLayout
     candidates.map { |c| c.to_s.strip }.find { |c| !c.empty? && !generic_title?(c) }
   end
 
-  def gc(eid, c0, c1, r0, r1, inner)
+  def gc(eid, c0, c1, r0, r1, inner, row_template: 'auto')
     "<Container elementId=\"#{eid}\" type=\"grid\" " \
     "gridColumn=\"#{c0} / #{c1}\" gridRow=\"#{r0} / #{r1}\" " \
-    "gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n#{inner}\n</Container>"
+    "gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"#{row_template}\">\n#{inner}\n</Container>"
   end
 
   def le(eid, c0, c1, r0, r1)
@@ -59,8 +59,13 @@ module SigmaLayout
 
   # Spec-side page-title text element (white text over the dark header band).
   def header_text_el(id, title)
+    lines = title.to_s.lines.map(&:strip).reject(&:empty?)
+    heading = lines.shift.to_s
+    subtitle = lines.join(' ')
+    body = %(# <span style="color: #FFFFFF">#{heading}</span>)
+    body += %(\n<span style="color: #94A3B8">#{subtitle}</span>) unless subtitle.empty?
     { 'id' => id, 'kind' => 'text',
-      'body' => %(# <span style="color: #FFFFFF">#{title}</span>) }
+      'body' => body }
   end
 
   # Header band XML: dark full-width container at the top of the page wrapping
