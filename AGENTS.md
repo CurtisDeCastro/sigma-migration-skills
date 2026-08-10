@@ -55,7 +55,7 @@ Maturity labels (`gold` / `live` / `foundation` / `scaffold`) are defined in
 | Scope/assess a Sisense instance | `sisense-assessment` | scaffold | `plugins/sisense-to-sigma/skills/sisense-assessment/` |
 | Convert a GoodData Cloud / .CN workspace (LDM + MAQL + insights + dashboards) → Sigma | `gooddata-to-sigma` | live | `plugins/gooddata-to-sigma/skills/gooddata-to-sigma/` |
 | Scope/assess a GoodData workspace | `gooddata-assessment` | live | `plugins/gooddata-to-sigma/skills/gooddata-assessment/` |
-| Convert a Domo dashboard (DataSets + Beast Modes + cards) → Sigma | `domo-to-sigma` | live | `plugins/domo-to-sigma/skills/domo-to-sigma/` |
+| Convert a Domo dashboard (DataSets + Beast Modes + cards) → Sigma | `domo-to-sigma` | gold | `plugins/domo-to-sigma/skills/domo-to-sigma/` |
 | Scope/assess a Domo instance | `domo-assessment` | foundation | `plugins/domo-to-sigma/skills/domo-assessment/` |
 | Land Domo API/upload/sample DataSets in Snowflake (before converting) | `domo-import-to-snowflake` | foundation | `plugins/domo-to-sigma/skills/domo-import-to-snowflake/` |
 | Convert a Hex project (SQL/METRIC cells, EXPLORE charts, app layout) → Sigma | `hex-to-sigma` | live | `plugins/hex-to-sigma/skills/hex-to-sigma/` |
