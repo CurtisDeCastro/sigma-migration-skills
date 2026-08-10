@@ -618,7 +618,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   minexp      = 0
   prefix      = "syn-#{page['id']}"
 
-  header_zones = structure[:header]
+  # Screenshot-transcribed collection headers are section separators, never
+  # page-title chrome. Keep them in the content flow even when the first one
+  # sits at y≈0; otherwise Salesforce + Google Analytics get packed side by
+  # side into the single page-header band and every later section shifts.
+  header_zones = Array(structure[:header]).reject {
+    |z| z['id'].to_s.start_with?('observed-section-')
+  }
   kpi_rows     = structure[:kpi_rows]
   rail         = structure[:sidebar]
 
