@@ -1074,5 +1074,24 @@ latest_col = latest['columns'].find { |c| c['id'] == latest_filter['columnId'] }
 ok(latest_col['formula'].include?('DateTrunc("quarter"'),
    'latest-bucket predicate uses the source calendar grain')
 
+puts "== screenshot-observed sections become real workbook text elements =="
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'layout-observed.json'), JSON.generate({
+    'a' => { 'x' => 0, 'y' => 0.4, 'w' => 0.2, 'h' => 0.1, 'section' => 'Second' },
+    'b' => { 'x' => 0, 'y' => 0.1, 'w' => 0.2, 'h' => 0.1, 'section' => 'First' },
+    'c' => { 'x' => 0.2, 'y' => 0.4, 'w' => 0.2, 'h' => 0.1, 'section' => 'Second' },
+  }))
+  stub_const(:OUT, dir) do
+    section_els = observed_section_elements([{ 'id' => 'a' }, { 'id' => 'b' }, { 'id' => 'c' }])
+    eq(section_els.map { |e| e['id'] },
+       %w[text-observed-section-0 text-observed-section-1],
+       'section ids match build-domo-layout observed-section ids')
+    eq(section_els.map { |e| e['name'] }, %w[First Second],
+       'section text follows screenshot y-order, not discovery card order')
+    eq(section_els.map { |e| e['body'] }, ['### First', '### Second'],
+       'each observed section is visible authored text')
+  end
+end
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

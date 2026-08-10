@@ -695,7 +695,12 @@ def build_page_synthesized(dashboard, page, opts, structure)
   resolve_zone_el = lambda do |z|
     case z['kind'].to_s
     when 'chart'
-      el = els_by_name[zone_el_name(z, opts[:renames])]
+      # Screenshot-observed layouts can carry the exact workbook element id
+      # (notably companion KPIs whose human labels repeat: "Change over 7
+      # Days", "New Visits in Period"). Prefer that exact join before the
+      # legacy name fallback, which can map every duplicate label to one tile
+      # and strand the others in the generic bottom band.
+      el = els_by_id[z['id'].to_s] || els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]

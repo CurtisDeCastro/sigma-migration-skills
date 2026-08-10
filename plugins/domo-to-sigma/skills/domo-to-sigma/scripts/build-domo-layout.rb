@@ -304,10 +304,10 @@ def build_dashboard_with_observed(name, cards, observed, kind_map)
 
   # Optional 'section' grouping (schema note above): one thin heading zone per
   # named group, at that group's own topmost observed y — no reflow.
-  sections_seen = []
-  observed_cards.each do |c|
-    s = observed[c['id'].to_s]['section']
-    sections_seen << s if s && !sections_seen.include?(s)
+  sections_seen = observed_cards.map { |c| observed[c['id'].to_s]['section'] }.compact.uniq
+                                .sort_by do |sec|
+    observed_cards.select { |c| observed[c['id'].to_s]['section'] == sec }
+                  .map { |c| observed[c['id'].to_s]['y'].to_f }.min
   end
   hdr_zones = sections_seen.each_with_index.map do |sec, i|
     members_y = observed_cards.select { |c| observed[c['id'].to_s]['section'] == sec }

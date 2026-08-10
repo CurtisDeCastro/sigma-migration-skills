@@ -1848,6 +1848,24 @@ def page_layout_elements(page)
   end
 end
 
+def observed_section_elements(cards)
+  path = File.join(OUT, 'layout-observed.json')
+  observed = (JSON.parse(File.read(path)) rescue nil) if File.exist?(path)
+  return [] unless observed.is_a?(Hash)
+  sections = Array(cards).filter_map do |card|
+    rec = observed[card['id'].to_s]
+    next unless rec.is_a?(Hash) && !rec['section'].to_s.strip.empty?
+    [rec['section'].to_s, rec['y'].to_f]
+  end
+  sections.group_by(&:first).map { |name, members| [name, members.map(&:last).min] }
+          .sort_by(&:last).each_with_index.map do |(name, _y), i|
+    {
+      'id' => "text-observed-section-#{i}", 'kind' => 'text',
+      'name' => name, 'body' => "### #{name}",
+    }
+  end
+end
+
 if $PROGRAM_NAME == __FILE__
   cards = JSON.parse(File.read(File.join(OUT, 'cards.json'))) rescue []
   pages = JSON.parse(File.read(File.join(OUT, 'pages.json'))) rescue []
@@ -1866,6 +1884,7 @@ if $PROGRAM_NAME == __FILE__
     els += build_controls(pcards, master_ds)
     source_page = pages.find { |page| page_name(page) == pname }
     els += page_layout_elements(source_page || {})
+    els += observed_section_elements(pcards)
     if source_page&.dig('_pageAnalyzerSettings', 'showFilterBar')
       warn_card(pcards.first || { 'id' => source_page['id'], 'title' => pname },
                 'Domo page filter-bar chrome is present, but no exported filter definitions were captured; ' \
