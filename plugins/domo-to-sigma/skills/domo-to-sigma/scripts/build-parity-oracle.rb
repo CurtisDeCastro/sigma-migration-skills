@@ -423,8 +423,9 @@ charts.each do |c|
   # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
   # mutates a local the emitted hash no longer references, which is exactly the
   # bug this comment exists to stop recurring.
-  exp_rows, canon_n = canonicalise_dim(exp_rows)
-  canonicalised += canon_n
+  exp_rows, expected_canon_n = canonicalise_dim(exp_rows)
+  act_rows, actual_canon_n = canonicalise_dim(act_rows)
+  canonicalised += expected_canon_n + actual_canon_n
 
   verified << {
     'chart'          => name,
