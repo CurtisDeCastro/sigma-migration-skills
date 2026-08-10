@@ -992,6 +992,26 @@ def build_table(card)
       'id' => "source-cap-#{el['id']}", 'columnId' => helper['id'],
       'kind' => 'number-range', 'max' => display_rule['max'].to_f
     }
+    widths = display_rule['columnWidths']
+    if widths.is_a?(Hash)
+      (dims + meas).zip(cols).each do |source, column|
+        width = widths[source['column'].to_s]
+        next unless width.to_f.positive?
+        column['style'] = (column['style'] || {}).merge(
+          'width' => width.to_f, 'textWrap' => 'clip'
+        )
+      end
+    end
+    if display_rule['fontSize'].to_f.positive?
+      font_size = display_rule['fontSize'].to_f
+      el['tableStyle'] = {
+        'cellSpacing' => 'extra-small',
+        'textStyles' => {
+          'columnHeader' => { 'fontSize' => font_size },
+          'cell' => { 'fontSize' => font_size }
+        }
+      }
+    end
   end
   el
 end
