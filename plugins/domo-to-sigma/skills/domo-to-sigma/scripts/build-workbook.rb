@@ -727,6 +727,11 @@ def build_axis_chart(card, kind)
          dims.first
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  dims.each_with_index do |source, i|
+    if source['calendar'] || source['column'].to_s == card.dig('dateGrain', 'column').to_s
+      dcols[i]['format'] = { 'kind' => 'datetime', 'formatString' => '%b %y' }
+    end
+  end
   meas.each_with_index do |source, i|
     if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
       mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$.3~s' }
