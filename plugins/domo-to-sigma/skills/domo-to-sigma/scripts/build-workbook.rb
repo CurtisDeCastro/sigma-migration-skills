@@ -480,7 +480,6 @@ def apply_kpi_display_override!(card, kpi)
   rule = all && all[card['id'].to_s]
   return kpi unless rule.is_a?(Hash)
   kpi['value']['fontSize'] = rule['fontSize'].to_i if rule['fontSize'].to_i.positive?
-  kpi['description'] = rule['description'].to_s unless rule['description'].to_s.empty?
   return kpi unless rule['scale'].to_f.nonzero?
   raw = Marshal.load(Marshal.dump(kpi))
   raw['id'] = "#{kpi['id']}-verify"
