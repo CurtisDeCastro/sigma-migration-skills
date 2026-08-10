@@ -161,6 +161,8 @@ end
 
 canon_src = oracle_src[/^def canonicalise_dim\(rows\)\n.*?(?=^def max_date\(rows\))/m]
 ok(canon_src, 'extracted canonicalise_dim(rows) from build-parity-oracle.rb')
+month_abbr_src = oracle_src[/^MONTH_ABBR = .*?\.freeze\n/m]
+eval(month_abbr_src, TOPLEVEL_BINDING) if month_abbr_src && !defined?(MONTH_ABBR) # rubocop:disable Security/Eval
 eval(canon_src, TOPLEVEL_BINDING) if canon_src # rubocop:disable Security/Eval
 
 if canon_src
