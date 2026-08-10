@@ -340,9 +340,15 @@ def normalize_card(raw, card_id, card_meta: nil)
     # body columns — route through the identical by_id resolution (see
     # resolve_calc_ref) instead of copying f['column'] verbatim.
     calc_by_id = formulas_by_id(defn['formulas'])
+    # Prefer `operand` (the write-shape field Shape A already prefers) over
+    # `filterType`. Live Shape-B payloads often carry BOTH: the real operator
+    # in `operand` and an opaque/collapsed `filterType` (commonly "LEGACY").
+    # Preferring filterType made 7/20 live filters emit the wrong Sigma
+    # filter — including 3 as their exact inverse (NOT_IN → include).
     filters = Array(main['filters']).map do |f|
       { 'column' => resolve_calc_ref(f['column'], calc_by_id),
-        'operator' => f['filterType'] || f['operator'], 'values' => f['values'] }.compact
+        'operator' => f['operand'] || f['operator'] || f['filterType'],
+        'values' => f['values'] }.compact
     end
     {
       'id'                 => card_id,
