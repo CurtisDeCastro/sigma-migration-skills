@@ -73,6 +73,8 @@ eq(bar['kind'], 'bar-chart', '#7 bar card → bar-chart element (NOT table+dataB
 ok(bar['columns'].none? { |c| c['id'].to_s.start_with?('cf') }, 'no conditionalFormats/dataBars on a bar chart')
 eq(bar.dig('xAxis', 'format', 'marks'), 'none', '#8 x-axis gridlines off')
 eq(bar['yAxis']['format'], { 'marks' => 'none' }, '#8 y-axis gridlines off')
+eq(bar.dig('dataLabel', 'labelDisplay'), 'all',
+   'categorical bars preserve source value annotations')
 eq(bar['columns'][0]['formula'], '[Master/Store Region]', 'dimension references master')
 eq(bar['columns'][1]['formula'], 'Sum([Master/Sales Amount])', 'measure aggregated + master-ref')
 eq(bar['columns'][1]['name'], 'Sales', 'measure label uses Domo alias (fixes raw names #4)')
@@ -90,6 +92,8 @@ symbol_line = build_element({
 eq(symbol_line.dig('lineAreaStyle', 'points'),
    { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 },
    'badge_symbolline emits released lineAreaStyle point markers')
+eq(symbol_line.dig('dataLabel', 'labelDisplay'), 'endpoints',
+   'badge_symbolline preserves source endpoint annotations')
 
 puts "== visual roles: aggregated XTIME is a measure, plain XTIME is a dimension =="
 dims, measures = split_cols({

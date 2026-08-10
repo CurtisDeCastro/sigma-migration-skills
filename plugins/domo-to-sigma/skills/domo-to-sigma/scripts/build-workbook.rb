@@ -795,6 +795,11 @@ def build_axis_chart(card, kind)
                          'kind' => 'top-n', 'rankingFunction' => 'rank',
                          'mode' => 'top-n', 'rowCount' => 500 }]
     end
+    time_axis = xcol && (xcol['calendar'] || card['dateGrain'].is_a?(Hash))
+    el['dataLabel'] = {
+      'labels' => 'shown', 'labelDisplay' => (time_axis ? 'maximum' : 'all'),
+      'anchor' => 'auto', 'fontSize' => 8, 'valueFormat' => 'number'
+    }
   end
   if kind == 'line-chart' && ct == 'badge_symbolline'
     el['lineAreaStyle'] = {
@@ -809,6 +814,10 @@ def build_axis_chart(card, kind)
                       'allowLongerLabels' => true }
       }
     end
+    el['dataLabel'] = {
+      'labels' => 'shown', 'labelDisplay' => 'endpoints',
+      'clearance' => 'separated', 'fontSize' => 8
+    }
   end
   el
 end
