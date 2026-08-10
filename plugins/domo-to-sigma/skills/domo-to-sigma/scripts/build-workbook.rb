@@ -944,6 +944,7 @@ PLUGIN_VISUAL_MODE = {
   'badge_treemap' => 'treemap',
   'badge_word_cloud' => 'wordcloud',
   'badge_calendar' => 'calendar',
+  'badge_filledgauge' => 'gauge',
 }.freeze
 
 def plugin_config
@@ -1040,6 +1041,7 @@ def plugin_sql_source(card, mode)
   {
     'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
     'name' => "#{card['title']} (Direct Plugin Source)",
+    'visibleAsSource' => false,
     'source' => { 'kind' => 'sql', 'connectionId' => conn, 'statement' => sql },
     'columns' => [
       { 'id' => 'd-label', 'name' => (mode == 'calendar' ? 'Date' : col_label(dim)),
@@ -1051,11 +1053,86 @@ def plugin_sql_source(card, mode)
   }
 end
 
+def snowflake_aggregate(column)
+  agg = sigma_agg(column['aggregation'], column['distinct']).upcase
+  return "COUNT(DISTINCT #{sf_ident(column['column'])})" if agg == 'COUNTDISTINCT'
+  "#{agg}(#{sf_ident(column['column'])})"
+end
+
+def domo_formula_to_snowflake(formula)
+  sql = formula.to_s.gsub(/`([^`]+)`/) { sf_ident(Regexp.last_match(1)) }
+  sql.gsub!(/DATEDIFF\s*\(\s*current_date\(\)\s*,\s*("[^"]+")\s*\)/i,
+            "DATEDIFF('day', \\1, CURRENT_DATE())")
+  sql.gsub!(/Current_Date\(\)|current_date\(\)/i, 'CURRENT_DATE()')
+  sql
+end
+
+def plugin_gauge_source(card)
+  mapped = plugin_dataset_map[card['datasetId'].to_s]
+  return nil unless mapped.is_a?(Hash)
+  conn = mapped['connectionId'].to_s
+  path = %w[database schema table].map { |k| mapped[k].to_s }
+  return nil if conn.empty? || path.any?(&:empty?)
+  table = path.map { |part| sf_ident(part) }.join('.')
+  summary = card['summaryNumber'] || {}
+  percent = summary.dig('format', 'type').to_s.downcase.include?('percent')
+  source_formula = Array(card['cardFormulas']).find {
+    |formula| formula['id'].to_s == summary['beastModeId'].to_s
+  }&.dig('formula')
+  current = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'CURRENT' }
+  target = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'TARGET' }
+  actual_expr =
+    if percent && source_formula
+      domo_formula_to_snowflake(source_formula)
+    elsif current
+      snowflake_aggregate(current)
+    else
+      '0'
+    end
+  target_expr = percent ? '1' : (target ? snowflake_aggregate(target) : '1')
+  {
+    'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
+    'name' => "#{card['title']} (Gauge Plugin Source)",
+    'visibleAsSource' => false,
+    'source' => {
+      'kind' => 'sql', 'connectionId' => conn,
+      'statement' => "SELECT #{actual_expr} AS ACTUAL, #{target_expr} AS TARGET FROM #{table}",
+    },
+    'columns' => [
+      { 'id' => 'actual', 'name' => 'Actual', 'formula' => '[Custom SQL/ACTUAL]' },
+      { 'id' => 'target', 'name' => 'Target', 'formula' => '[Custom SQL/TARGET]' },
+    ],
+    'order' => %w[actual target],
+  }
+end
+
 def pluginize_visual(card, live_el)
   mode = PLUGIN_VISUAL_MODE[card['chartType'].to_s.downcase]
-  plugin_id = (mode == 'calendar' ? plugin_config['calendar_plugin_id'] :
-                                   plugin_config['visual_plugin_id']).to_s
+  plugin_id =
+    case mode
+    when 'calendar' then plugin_config['calendar_plugin_id']
+    when 'gauge' then plugin_config['gauge_plugin_id']
+    else plugin_config['visual_plugin_id']
+    end.to_s
   return nil unless mode && !plugin_id.empty? && live_el.is_a?(Hash)
+
+  if mode == 'gauge'
+    gauge_source = plugin_gauge_source(card)
+    return nil unless gauge_source
+    headline = live_el
+    headline['id'] = "#{eid(card)}-summary"
+    $companion_elements << headline
+    format = card.dig('summaryNumber', 'format', 'type').to_s.downcase.include?('percent') ? '.1%' : 'int'
+    plugin = {
+      'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
+      'pluginId' => plugin_id,
+      'config' => {
+        'source' => { 'kind' => 'element', 'elementId' => gauge_source['id'] },
+        'value' => 'actual', 'target' => 'target', 'format' => format,
+      },
+    }
+    return [plugin, [gauge_source]]
+  end
 
   parity_source = live_el
   parity_source['id'] = "#{eid(card)}-verify"

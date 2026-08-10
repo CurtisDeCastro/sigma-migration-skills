@@ -1128,7 +1128,8 @@ puts "== no-native chart family uses a hosted plugin with live data source =="
 Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'plugin-config.json'),
              JSON.generate('visual_plugin_id' => 'plugin-test-id',
-                           'calendar_plugin_id' => 'calendar-test-id'))
+                           'calendar_plugin_id' => 'calendar-test-id',
+                           'gauge_plugin_id' => 'gauge-test-id'))
   File.write(File.join(dir, 'dataset-map.json'), JSON.generate(
     'ds-plugin' => { 'connectionId' => 'conn-1', 'database' => 'DB',
                      'schema' => 'PUBLIC', 'table' => 'DEVICES' }
@@ -1184,6 +1185,31 @@ Dir.mktmpdir do |dir|
     eq(calendar.dig('config', 'valueColumn'),
        { 'kind' => 'column', 'columnId' => 'm-value', 'source' => 'source' },
        'calendar value uses the working plugin column config shape')
+
+    $companion_elements = []
+    gauge = build_element({
+      'id' => 'c53', 'title' => 'Completion', 'chartType' => 'badge_filledgauge',
+      'datasetId' => 'ds-plugin',
+      'summaryNumber' => {
+        'column' => 'Completion Rate', 'beastModeId' => 'calc-rate', '_isCalc' => true,
+        'format' => { 'type' => 'percent', 'format' => '0.0 %' },
+      },
+      'cardFormulas' => [{
+        'id' => 'calc-rate',
+        'formula' => "COUNT(CASE WHEN `status` = 'Closed' THEN `id` END) / COUNT(`id`)",
+      }],
+      'columns' => [
+        { 'column' => 'status', 'aggregation' => 'COUNT', 'mapping' => 'CURRENT' },
+        { 'column' => 'id', 'aggregation' => 'COUNT', 'mapping' => 'TARGET' },
+      ],
+    }, {})
+    eq(gauge['pluginId'], 'gauge-test-id', 'filled gauge uses hosted gauge plugin')
+    eq(gauge.dig('config', 'format'), '.1%', 'percent gauge preserves display format')
+    gauge_source = $plugin_source_elements.find { |e| e['id'] == 'src-plugin-el-c53' }
+    ok(gauge_source.dig('source', 'statement').include?('AS ACTUAL, 1 AS TARGET'),
+       'percent gauge binds a live formula fraction against target 1')
+    ok($companion_elements.any? { |e| e['id'] == 'el-c53-summary' },
+       'source Summary Number remains adjacent as a companion KPI')
   end
 end
 
