@@ -289,12 +289,12 @@ end
 # more reliable than guessing from `aggregation`/`groupBy` alone. Falls back to
 # the aggregation/groupBy heuristic when no column carries a `mapping` (Tier B,
 # or an extraction pass that hasn't captured it yet).
-DIM_MAPPINGS = %w[ITEM CATEGORY XTIME DATE].freeze
+DIM_MAPPINGS = %w[ITEM CATEGORY DATE].freeze
 MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
 
-# SERIES is AMBIGUOUS and must be disambiguated by whether the column carries an
-# aggregation — it used to sit in DIM_MAPPINGS unconditionally, which silently
-# produced charts with ZERO measures.
+# SERIES and XTIME are AMBIGUOUS and must be disambiguated by whether the column
+# carries an aggregation. Treating aggregated XTIME as a dimension collapsed
+# the live Top Salespeople scatter to one row and dropped COUNT(IsWon).
 #
 # LIVE EVIDENCE (2026-07-30):
 #   * badge_line_bar / combo + two-axis cards bind every MEASURE via SERIES
@@ -320,8 +320,8 @@ def split_cols(card)
   # correctly instead of silently losing the untagged columns.
   cols.each do |c|
     m = c['mapping'].to_s.upcase
-    if m == SERIES_MAPPING
-      # Ambiguous by design — see SERIES_MAPPING above.
+    if m == SERIES_MAPPING || m == 'XTIME'
+      # Ambiguous by design — see the role notes above.
       c['aggregation'].to_s.empty? ? dims << c : meas << c
     elsif DIM_MAPPINGS.include?(m)
       dims << c
@@ -1011,21 +1011,22 @@ end
 # a `pivot-table` — the one kind whose own `filters[]` Sigma silently drops (the
 # 65 chartable tiles are kpi-chart/bar/combo/region-map/line/table/scatter/donut).
 #
-# BOUNDARY CONVENTION, stated because getting it wrong is silent: a Domo
-# ROLLING_PERIOD of `count` N is emitted as `>= DateAdd(unit, -N, Today())`, i.e.
-# an N-unit lookback measured back from today. If Domo's rolling window is instead
-# N units INCLUSIVE of today, the correct constant is -(N-1). That is a one-token
-# change here (ROLLING_LOOKBACK_OFFSET) and it is pinned by a test rather than
-# left implicit. Confirm against a card PNG before declaring value parity — this
-# is the same class of silent-wrong-numbers risk as the 2-arg DateDiff operand
-# order (bead znvg), where a wrong window compiles clean and every number is off.
+# BOUNDARY CONVENTION, live-verified on the 2026-08-10 gold run: Domo's
+# ROLLING_PERIOD count is an inclusive count of CALENDAR BUCKETS (the current
+# bucket plus count-1 prior buckets), bounded at the start of the next current
+# bucket. It is not an elapsed-duration lookback from the current instant.
+#
+# Examples observed after a same-minute Domo/Sigma collection:
+#   6 MONTHS  -> Mar-Aug (not Feb-Aug)
+#   30 DAYS   -> Jul 12-Aug 10 (not Jul 11-Aug 10)
+#   5 QUARTERS -> 2025-Q3..2026-Q3 (never future 2026-Q4..2027-Q3 rows)
+#
+# Both bounds matter: omitting the upper bound admitted future-dated warehouse
+# rows and inflated period KPIs while compiling cleanly.
 DOMO_DATE_INTERVAL_UNIT = {
   'DAY' => 'day', 'WEEK' => 'week', 'MONTH' => 'month',
   'QUARTER' => 'quarter', 'YEAR' => 'year', 'HOUR' => 'hour', 'MINUTE' => 'minute'
 }.freeze
-
-# 0 = "N units back from today"; set to 1 for "N units inclusive of today".
-ROLLING_LOOKBACK_OFFSET = 0
 
 def apply_card_date_window!(card, el)
   return el if el.nil?
@@ -1099,14 +1100,16 @@ def apply_card_date_window!(card, el)
     return el
   end
 
-  lookback = count - ROLLING_LOOKBACK_OFFSET
+  lookback = count - 1
   slug = date_col.downcase.gsub(/\W+/, '-')
   win_id = "f-datewin-#{slug}-#{unit}-#{count}"
   unless Array(el['columns']).any? { |c| c['id'] == win_id }
+    lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{lookback}, Today())))
+    upper = %(DateAdd("#{unit}", 1, DateTrunc("#{unit}", Today())))
     el['columns'] = Array(el['columns']) + [{
       'id' => win_id,
       'name' => "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})",
-      'formula' => %(If(#{date_formula} >= DateAdd("#{unit}", -#{lookback}, Today()), "in", "out")),
+      'formula' => %(If(#{date_formula} >= #{lower} and #{date_formula} < #{upper}, "in", "out")),
       'hidden' => true
     }]
     el['order'] = Array(el['order']) + [win_id] if el.key?('order')

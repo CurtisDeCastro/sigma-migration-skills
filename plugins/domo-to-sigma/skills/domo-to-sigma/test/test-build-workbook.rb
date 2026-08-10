@@ -76,6 +76,16 @@ eq(bar['columns'][0]['formula'], '[Master/Store Region]', 'dimension references 
 eq(bar['columns'][1]['formula'], 'Sum([Master/Sales Amount])', 'measure aggregated + master-ref')
 eq(bar['columns'][1]['name'], 'Sales', 'measure label uses Domo alias (fixes raw names #4)')
 
+puts "== visual roles: aggregated XTIME is a measure, plain XTIME is a dimension =="
+dims, measures = split_cols({
+  'columns' => [
+    { 'column' => 'period', 'mapping' => 'XTIME' },
+    { 'column' => 'won', 'mapping' => 'XTIME', 'aggregation' => 'COUNT' },
+  ],
+})
+eq(dims.map { |c| c['column'] }, ['period'], 'plain XTIME remains the grouping axis')
+eq(measures.map { |c| c['column'] }, ['won'], 'aggregated XTIME keeps its measure role')
+
 puts "== #5 table: text wrap on dimension columns; dataBars only when declared =="
 tbl = build_element({ 'id' => 'c4', 'title' => 'Projects', 'chartType' => 'badge_table',
                       'sigmaKindHint' => 'table',
@@ -839,8 +849,11 @@ eq(dfs.first['values'], ['in'], 'includes only the in-window sentinel')
 wc = Array(win['columns']).find { |c| c['id'] == dfs.first['columnId'] }
 ok(!wc.nil?, 'the filter targets a column the element actually has')
 eq(wc['hidden'], true, 'the window column is HIDDEN — the source card never rendered it')
-ok(wc['formula'].include?('DateAdd("day", -14,'),
-   "predicate uses DateAdd(\"day\", -14, ...) — got #{wc && wc['formula']}")
+ok(wc['formula'].include?('DateTrunc("day", DateAdd("day", -13, Today()))'),
+   "lower bound includes 14 calendar-day buckets — got #{wc && wc['formula']}")
+ok(wc['formula'].include?('< DateAdd("day", 1, DateTrunc("day", Today()))'),
+   "upper bound excludes future buckets — got #{wc && wc['formula']}")
+ok(wc['formula'].include?(' and '), 'both calendar-bucket bounds are required')
 ok(wc['formula'].include?('Today()'), 'predicate is anchored on Today()')
 
 puts "== step 6: unit mapping covers every interval the corpus actually uses =="
@@ -858,9 +871,12 @@ puts "== step 6: unit mapping covers every interval the corpus actually uses =="
   c = Array(e['columns']).find { |x| x['id'].to_s.start_with?('f-datewin') }
   # NB: a %(...) literal would balance the nested paren and silently append ")"
   # to the needle — use an explicit escaped string.
-  needle = "DateAdd(\"#{sigma}\", -3,"
+  needle = "DateTrunc(\"#{sigma}\", DateAdd(\"#{sigma}\", -2, Today()))"
   ok(c && c['formula'].include?(needle),
      "#{domo} -> \"#{sigma}\" (got #{c && c['formula']})")
+  upper = "< DateAdd(\"#{sigma}\", 1, DateTrunc(\"#{sigma}\", Today()))"
+  ok(c && c['formula'].include?(upper),
+     "#{domo} carries an exclusive next-bucket upper bound")
 end
 
 puts "== step 6: no dateRangeFilter -> no window column and no window filter =="

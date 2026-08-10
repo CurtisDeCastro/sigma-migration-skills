@@ -100,6 +100,30 @@ Dir.mktmpdir do |dir|
   truthy(e.key?('chart') && e.key?('reason'), 'each entry has chart + reason')
 end
 
+puts '== A3. released flat workbook code finds document-global elements =='
+Dir.mktmpdir do |dir|
+  setup(dir,
+        [{ id: 'el-983053598', name: 'Survey Completion Rate' },
+         { id: 'el-983053598-summary', name: 'Survey Completion Rate (Summary)' }],
+        [{ 'card' => 'Survey Completion Rate', 'card_id' => '983053598',
+           'warning' => DATEWIN_WARN }])
+  legacy = JSON.parse(File.read(File.join(dir, 'workbook-spec.json')))
+  elements = legacy['pages'].flat_map { |p| Array(p['elements']) }
+  released = {
+    'name' => 'WB',
+    'document' => {
+      'schemaVersion' => 1, 'kind' => 'workbook',
+      'pages' => [{ 'id' => 'page-1', 'name' => 'Overview' }],
+      'elements' => elements,
+    },
+  }
+  File.write(File.join(dir, 'workbook-spec.json'), JSON.pretty_generate(released))
+  r = run_gen(dir)
+  eq(r[:exit], 0, 'released flat spec exits 0')
+  eq(Array(at(r[:doc], 'exclusions')).size, 2,
+     'base and companion are found under document.elements')
+end
+
 # --- B. never exclude on anything but a recorded machine fact ---------------
 
 puts '== B. an unrelated warning excludes nothing =='
