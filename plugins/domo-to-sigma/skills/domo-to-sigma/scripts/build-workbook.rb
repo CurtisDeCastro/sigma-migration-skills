@@ -456,6 +456,9 @@ def build_kpi(card, overrides)
               { 'id' => vid, 'name' => label,
                 'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
                 'format' => sigma_format(sn['format'], label) }.compact
+  if !ov && sn['_isCalc'] && value_col && !value_col['formula'].to_s.empty?
+    value_col['formula'] = "Coalesce(#{value_col['formula']}, 0)"
+  end
   {
     'id' => eid(card), 'kind' => 'kpi-chart', 'name' => label,
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -1029,7 +1032,12 @@ def plugin_sql_source(card, mode)
     if raw_date && unit
       qdate = sf_ident(raw_date)
       offset = rng['offset'].to_i
-      lower = "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+      lower =
+        if unit == 'week'
+          "DATEADD('day', -1, DATE_TRUNC('week', DATEADD('day', 1, DATEADD('week', -#{offset}, CURRENT_DATE()))))"
+        else
+          "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+        end
       predicates << "#{qdate} >= #{lower}"
       predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, #{lower})"
     end
@@ -1104,7 +1112,12 @@ def plugin_gauge_source(card)
     unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
     if raw_date && unit
       offset = rng['offset'].to_i
-      lower = "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+      lower =
+        if unit == 'week'
+          "DATEADD('day', -1, DATE_TRUNC('week', DATEADD('day', 1, DATEADD('week', -#{offset}, CURRENT_DATE()))))"
+        else
+          "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+        end
       predicates << "#{sf_ident(raw_date)} >= #{lower}"
       predicates << "#{sf_ident(raw_date)} < DATEADD('#{unit.upcase}', 1, #{lower})"
     end
@@ -1576,7 +1589,14 @@ def apply_card_date_window!(card, el)
     if type == 'INTERVAL_OFFSET'
       # Live-established against the gold page: offset=1 means the previous
       # completed calendar bucket (month/quarter/week); offset=0 means current.
-      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
+      lower =
+        if unit == 'week'
+          # Domo weeks start Sunday; Sigma/Snowflake's default week boundary
+          # can be Monday. Shift +1 day before truncating, then back one day.
+          %(DateAdd("day", -1, DateTrunc("week", DateAdd("day", 1, DateAdd("week", -#{offset}, Today())))))
+        else
+          %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
+        end
       upper = %(DateAdd("#{unit}", 1, #{lower}))
       label = "#{offset.zero? ? 'Current' : "#{offset} #{unit}#{offset == 1 ? '' : 's'} ago"} (#{date_col})"
     else
@@ -1945,18 +1965,6 @@ def build_element_body(card, overrides)
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   if is_kpi
     kpi = apply_card_filters!(card, build_kpi(card, overrides))
-    # A calculated Summary Number commonly owns its relative window inside the
-    # Beast Mode itself (live gauges: last-30-days completion, last-7-days
-    # visitors). Reapplying the card's visual INTERVAL_OFFSET window can make
-    # that calculation empty/null. Preserve the summary formula's own scope.
-    if card.dig('summaryNumber', '_isCalc')
-      if card['dateRangeFilter'].is_a?(Hash)
-        warn_card(card, 'date window NOT applied to calculated KPI: the Summary Number Beast Mode ' \
-                        'owns a distinct relative window, while the card window scopes the gauge ' \
-                        'CURRENT/TARGET channels. Applying both changes or nulls the headline value.')
-      end
-      return kpi
-    end
     return apply_card_date_window!(card, kpi)
   end
 
