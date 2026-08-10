@@ -2120,7 +2120,22 @@ def build_element_body(card, overrides)
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   if is_kpi
     kpi = apply_card_filters!(card, build_kpi(card, overrides))
-    return apply_kpi_display_override!(card, apply_card_date_window!(card, kpi))
+    kpi = apply_kpi_display_override!(card, apply_card_date_window!(card, kpi))
+    header_path = File.join(OUT, 'kpi-card-header-overrides.json')
+    headers = (JSON.parse(File.read(header_path)) rescue {}) if File.exist?(header_path)
+    header_rule = headers && headers[card['id'].to_s]
+    if header_rule.is_a?(Hash) && !header_rule['body'].to_s.empty?
+      $companion_elements << {
+        'id' => "header-kpi-#{card['id']}", 'kind' => 'text',
+        'body' => header_rule['body'].to_s
+      }
+      kpi['name'] = ' '
+      value_col = Array(kpi['columns']).find { |column|
+        column['id'] == kpi.dig('value', 'columnId')
+      }
+      value_col['name'] = ' ' if value_col
+    end
+    return kpi
   end
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
