@@ -480,6 +480,7 @@ def apply_kpi_display_override!(card, kpi)
   rule = all && all[card['id'].to_s]
   return kpi unless rule.is_a?(Hash)
   kpi['value']['fontSize'] = rule['fontSize'].to_i if rule['fontSize'].to_i.positive?
+  kpi['description'] = rule['description'].to_s unless rule['description'].to_s.empty?
   return kpi unless rule['scale'].to_f.nonzero?
   raw = Marshal.load(Marshal.dump(kpi))
   raw['id'] = "#{kpi['id']}-verify"
@@ -706,7 +707,7 @@ def build_axis_chart(card, kind)
     if kind == 'bar-chart' && !HORIZONTAL_CHART_TYPES.include?(ct)
       xa['format'] = {
         'marks' => 'none',
-        'labels' => { 'fontSize' => 10, 'labelAngle' => -45,
+        'labels' => { 'fontSize' => 9, 'labelAngle' => 0,
                       'allowLongerLabels' => true }
       }
     end
@@ -718,7 +719,13 @@ def build_axis_chart(card, kind)
     xa['sort'] = { 'by' => mcols.first['id'], 'direction' => 'descending' } if mcols.first && (Array(card['orderBy']).any? || is_treemap)
     el['xAxis'] = xa
   end
-  el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => AXIS_OFF } unless mcols.empty?
+  unless mcols.empty?
+    currency_axis = meas.any? { |source|
+      source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+    }
+    y_format = currency_axis ? { 'marks' => 'none', 'labels' => 'hidden' } : AXIS_OFF
+    el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => y_format }
+  end
   split = dims.each_with_index.find { |d, i| i != xidx && d['mapping'].to_s.upcase == SERIES_MAPPING }
   el['color'] = { 'by' => 'category', 'column' => dcols[split[1]]['id'] } if split
   if kind == 'bar-chart'
