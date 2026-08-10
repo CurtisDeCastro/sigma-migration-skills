@@ -57,6 +57,7 @@ $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
 $chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
 $plugin_source_elements = [] # hidden live sources for hosted no-native plugin visuals
+$kpi_verification_elements = [] # raw-value twins when visible KPI display is scaled/formatted
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -473,6 +474,31 @@ def build_kpi(card, overrides)
   }
 end
 
+def apply_kpi_display_override!(card, kpi)
+  path = File.join(OUT, 'kpi-format-overrides.json')
+  all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  rule = all && all[card['id'].to_s]
+  return kpi unless rule.is_a?(Hash) && rule['scale'].to_f.nonzero?
+  raw = Marshal.load(Marshal.dump(kpi))
+  raw['id'] = "#{kpi['id']}-verify"
+  raw['name'] = "#{kpi['name']} (Parity)"
+  $kpi_verification_elements << raw
+
+  col = Array(kpi['columns']).find { |c| c['id'] == kpi.dig('value', 'columnId') }
+  return kpi unless col
+  col['formula'] = "(#{col['formula']}) / #{rule['scale'].to_f}"
+  decimals = rule['decimals'].to_i
+  prefix = rule['prefix'].to_s
+  col['format'] = {
+    'kind' => 'number', 'formatString' => "#{prefix},.#{decimals}f",
+    'suffix' => rule['suffix'].to_s
+  }
+  # Still renders normally; this flag only removes the display-scaled KPI from
+  # parity/source pickers so the raw hidden twin is the measured element.
+  kpi['visibleAsSource'] = false
+  kpi
+end
+
 # Released native progress/ring element for a grounded Domo filled gauge. Domo
 # exposes CURRENT and TARGET as explicit visual roles; those map directly to
 # value and max, with a documented zero baseline. A gauge without both roles,
@@ -523,12 +549,17 @@ def build_summary_companion(card, overrides)
   kpi = build_kpi(card, overrides)
   return nil unless kpi
   kpi['id'] = eid(card, '-summary')
-  apply_summary_latest_bucket!(card, kpi)
+  apply_kpi_display_override!(card, apply_summary_latest_bucket!(card, kpi))
 end
 
 def build_scatter_chart(card, dims, meas)
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  meas.each_with_index do |source, i|
+    if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+      mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$,.0f' }
+    end
+  end
   meas.each_with_index do |source, i|
     next unless source['mapping'].to_s.upcase == 'BUBBLESIZE'
     id = mcols[i]['id']
@@ -657,6 +688,11 @@ def build_axis_chart(card, kind)
          dims.first
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  meas.each_with_index do |source, i|
+    if source.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i)
+      mcols[i]['format'] = { 'kind' => 'number', 'formatString' => '$,.0f' }
+    end
+  end
   xidx = dims.index(xcol) || 0
   el = {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
@@ -1979,7 +2015,7 @@ def build_element_body(card, overrides)
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
   if is_kpi
     kpi = apply_card_filters!(card, build_kpi(card, overrides))
-    return apply_card_date_window!(card, kpi)
+    return apply_kpi_display_override!(card, apply_card_date_window!(card, kpi))
   end
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
@@ -2230,14 +2266,15 @@ if $PROGRAM_NAME == __FILE__
   File.write(File.join(OUT, 'chart-specs.json'),
              JSON.pretty_generate('pages' => out_pages,
                                   'data_elements' => $sub_masters.values + $chart_helpers +
-                                                     $plugin_source_elements,
+                                                     $plugin_source_elements +
+                                                     $kpi_verification_elements,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."

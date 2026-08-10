@@ -101,7 +101,7 @@ act_by_eid = actuals['charts'] || {}
 act_unavail = (actuals['unavailable'] || []).each_with_object({}) { |u, h| h[u['element_id'].to_s] = u['reason'] }
 
 def card_id_for(element_id)
-  m = /\Ael-(\d+)(?:-(summary|verify))?\z/.match(element_id.to_s)
+  m = /\Ael-(\d+)(?:-(summary))?(?:-verify)?\z/.match(element_id.to_s)
   return [nil, false] unless m
   [m[1], m[2] == 'summary']
 end

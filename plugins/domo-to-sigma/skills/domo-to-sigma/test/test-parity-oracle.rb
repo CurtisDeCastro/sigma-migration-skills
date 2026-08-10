@@ -149,6 +149,8 @@ if cid_src
      'a companion tile id yields the same card id and is_summary=true')
   eq(card_id_for('el-922919965-verify'), ['922919965', false],
      'a static visual live-verification tile joins to the card as a base value tile')
+  eq(card_id_for('el-922919965-summary-verify'), ['922919965', true],
+     'a formatted companion KPI parity twin retains summary semantics')
   eq(card_id_for('master-1252fb63'), [nil, false],
      'a master element traces to no card (it is excluded, not silently skipped)')
   eq(card_id_for('header-block-1'), [nil, false],
