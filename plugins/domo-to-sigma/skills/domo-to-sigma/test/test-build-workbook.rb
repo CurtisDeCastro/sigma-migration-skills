@@ -1117,7 +1117,10 @@ Dir.mktmpdir do |dir|
     eq(visual.dig('config', 'mode'), 'treemap', 'Domo chart family selects plugin render mode')
     source = $plugin_source_elements.last
     eq(source['id'], 'el-c51-verify', 'converted live chart is retained on the hidden data page')
+    eq(source['kind'], 'table', 'plugin source is normalized to a selectable table element')
     eq(source['visibleAsSource'], true, 'plugin source is explicitly selectable in Sigma')
+    eq(source.dig('groupings', 0, 'groupBy'), ['d-device'],
+       'plugin table groups by the source dimension')
     eq(visual.dig('config', 'source', 'elementId'), source['id'],
        'plugin subscribes to that live element')
     eq(visual.dig('config', 'label'), 'd-device', 'plugin label binds the source dimension')

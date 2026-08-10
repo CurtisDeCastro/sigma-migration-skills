@@ -961,8 +961,21 @@ def pluginize_visual(card, live_el)
   source = live_el
   source['id'] = "#{eid(card)}-verify"
   source['name'] = "#{card['title']} (Plugin Source)"
+  source['kind'] = 'table'
   source['visibleAsSource'] = true
+  %w[xAxis yAxis yAxis2 color size stacking orientation barStyle lineAreaStyle
+     pointStyle seriesLineAreaStyle seriesPointStyle].each { |key| source.delete(key) }
   visible = Array(source['columns']).reject { |c| c['hidden'] }
+  source['order'] = Array(source['columns']).map { |c| c['id'] }
+  dims = visible.select { |c| c['id'].to_s.start_with?('d-') }
+  meas = visible.select { |c| c['id'].to_s.start_with?('m-', 'v-') }
+  if dims.any? && meas.any?
+    source['groupings'] = [{
+      'id' => "grp-#{source['id']}",
+      'groupBy' => dims.map { |c| c['id'] },
+      'calculations' => meas.map { |c| c['id'] },
+    }]
+  end
   label = visible.find { |c| c['id'].to_s.start_with?('d-') } || visible.first
   value = visible.find { |c| c['id'].to_s.start_with?('m-', 'v-') }
   config = { 'source' => { 'kind' => 'element', 'elementId' => source['id'] },
