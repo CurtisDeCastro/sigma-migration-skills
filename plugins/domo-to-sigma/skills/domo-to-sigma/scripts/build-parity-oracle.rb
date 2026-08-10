@@ -249,16 +249,16 @@ def realign_actual_columns(rows, actual_columns, expected_columns)
   expected_columns = Array(expected_columns)
   return [rows, actual_columns] unless actual_columns.length == expected_columns.length
   unused = (0...actual_columns.length).to_a
-  order = expected_columns.map do |wanted|
+  order = []
+  expected_columns.each do |wanted|
     idx = unused.find {
       |candidate| normalize_parity_header(actual_columns[candidate]) ==
                    normalize_parity_header(wanted)
     }
-    break unless idx
+    return [rows, actual_columns] unless idx
     unused.delete(idx)
-    idx
+    order << idx
   end
-  return [rows, actual_columns] unless order.length == expected_columns.length && order.none?(&:nil?)
   [Array(rows).map { |row| order.map { |idx| Array(row)[idx] } },
    order.map { |idx| actual_columns[idx] }]
 end
