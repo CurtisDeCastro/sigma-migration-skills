@@ -71,11 +71,25 @@ bar = build_element({ 'id' => 'c3', 'title' => 'Sales by Region', 'chartType' =>
                                      { 'column' => 'sales_amount', 'aggregation' => 'SUM', 'alias' => 'Sales' } ] }, {})
 eq(bar['kind'], 'bar-chart', '#7 bar card → bar-chart element (NOT table+dataBars)')
 ok(bar['columns'].none? { |c| c['id'].to_s.start_with?('cf') }, 'no conditionalFormats/dataBars on a bar chart')
-eq(bar['xAxis']['format'], { 'marks' => 'none' }, '#8 x-axis gridlines off')
+eq(bar.dig('xAxis', 'format', 'marks'), 'none', '#8 x-axis gridlines off')
 eq(bar['yAxis']['format'], { 'marks' => 'none' }, '#8 y-axis gridlines off')
 eq(bar['columns'][0]['formula'], '[Master/Store Region]', 'dimension references master')
 eq(bar['columns'][1]['formula'], 'Sum([Master/Sales Amount])', 'measure aggregated + master-ref')
 eq(bar['columns'][1]['name'], 'Sales', 'measure label uses Domo alias (fixes raw names #4)')
+
+puts "== symbol line preserves source point markers =="
+symbol_line = build_element({
+  'id' => 'c3-line', 'title' => 'Sales by Month',
+  'chartType' => 'badge_symbolline', 'sigmaKindHint' => 'line-chart',
+  'groupBy' => ['month'],
+  'columns' => [
+    { 'column' => 'month', 'mapping' => 'ITEM' },
+    { 'column' => 'sales_amount', 'aggregation' => 'SUM', 'mapping' => 'SERIES' }
+  ]
+}, {})
+eq(symbol_line.dig('lineAreaStyle', 'points'),
+   { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 9 },
+   'badge_symbolline emits released lineAreaStyle point markers')
 
 puts "== visual roles: aggregated XTIME is a measure, plain XTIME is a dimension =="
 dims, measures = split_cols({
@@ -216,6 +230,8 @@ donut = build_element({ 'id' => 'c16', 'title' => 'Mix', 'chartType' => 'badge_d
 eq(donut['kind'], 'donut-chart', 'badge_donut → donut-chart')
 eq(donut['value'], { 'id' => donut['columns'].last['id'] }, 'donut value uses value.id (opposite of KPI columnId)')
 ok(!donut.key?('xAxis') && !donut.key?('yAxis'), 'donut/pie carry value/color, NOT xAxis/yAxis (fixes the old broken shape)')
+eq(donut['legend'], { 'position' => 'left', 'fontSize' => 9 },
+   'donut legend preserves Domo left-side placement')
 
 pie = build_element({ 'id' => 'c17', 'title' => 'Share', 'chartType' => 'badge_pie',
                       'columns' => [ { 'column' => 'family' }, { 'column' => 'sales', 'aggregation' => 'SUM' } ] }, {})
