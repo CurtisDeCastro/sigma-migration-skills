@@ -1098,5 +1098,31 @@ Dir.mktmpdir do |dir|
   end
 end
 
+puts "== no-native chart family uses a hosted plugin with live data source =="
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, 'plugin-config.json'),
+             JSON.generate('visual_plugin_id' => 'plugin-test-id'))
+  stub_const(:OUT, dir) do
+    $plugin_config = nil
+    $plugin_source_elements = []
+    visual = build_element({
+      'id' => 'c51', 'title' => 'Device Treemap', 'chartType' => 'badge_treemap',
+      'columns' => [
+        { 'column' => 'Device', 'mapping' => 'ITEM' },
+        { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+      ],
+    }, {})
+    eq(visual['kind'], 'plugin', 'visible element is a real Sigma plugin, not a captured image')
+    eq(visual['pluginId'], 'plugin-test-id', 'plugin registration id comes from operator sidecar')
+    eq(visual.dig('config', 'mode'), 'treemap', 'Domo chart family selects plugin render mode')
+    source = $plugin_source_elements.last
+    eq(source['id'], 'el-c51-verify', 'converted live chart is retained on the hidden data page')
+    eq(visual.dig('config', 'source', 'elementId'), source['id'],
+       'plugin subscribes to that live element')
+    eq(visual.dig('config', 'label'), 'd-device', 'plugin label binds the source dimension')
+    eq(visual.dig('config', 'value'), 'm-visits', 'plugin value binds the source measure')
+  end
+end
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

@@ -56,6 +56,7 @@ end
 $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
 $chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
+$plugin_source_elements = [] # hidden live sources for hosted no-native plugin visuals
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -939,6 +940,40 @@ def build_image(card)
                   'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" } }
 end
 
+PLUGIN_VISUAL_MODE = {
+  'badge_treemap' => 'treemap',
+  'badge_word_cloud' => 'wordcloud',
+  'badge_calendar' => 'calendar',
+}.freeze
+
+def plugin_config
+  return $plugin_config if defined?($plugin_config) && $plugin_config.is_a?(Hash)
+  path = File.join(OUT, 'plugin-config.json')
+  $plugin_config = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  $plugin_config ||= {}
+end
+
+def pluginize_visual(card, live_el)
+  mode = PLUGIN_VISUAL_MODE[card['chartType'].to_s.downcase]
+  plugin_id = plugin_config['visual_plugin_id'].to_s
+  return nil unless mode && !plugin_id.empty? && live_el.is_a?(Hash)
+
+  source = live_el
+  source['id'] = "#{eid(card)}-verify"
+  source['name'] = "#{card['title']} (Plugin Source)"
+  visible = Array(source['columns']).reject { |c| c['hidden'] }
+  label = visible.find { |c| c['id'].to_s.start_with?('d-') } || visible.first
+  value = visible.find { |c| c['id'].to_s.start_with?('m-', 'v-') }
+  config = { 'source' => { 'kind' => 'element', 'elementId' => source['id'] },
+             'mode' => mode }
+  config['label'] = label['id'].to_s if label
+  config['value'] = value['id'].to_s if value
+  config['date'] = label['id'].to_s if mode == 'calendar' && label
+  plugin = { 'id' => eid(card), 'kind' => 'plugin',
+             'pluginId' => plugin_id, 'config' => config }
+  [plugin, source]
+end
+
 # Translated Beast Mode ids (those that actually produced a sigmaFormula and so
 # EXIST as DM calc columns). convert-beast-modes.rb --lint deliberately DROPS
 # untranslated formulas rather than shipping bad SQL, so a card bound to one is
@@ -1603,9 +1638,18 @@ def build_element(card, overrides, master_ds = nil)
     return nil
   end
 
+  plugin_source = nil
+  if (pluginized = pluginize_visual(card, el))
+    el, plugin_source = pluginized
+    warn_card(card, "recreated #{card['chartType']} as hosted Sigma plugin '#{el['pluginId']}' " \
+                    'bound to a live hidden source element; no captured source pixels are embedded.')
+  end
+
   if routed
     if scatter_helper
       retarget_to_submaster!(scatter_helper, sm)
+    elsif plugin_source
+      retarget_to_submaster!(plugin_source, sm)
     else
       retarget_to_submaster!(el, sm)
     end
@@ -1618,6 +1662,7 @@ def build_element(card, overrides, master_ds = nil)
     el.delete('_scatterHelper')
     $chart_helpers << scatter_helper
   end
+  $plugin_source_elements << plugin_source if plugin_source
   el
 end
 
@@ -1909,14 +1954,15 @@ if $PROGRAM_NAME == __FILE__
   dominant_table = dominant_el['name']
   File.write(File.join(OUT, 'chart-specs.json'),
              JSON.pretty_generate('pages' => out_pages,
-                                  'data_elements' => $sub_masters.values + $chart_helpers,
+                                  'data_elements' => $sub_masters.values + $chart_helpers +
+                                                     $plugin_source_elements,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."
