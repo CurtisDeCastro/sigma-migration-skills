@@ -752,7 +752,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   # layout_lint checks); the zone (chart_kind + plot signals) is the fallback.
   min_for = lambda do |z, eid|
     el = els_by_id[eid]
-    el && el['kind'] ? SigmaLayout.min_rows_for(el['kind']) : SigmaLayout.min_rows_for_zone(z)
+    base = el && el['kind'] ? SigmaLayout.min_rows_for(el['kind']) : SigmaLayout.min_rows_for_zone(z)
+    if z['_source'].to_s.start_with?('observed-from-screenshot') &&
+       z['chart_kind'].to_s != 'kpi'
+      [base, 10].max
+    else
+      base
+    end
   end
 
   # --- units: KPI rows, section text separators, section panels ---------------
