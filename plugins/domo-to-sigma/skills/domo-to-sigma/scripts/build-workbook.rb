@@ -703,6 +703,13 @@ def build_axis_chart(card, kind)
   }
   if xcol
     xa = { 'columnId' => dcols[xidx]['id'], 'format' => AXIS_OFF }
+    if kind == 'bar-chart' && !HORIZONTAL_CHART_TYPES.include?(ct)
+      xa['format'] = {
+        'marks' => 'none',
+        'labels' => { 'fontSize' => 10, 'labelAngle' => -45,
+                      'allowLongerLabels' => true }
+      }
+    end
     # Sort by the first measure if the card ordered by a measure, OR if this is
     # the badge_treemap degradation (no native treemap kind — see
     # NO_NATIVE_EQUIVALENT — sorting descending by size is the closest a flat
@@ -733,6 +740,9 @@ def build_axis_chart(card, kind)
                          'kind' => 'top-n', 'rankingFunction' => 'rank',
                          'mode' => 'top-n', 'rowCount' => 500 }]
     end
+  end
+  if kind == 'line-chart' && ct == 'badge_symbolline'
+    el['pointStyle'] = { 'visibility' => 'shown', 'shape' => 'circle', 'size' => 4 }
   end
   el
 end

@@ -385,7 +385,7 @@ else
     name: 'Light',
     overrides: {
       'colorOverrides' => { 'backgroundCanvas' => '#F4F4F4' },
-      'categoricalScheme' => %w[#9BC5E2 #A6D66D #F3B35B #D95C59 #C8E5A3 #73A9CC #F8D58A #76B66A]
+      'categoricalScheme' => %w[#A6CCE5 #F2D46B #F3A24F #D95C59 #C8E5A3 #7FB4D3 #F8DFA0 #8BBF78]
     }
   )
   warn '  theme: Domo default canvas + 8-color categorical scheme'
