@@ -539,7 +539,8 @@ def apply_chart_style_override!(card, element)
   rule = all && all[card['id'].to_s]
   return element unless rule.is_a?(Hash)
   if rule['gridlines'] && element['yAxis']
-    element['yAxis']['format'] ||= {}
+    format = element['yAxis']['format']
+    element['yAxis']['format'] = format.is_a?(Hash) ? format.dup : {}
     element['yAxis']['format']['marks'] = 'grid'
   end
   element
