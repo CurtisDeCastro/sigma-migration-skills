@@ -76,8 +76,10 @@
     var unsub=null;
     client.config.subscribe(function(cfg){
       if(unsub){unsub();unsub=null}
-      if(!cfg||!cfg.source){demo(cfg&&cfg.mode);return}
-      unsub=client.elements.subscribeToElementData(cfg.source,function(data){
+      var sourceId=cfg&&cfg.source;
+      if(sourceId&&typeof sourceId==="object")sourceId=sourceId.elementId;
+      if(!sourceId){demo(cfg&&cfg.mode);return}
+      unsub=client.elements.subscribeToElementData(sourceId,function(data){
         try{draw({mode:cfg.mode||"treemap",labels:data&&data[cfg.label],
           values:data&&data[cfg.value],dates:data&&data[cfg.date]})}catch(e){demo(cfg.mode)}
       })

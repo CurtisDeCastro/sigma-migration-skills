@@ -961,6 +961,7 @@ def pluginize_visual(card, live_el)
   source = live_el
   source['id'] = "#{eid(card)}-verify"
   source['name'] = "#{card['title']} (Plugin Source)"
+  source['visibleAsSource'] = true
   visible = Array(source['columns']).reject { |c| c['hidden'] }
   label = visible.find { |c| c['id'].to_s.start_with?('d-') } || visible.first
   value = visible.find { |c| c['id'].to_s.start_with?('m-', 'v-') }
