@@ -1060,7 +1060,11 @@ def pluginize_visual(card, live_el)
   config['label'] = label_id.to_s if label_id
   config['value'] = value_id.to_s if value_id
   config['date'] = label_id.to_s if mode == 'calendar' && label_id
-  plugin = { 'id' => eid(card), 'kind' => 'plugin',
+  # Never change an existing native chart's kind in place to `plugin`: Sigma's
+  # PUT readback preserves config JSON but the editor/runtime can retain the
+  # old element state and leave every picker blank. A fresh plugin element id
+  # follows the proven WS2 acceptance create path and hydrates config.
+  plugin = { 'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
              'pluginId' => plugin_id, 'config' => config }
   [plugin, [parity_source, direct_source].compact]
 end

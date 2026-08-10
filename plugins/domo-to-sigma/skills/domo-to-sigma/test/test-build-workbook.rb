@@ -1119,6 +1119,8 @@ Dir.mktmpdir do |dir|
       ],
     }, {})
     eq(visual['kind'], 'plugin', 'visible element is a real Sigma plugin, not a captured image')
+    eq(visual['id'], 'el-c51-plugin-v1',
+       'plugin gets a fresh id instead of changing an existing chart kind in place')
     eq(visual['pluginId'], 'plugin-test-id', 'plugin registration id comes from operator sidecar')
     eq(visual.dig('config', 'mode'), 'treemap', 'Domo chart family selects plugin render mode')
     parity_source = $plugin_source_elements.find { |e| e['id'] == 'el-c51-verify' }

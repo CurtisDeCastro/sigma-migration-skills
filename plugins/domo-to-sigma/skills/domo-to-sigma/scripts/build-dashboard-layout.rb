@@ -708,6 +708,9 @@ def build_page_synthesized(dashboard, page, opts, structure)
       # and strand the others in the generic bottom band.
       zid = z['id'].to_s
       el = els_by_id[zid] || els_by_id["el-#{zid}"] ||
+           els_by_id.values.find { |candidate|
+             candidate['id'].to_s.start_with?("el-#{zid}-plugin-")
+           } ||
            els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
