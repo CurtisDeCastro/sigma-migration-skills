@@ -1081,22 +1081,39 @@ def plugin_gauge_source(card)
   }&.dig('formula')
   current = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'CURRENT' }
   target = Array(card['columns']).find { |c| c['mapping'].to_s.upcase == 'TARGET' }
+  grain_date = card.dig('dateGrain', 'column')
   actual_expr =
     if percent && source_formula
       domo_formula_to_snowflake(source_formula)
+    elsif grain_date
+      "COUNT(DISTINCT #{sf_ident(grain_date)})"
     elsif current
       snowflake_aggregate(current)
     else
       '0'
     end
-  target_expr = percent ? '1' : (target ? snowflake_aggregate(target) : '1')
+  target_expr = percent ? '1' : (grain_date ? '100' : (target ? snowflake_aggregate(target) : '1'))
+  predicates = []
+  drf = card['dateRangeFilter'] || {}
+  rng = drf['dateTimeRange'] || {}
+  if rng['dateTimeRangeType'] == 'INTERVAL_OFFSET'
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      offset = rng['offset'].to_i
+      lower = "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+      predicates << "#{sf_ident(raw_date)} >= #{lower}"
+      predicates << "#{sf_ident(raw_date)} < DATEADD('#{unit.upcase}', 1, #{lower})"
+    end
+  end
+  where_sql = predicates.empty? ? '' : " WHERE #{predicates.join(' AND ')}"
   {
     'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
     'name' => "#{card['title']} (Gauge Plugin Source)",
     'visibleAsSource' => false,
     'source' => {
       'kind' => 'sql', 'connectionId' => conn,
-      'statement' => "SELECT #{actual_expr} AS ACTUAL, #{target_expr} AS TARGET FROM #{table}",
+      'statement' => "SELECT #{actual_expr} AS ACTUAL, #{target_expr} AS TARGET FROM #{table}#{where_sql}",
     },
     'columns' => [
       { 'id' => 'actual', 'name' => 'Actual', 'formula' => '[Custom SQL/ACTUAL]' },
