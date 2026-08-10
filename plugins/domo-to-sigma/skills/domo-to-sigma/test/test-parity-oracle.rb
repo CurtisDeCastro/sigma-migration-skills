@@ -181,6 +181,11 @@ if canon_src
   ])
   eq(categorical.length, 2,
      'a second string dimension prevents coalescing legitimate category rows')
+
+  compact_months, compact_count = canonicalise_dim([['Jan 24', 10], ['Dec 26', 20]])
+  eq(compact_months, [['2024-01', 10], ['2026-12', 20]],
+     'compact Sigma month labels canonicalise to Domo ISO month buckets')
+  eq(compact_count, 2, 'each compact month rewrite is counted')
 end
 
 dedupe_src = oracle_src[/^def same_parity_value\?\(left, right\)\n.*?(?=^stale_evidence =)/m]

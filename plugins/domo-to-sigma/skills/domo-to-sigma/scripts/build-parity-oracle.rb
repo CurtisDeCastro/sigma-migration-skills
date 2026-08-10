@@ -162,6 +162,9 @@ def canonicalise_dim(rows)
     if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
       a[0] = format('%s-%02d', m[1], MONTH_ABBR[m[2]])
       n += 1
+    elsif (m = /\A([A-Z][a-z]{2})\s+(\d{2})\z/.match(s)) && MONTH_ABBR[m[1]]
+      a[0] = format('20%s-%02d', m[2], MONTH_ABBR[m[1]])
+      n += 1
     elsif (m = /\A(\d{4})-Q([1-4])\z/.match(s))
       a[0] = format('%s-%02d', m[1], ((m[2].to_i - 1) * 3) + 1)
       n += 1
