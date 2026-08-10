@@ -930,5 +930,109 @@ ok(Array(bad && bad['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin'
 ok($warnings.any? { |w| w['warning'].to_s.include?('names no date column') },
    'the blank date column is warned, not silent')
 
+puts "== live parity: raw SERIES overlays become Max measures on combo charts =="
+overlay = build_element({
+  'id' => 'c45', 'title' => 'Open Rate', 'chartType' => 'badge_line_stackedbar',
+  'columns' => [
+    { 'column' => 'CalendarMonth', 'mapping' => 'ITEM' },
+    { 'column' => 'industry_stats_open_rate', 'alias' => 'Industry Open Rate', 'mapping' => 'SERIES' },
+    { 'column' => 'opens_unique_opens', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+benchmark = overlay['columns'].find { |c| c['name'] == 'Industry Open Rate' }
+eq(benchmark['formula'], 'Max([Master/Industry Stats Open Rate])',
+   'raw benchmark SERIES survives as a grouped Max measure')
+ok(Array(overlay.dig('yAxis', 'columnIds')).any? {
+     |x| (x.is_a?(Hash) ? x['columnId'] : x) == benchmark['id']
+   },
+   'benchmark is bound to a visible series channel')
+
+puts "== live parity: split SERIES binds to color while ITEM remains x-axis =="
+revenue = build_element({
+  'id' => 'c46', 'title' => 'Revenue', 'chartType' => 'badge_vert_stackedbar',
+  'columns' => [
+    { 'column' => 'Account', 'mapping' => 'SERIES' },
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Revenue', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+}, {})
+eq(revenue.dig('xAxis', 'columnId'), 'd-date', 'ITEM date is the x-axis, not SERIES account')
+eq(revenue['color'], { 'by' => 'category', 'column' => 'd-account' },
+   'SERIES account remains a bound split dimension')
+
+puts "== live parity: scatter channels follow XTIME/VALUE/SERIES/BUBBLESIZE roles =="
+scatter = build_element({
+  'id' => 'c47', 'title' => 'Top Subjects', 'chartType' => 'badge_bubble',
+  'columns' => [
+    { 'column' => 'Subject', 'mapping' => 'SERIES' },
+    { 'column' => 'Delivered', 'aggregation' => 'SUM', 'mapping' => 'XTIME' },
+    { 'column' => 'Opens', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+    { 'column' => 'Clicks', 'aggregation' => 'SUM', 'mapping' => 'BUBBLESIZE' },
+  ],
+}, {})
+eq(scatter['columns'].map { |c| c['id'] },
+   %w[d-subject m-delivered m-opens m-clicks],
+   'each source role appears once, in source order')
+eq(scatter.dig('xAxis', 'columnId'), 'm-delivered', 'XTIME measure binds x')
+eq(scatter.dig('yAxis', 'columnIds'), ['m-opens'], 'VALUE measure binds y')
+eq(scatter.dig('size', 'id'), 'm-clicks', 'BUBBLESIZE binds size without a duplicate export column')
+eq(scatter['color'], { 'by' => 'category', 'column' => 'd-subject' }, 'SERIES identifies each point')
+
+puts "== live parity: numeric comparison filters compile to hidden boolean predicates =="
+compared = build_element({
+  'id' => 'c48', 'title' => 'Delivered', 'chartType' => 'badge_vert_bar',
+  'columns' => [
+    { 'column' => 'Subject', 'mapping' => 'ITEM' },
+    { 'column' => 'Delivered', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+  'filters' => [{ 'column' => 'Delivered', 'operator' => 'GREATER_THAN', 'values' => ['0'] }],
+}, {})
+cmp_filter = Array(compared['filters']).find { |f| f['columnId'].to_s.start_with?('f-cmp-') }
+ok(cmp_filter, 'GREATER_THAN emits an element-local list filter')
+cmp_col = compared['columns'].find { |c| c['id'] == cmp_filter['columnId'] }
+eq(cmp_col['formula'], 'If([Master/Delivered] > 0.0, "in", "out")',
+   'comparison helper preserves strict greater-than semantics')
+
+puts "== live parity: treemap degradation preserves Domo's 500 visible leaves =="
+treemap = build_element({
+  'id' => 'c49', 'title' => 'Devices', 'chartType' => 'badge_treemap',
+  'columns' => [
+    { 'column' => 'Device', 'mapping' => 'ITEM' },
+    { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+}, {})
+top500 = Array(treemap['filters']).find { |f| f['kind'] == 'top-n' }
+eq(top500 && top500['rowCount'], 500, 'treemap fallback caps the same top 500 categories')
+
+puts "== live parity: grouped DESC limit-1 Summary Number filters to current bucket =="
+$companion_elements = []
+build_element({
+  'id' => 'c50', 'title' => 'Projected Sales', 'chartType' => 'badge_trendline',
+  'columns' => [
+    { 'column' => 'CalendarQuarter', 'mapping' => 'ITEM', 'calendar' => true },
+    { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+  ],
+  'summaryNumber' => {
+    'column' => 'Amount', 'aggregation' => 'SUM', 'label' => 'Sales this Period',
+    '_raw' => {
+      'groupBy' => [{ 'column' => 'CalendarQuarter', 'calendar' => true }],
+      'orderBy' => [{ 'column' => 'CalendarQuarter', 'calendar' => true, 'order' => 'DESCENDING' }],
+      'limit' => 1,
+    },
+  },
+  'dateGrain' => { 'column' => 'CloseDate', 'dateTimeElement' => 'QUARTER' },
+  'dateRangeFilter' => {
+    'column' => { 'column' => 'CloseDate' },
+    'dateTimeRange' => { 'dateTimeRangeType' => 'ROLLING_PERIOD',
+                         'interval' => 'QUARTER', 'offset' => 0, 'count' => 5 },
+  },
+}, {})
+latest = $companion_elements.find { |e| e['id'] == 'el-c50-summary' }
+latest_filter = Array(latest && latest['filters']).find { |f| f['id'].to_s.start_with?('summary-latest-') }
+ok(latest_filter, 'companion KPI has a machine-derived latest-bucket filter')
+latest_col = latest['columns'].find { |c| c['id'] == latest_filter['columnId'] }
+ok(latest_col['formula'].include?('DateTrunc("quarter"'),
+   'latest-bucket predicate uses the source calendar grain')
+
 puts
 if $failures.zero? then puts "ALL PASS"; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

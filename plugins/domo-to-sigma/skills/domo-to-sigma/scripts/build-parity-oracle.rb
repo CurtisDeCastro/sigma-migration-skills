@@ -155,7 +155,8 @@ end
 def canonicalise_dim(rows)
   return [rows, 0] unless rows.is_a?(Array)
   n = 0
-  out = rows.map do |r|
+  week_rows = []
+  out = rows.map.with_index do |r, idx|
     a = Array(r).dup
     s = a.first.to_s
     if (m = /\A(\d{4})-([A-Z][a-z]{2})\z/.match(s)) && MONTH_ABBR[m[2]]
@@ -171,10 +172,37 @@ def canonicalise_dim(rows)
       # Sunday on or before Jan 1 == start of Domo's week 1.
       wk1 = jan1 - ((jan1.wday) % 7)
       a[0] = (wk1 + ((wk - 1) * 7)).to_s
+      week_rows << idx
       n += 1
     end
     a
   end
+
+  # Domo names a week by the calendar year attached to the label. Around New
+  # Year, `Week-53 2024` and `Week-1 2025` can describe the SAME Sunday-based
+  # physical week. Sigma emits one grouped row; after canonicalisation Domo has
+  # two rows with the same date. Coalesce only those week-derived collisions,
+  # and only when every trailing value is numeric/nil, so a legitimate second
+  # string dimension can never be collapsed.
+  by_date = Hash.new { |h, k| h[k] = [] }
+  week_rows.each { |idx| by_date[out[idx][0]] << idx }
+  removed = {}
+  by_date.each_value do |indices|
+    next unless indices.length > 1
+    candidates = indices.map { |idx| out[idx] }
+    width = candidates.map(&:length).max
+    next unless candidates.all? do |row|
+      (1...width).all? { |i| row[i].nil? || row[i].is_a?(Numeric) }
+    end
+    merged = [candidates.first[0]]
+    (1...width).each do |i|
+      values = candidates.map { |row| row[i] }.compact
+      merged << (values.empty? ? nil : values.sum)
+    end
+    out[indices.first] = merged
+    indices.drop(1).each { |idx| removed[idx] = true }
+  end
+  out = out.each_with_index.reject { |_row, idx| removed[idx] }.map(&:first)
   [out, n]
 end
 

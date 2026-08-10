@@ -9,6 +9,7 @@
 #
 #   ruby test/test-parity-oracle.rb
 require 'json'
+require 'date'
 
 SKILL   = File.expand_path('..', __dir__)
 SCRIPTS = File.join(SKILL, 'scripts')
@@ -149,6 +150,30 @@ if cid_src
      'a put-layout header element traces to no card')
   eq(card_id_for('el-922919965-summary-extra'), [nil, false],
      'the pattern is anchored — a longer suffix is not mistaken for a summary tile')
+end
+
+canon_src = oracle_src[/^def canonicalise_dim\(rows\)\n.*?(?=^def max_date\(rows\))/m]
+ok(canon_src, 'extracted canonicalise_dim(rows) from build-parity-oracle.rb')
+eval(canon_src, TOPLEVEL_BINDING) if canon_src # rubocop:disable Security/Eval
+
+if canon_src
+  rows, n = canonicalise_dim([
+    ['Week-53 2024', 206_226.0, 85_758.0, 60_993.0],
+    ['Week-1 2025', 204_276.0, 85_341.0, 62_985.0],
+    ['Week-2 2025', 10.0, 20.0, 30.0],
+  ])
+  eq(n, 3, 'all Domo week labels are canonicalised')
+  eq(rows,
+     [['2024-12-29', 410_502.0, 171_099.0, 123_978.0],
+      ['2025-01-05', 10.0, 20.0, 30.0]],
+     'year-boundary labels for one physical week coalesce by summing measures')
+
+  categorical, = canonicalise_dim([
+    ['Week-53 2024', 'A', 1.0],
+    ['Week-1 2025', 'B', 2.0],
+  ])
+  eq(categorical.length, 2,
+     'a second string dimension prevents coalescing legitimate category rows')
 end
 
 puts $failures.zero? ? "\nALL PASS" : "\n#{$failures} FAILURE(S)"

@@ -306,10 +306,12 @@ MEASURE_MAPPINGS = %w[VALUE CURRENT TARGET BUBBLESIZE].freeze
 #     SERIES (a plain string column, NO aggregation).
 # So: SERIES + aggregation => measure; SERIES without => split dimension.
 SERIES_MAPPING = 'SERIES'
+RAW_SERIES_MEASURE_CHART_TYPES = %w[badge_line_stackedbar badge_symbol_bar].freeze
 
 def split_cols(card)
   cols = card['columns'] || []
   gb = Array(card['groupBy'])
+  chart_type = card['chartType'].to_s.downcase
   dims = []
   meas = []
   # Per-column: prefer Domo's own `mapping` when THIS column carries one (it's
@@ -322,7 +324,16 @@ def split_cols(card)
     m = c['mapping'].to_s.upcase
     if m == SERIES_MAPPING || m == 'XTIME'
       # Ambiguous by design — see the role notes above.
-      c['aggregation'].to_s.empty? ? dims << c : meas << c
+      if c['aggregation'].to_s.empty? && m == SERIES_MAPPING &&
+         RAW_SERIES_MEASURE_CHART_TYPES.include?(chart_type)
+        # Domo's line+bar/symbol+bar cards use a raw numeric SERIES as a
+        # benchmark/overlay (live: Industry Open Rate, Unique Page Views).
+        # Grouping by the raw value is equivalent to Max within each ITEM
+        # bucket, while treating it as an unbound dimension drops it entirely.
+        meas << c.merge('aggregation' => 'MAX', '_inferredAggregation' => true)
+      else
+        c['aggregation'].to_s.empty? ? dims << c : meas << c
+      end
     elsif DIM_MAPPINGS.include?(m)
       dims << c
     elsif MEASURE_MAPPINGS.include?(m)
@@ -501,7 +512,53 @@ def build_summary_companion(card, overrides)
   kpi = build_kpi(card, overrides)
   return nil unless kpi
   kpi['id'] = eid(card, '-summary')
-  kpi
+  apply_summary_latest_bucket!(card, kpi)
+end
+
+def build_scatter_chart(card, dims, meas)
+  dcols = dims.map { |d| dim_col(d, card) }
+  mcols = meas.map { |m| measure_col(m, card) }
+  meas.each_with_index do |source, i|
+    next unless source['mapping'].to_s.upcase == 'BUBBLESIZE'
+    id = mcols[i]['id']
+    mcols[i]['id'] = "#{id}-size" if mcols.each_with_index.any? { |m, j| j != i && m['id'] == id }
+  end
+  measure_by_source = meas.zip(mcols).to_h
+  dim_by_source = dims.zip(dcols).to_h
+
+  # Preserve Domo's visual-role order in the exported rows. This is not merely
+  # cosmetic: source parity rows follow XTIME, VALUE, SERIES, BUBBLESIZE order
+  # for Top Salespeople and SERIES, XTIME, VALUE, BUBBLESIZE for Top Subjects.
+  ordered = Array(card['columns']).filter_map do |source|
+    dim_hit = dims.find { |d| d['column'] == source['column'] && d['mapping'] == source['mapping'] }
+    next dim_by_source[dim_hit] if dim_hit
+    measure_hit = meas.find { |m| m['column'] == source['column'] && m['mapping'] == source['mapping'] }
+    measure_by_source[measure_hit] if measure_hit
+  end
+
+  by_mapping = lambda do |mapping|
+    hit = meas.find { |m| m['mapping'].to_s.upcase == mapping }
+    hit && measure_by_source[hit]
+  end
+  xcol = by_mapping.call('XTIME') || mcols.first
+  ycol = by_mapping.call('VALUE') || mcols.find { |m| m != xcol }
+  size_col = by_mapping.call('BUBBLESIZE')
+  identity = dims.find { |d| d['mapping'].to_s.upcase == 'SERIES' } || dims.first
+  identity_col = identity && dim_by_source[identity]
+
+  unless xcol && ycol
+    warn_card(card, 'scatter-chart: could not resolve distinct XTIME and VALUE measures — ' \
+                    'verify the axis assignments against the source card.')
+  end
+  {
+    'id' => eid(card), 'kind' => 'scatter-chart', 'name' => card['title'],
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => ordered,
+    'xAxis' => xcol ? { 'columnId' => xcol['id'], 'format' => AXIS_OFF } : nil,
+    'yAxis' => ycol ? { 'columnIds' => [ycol['id']], 'format' => AXIS_OFF } : nil,
+    'size' => size_col ? { 'id' => size_col['id'] } : nil,
+    'color' => identity_col ? { 'by' => 'category', 'column' => identity_col['id'] } : nil,
+  }.compact
 end
 
 def build_axis_chart(card, kind)
@@ -521,17 +578,21 @@ def build_axis_chart(card, kind)
                     'against the card PNG and re-add by hand.')
     return nil
   end
+  return build_scatter_chart(card, dims, meas) if kind == 'scatter-chart'
+
   ct = card['chartType'].to_s.downcase
-  xcol = dims.first
+  xcol = dims.find { |d| %w[ITEM CATEGORY XTIME DATE].include?(d['mapping'].to_s.upcase) } ||
+         dims.first
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
+  xidx = dims.index(xcol) || 0
   el = {
     'id' => eid(card), 'kind' => kind, 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => dcols + mcols,
   }
   if xcol
-    xa = { 'columnId' => dcols.first['id'], 'format' => AXIS_OFF }
+    xa = { 'columnId' => dcols[xidx]['id'], 'format' => AXIS_OFF }
     # Sort by the first measure if the card ordered by a measure, OR if this is
     # the badge_treemap degradation (no native treemap kind — see
     # NO_NATIVE_EQUIVALENT — sorting descending by size is the closest a flat
@@ -541,6 +602,8 @@ def build_axis_chart(card, kind)
     el['xAxis'] = xa
   end
   el['yAxis'] = { 'columnIds' => mcols.map { |m| m['id'] }, 'format' => AXIS_OFF } unless mcols.empty?
+  split = dims.each_with_index.find { |d, i| i != xidx && d['mapping'].to_s.upcase == SERIES_MAPPING }
+  el['color'] = { 'by' => 'category', 'column' => dcols[split[1]]['id'] } if split
   if kind == 'bar-chart'
     # #2/#3: orientation/stacking keyed on the EXACT chartType token, not a
     # `.include?('horiz')` substring check (the same class of bug this whole
@@ -551,12 +614,15 @@ def build_axis_chart(card, kind)
       warn_card(card, 'badge_vert_nestedbar: Sigma has no 2-level nested-category axis — ' \
                       'approximated as a flat grouped bar chart (the outer grouping tier is lost).')
     end
-  end
-  if kind == 'scatter-chart'
-    # badge_bubble: bind the BUBBLESIZE-mapped column (if the extraction
-    # captured `mapping`) to the scatter's optional size channel.
-    bubble = (card['columns'] || []).find { |c| c['mapping'].to_s.upcase == 'BUBBLESIZE' }
-    el['size'] = { 'id' => measure_col(bubble, card)['id'] } if bubble
+    if is_treemap && mcols.first
+      # The Domo rendered-card endpoint and treemap both cap this high-cardinality
+      # sample at its top 500 leaves. The flat bar fallback must keep the same
+      # visible set rather than exporting every 752 device category.
+      el['filters'] = Array(el['filters']) +
+                      [{ 'id' => "topn-#{el['id']}", 'columnId' => mcols.first['id'],
+                         'kind' => 'top-n', 'rankingFunction' => 'rank',
+                         'mode' => 'top-n', 'rowCount' => 500 }]
+    end
   end
   el
 end
@@ -911,6 +977,10 @@ DOMO_FILTER_LIST_MODE = {
   'LEGACY' => 'include', 'IN' => 'include', 'EQUALS' => 'include',
   'NOT_IN' => 'exclude', 'NOT_EQUALS' => 'exclude',
 }.freeze
+DOMO_FILTER_COMPARISON = {
+  'GREATER_THAN' => '>', 'GREATER_THAN_OR_EQUAL' => '>=',
+  'LESS_THAN' => '<', 'LESS_THAN_OR_EQUAL' => '<=',
+}.freeze
 
 # Resolve a filter clause's `column` to a [name, formula] pair for a NEW
 # element column — the same resolution measure_col/dim_col apply to an
@@ -1027,6 +1097,40 @@ DOMO_DATE_INTERVAL_UNIT = {
   'DAY' => 'day', 'WEEK' => 'week', 'MONTH' => 'month',
   'QUARTER' => 'quarter', 'YEAR' => 'year', 'HOUR' => 'hour', 'MINUTE' => 'minute'
 }.freeze
+
+def apply_summary_latest_bucket!(card, kpi)
+  sn = card['summaryNumber'] || {}
+  raw = sn['_raw'] || {}
+  groups = Array(raw['groupBy'])
+  orders = Array(raw['orderBy'])
+  return kpi unless raw['limit'].to_i == 1 && !groups.empty? &&
+                    orders.any? { |o| o['order'].to_s.upcase == 'DESCENDING' }
+
+  grain = card['dateGrain'] || {}
+  unit = DATE_GRAIN_UNIT[grain['dateTimeElement'].to_s.upcase]
+  date_col = grain['column'].to_s
+  # Without a declared calendar grain, "latest" can mean a latest raw
+  # timestamp rather than the current calendar bucket. Do not guess.
+  return kpi unless unit && !date_col.empty?
+
+  date_cid = filter_target_column(kpi, date_col)
+  return kpi unless date_cid
+  date_formula = (Array(kpi['columns']).find { |c| c['id'] == date_cid } || {})['formula']
+  return kpi if date_formula.to_s.empty?
+
+  slug = date_col.downcase.gsub(/\W+/, '-')
+  bucket_id = "f-summary-latest-#{slug}-#{unit}"
+  kpi['columns'] = Array(kpi['columns']) + [{
+    'id' => bucket_id,
+    'name' => "Current #{unit} (#{date_col})",
+    'formula' => %(If(DateTrunc("#{unit}", #{date_formula}) = DateTrunc("#{unit}", Today()), "in", "out")),
+    'hidden' => true,
+  }]
+  kpi['filters'] = Array(kpi['filters']) +
+                   [{ 'id' => "summary-latest-#{kpi['id']}", 'columnId' => bucket_id,
+                      'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }]
+  kpi
+end
 
 def apply_card_date_window!(card, el)
   return el if el.nil?
@@ -1158,10 +1262,39 @@ def apply_card_filters!(card, el)
   clauses.each do |f|
     col = f['column']
     next if col.to_s.strip.empty?
-    mode = DOMO_FILTER_LIST_MODE[f['operator'].to_s.upcase]
+    operator = f['operator'].to_s.upcase
+    comparison = DOMO_FILTER_COMPARISON[operator]
+    if comparison
+      raw_value = Array(f['values']).first
+      begin
+        numeric = Float(raw_value)
+      rescue ArgumentError, TypeError
+        warn_card(card, "card filter on '#{col}' dropped: #{operator} requires a numeric value, " \
+                        "but got #{raw_value.inspect}.")
+        next
+      end
+      _name, formula = resolve_filter_column(col)
+      unless formula
+        warn_card(card, "card filter on '#{col}' dropped: its column did not resolve.")
+        next
+      end
+      slug = col.to_s.downcase.gsub(/\W+/, '-')
+      helper_id = "f-cmp-#{slug}-#{added.size}"
+      el['columns'] = Array(el['columns']) + [{
+        'id' => helper_id, 'name' => "#{col} #{comparison} #{raw_value}",
+        'formula' => %(If(#{formula} #{comparison} #{numeric}, "in", "out")),
+        'hidden' => true,
+      }]
+      added << { 'id' => "cf-#{el['id']}-#{added.size}", 'columnId' => helper_id,
+                 'kind' => 'list', 'mode' => 'include', 'values' => ['in'] }
+      next
+    end
+
+    mode = DOMO_FILTER_LIST_MODE[operator]
     unless mode
       warn_card(card, "card filter on '#{col}' dropped: operator '#{f['operator']}' has no faithful Sigma " \
-                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS) — ' \
+                      'element-filter translation here (handled: LEGACY/IN/EQUALS/NOT_IN/NOT_EQUALS/' \
+                      'GREATER_THAN/GREATER_THAN_OR_EQUAL/LESS_THAN/LESS_THAN_OR_EQUAL) — ' \
                       'hand-author the equivalent element filter and re-run.')
       next
     end
