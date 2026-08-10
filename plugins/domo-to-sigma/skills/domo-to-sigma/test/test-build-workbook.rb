@@ -1205,6 +1205,9 @@ Dir.mktmpdir do |dir|
     }, {})
     eq(gauge['pluginId'], 'gauge-test-id', 'filled gauge uses hosted gauge plugin')
     eq(gauge.dig('config', 'format'), '.1%', 'percent gauge preserves display format')
+    eq(gauge.dig('config', 'value'),
+       { 'kind' => 'column', 'columnId' => 'actual', 'source' => 'source' },
+       'gauge value uses structured working-plugin binding')
     gauge_source = $plugin_source_elements.find { |e| e['id'] == 'src-plugin-el-c53' }
     ok(gauge_source.dig('source', 'statement').include?('AS ACTUAL, 1 AS TARGET'),
        'percent gauge binds a live formula fraction against target 1')

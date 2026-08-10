@@ -1128,7 +1128,9 @@ def pluginize_visual(card, live_el)
       'pluginId' => plugin_id,
       'config' => {
         'source' => { 'kind' => 'element', 'elementId' => gauge_source['id'] },
-        'value' => 'actual', 'target' => 'target', 'format' => format,
+        'value' => { 'kind' => 'column', 'columnId' => 'actual', 'source' => 'source' },
+        'target' => { 'kind' => 'column', 'columnId' => 'target', 'source' => 'source' },
+        'format' => format,
       },
     }
     return [plugin, [gauge_source]]
