@@ -167,6 +167,19 @@ eq(combo_ids.uniq.length, 3,
 eq(combo_ids, duplicate_combo['columns'].drop(1).map { |c| c['id'] },
    'combo channels retarget the suffixed duplicate id, never repeat the first formula')
 
+post_reach = build_element({
+  'id' => 'c11c', 'title' => 'Post Reach', 'chartType' => 'badge_line_bar',
+  'columns' => [
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Paid Post Impression', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Organic Post Impression', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Number of Posts', 'alias' => 'Posts', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+eq(post_reach.dig('yAxis', 'columnIds').map { |s| s['type'] },
+   %w[line line bar],
+   'post-impression measures stay lines while the exact Posts count is the bar')
+
 # badge_symbol_bar contains the substring '_bar' — must be combo-chart, not bar-chart.
 $warnings = []
 symbar = build_element({ 'id' => 'c12', 'title' => 'Actual vs Marker', 'chartType' => 'badge_symbol_bar',

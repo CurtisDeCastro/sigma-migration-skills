@@ -742,8 +742,9 @@ def build_combo(card)
         # Domo's token is literal: line series first, bar series after it.
         # When a card carries an explicit Posts count, it is the bar while
         # reach/impression measures remain lines.
-        if meas.any? { |src| col_label(src).match?(/\bposts?\b/i) }
-          col_label(meas[i]).match?(/\bposts?\b/i) ? 'bar' : 'line'
+        posts_measure = ->(src) { col_label(src).match?(/\A(?:number of )?posts\z/i) }
+        if meas.any? { |src| posts_measure.call(src) }
+          posts_measure.call(meas[i]) ? 'bar' : 'line'
         else
           i.zero? ? 'line' : 'bar'
         end
