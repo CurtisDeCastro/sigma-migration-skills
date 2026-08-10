@@ -1838,7 +1838,15 @@ def build_element_body(card, overrides)
   kind = card['sigmaKindHint']
   is_kpi = kind == 'kpi-chart' ||
            (card['summaryNumber'] && Array(card['groupBy']).empty? && (card['columns'] || []).size <= 1)
-  return apply_card_date_window!(card, apply_card_filters!(card, build_kpi(card, overrides))) if is_kpi
+  if is_kpi
+    kpi = apply_card_filters!(card, build_kpi(card, overrides))
+    # A calculated Summary Number commonly owns its relative window inside the
+    # Beast Mode itself (live gauges: last-30-days completion, last-7-days
+    # visitors). Reapplying the card's visual INTERVAL_OFFSET window can make
+    # that calculation empty/null. Preserve the summary formula's own scope.
+    return kpi if card.dig('summaryNumber', '_isCalc')
+    return apply_card_date_window!(card, kpi)
+  end
 
   # Domo prints a Summary Number at the top of EVERY viz card, not just KPI
   # cards. Sigma's chart/table elements have no summary slot, so this

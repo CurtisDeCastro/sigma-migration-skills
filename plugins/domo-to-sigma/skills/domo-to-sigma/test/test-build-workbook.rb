@@ -959,6 +959,19 @@ ok(io_col['formula'].include?('DateTrunc("week", DateAdd("week", -1, Today()))')
 ok(io_col['formula'].include?('< DateAdd("week", 1, DateTrunc("week", DateAdd("week", -1, Today())))'),
    'window ends exclusively at the next boundary')
 
+calc_kpi = build_element({
+  'id' => 'c43b', 'title' => 'Completion', 'chartType' => 'badge_filledgauge',
+  'summaryNumber' => { 'column' => 'Completion Rate 30-Day', '_isCalc' => true },
+  'dateRangeFilter' => {
+    'column' => { 'column' => 'created_on' },
+    'dateTimeRange' => { 'dateTimeRangeType' => 'INTERVAL_OFFSET',
+                         'interval' => 'WEEK', 'offset' => 1, 'count' => 0 },
+  },
+  'columns' => [{ 'column' => 'status', 'aggregation' => 'COUNT', 'mapping' => 'CURRENT' }],
+}, {})
+ok(Array(calc_kpi['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
+   'calculated KPI keeps its Beast Mode window instead of double-filtering to null')
+
 puts "== step 6: an unresolvable date column is dropped LOUDLY, never a broken filter =="
 $warnings = []
 # The card needs a real dimension, or build_element legitimately declines to emit a
