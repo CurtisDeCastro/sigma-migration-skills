@@ -700,7 +700,9 @@ def build_page_synthesized(dashboard, page, opts, structure)
       # Days", "New Visits in Period"). Prefer that exact join before the
       # legacy name fallback, which can map every duplicate label to one tile
       # and strand the others in the generic bottom band.
-      el = els_by_id[z['id'].to_s] || els_by_name[zone_el_name(z, opts[:renames])]
+      zid = z['id'].to_s
+      el = els_by_id[zid] || els_by_id["el-#{zid}"] ||
+           els_by_name[zone_el_name(z, opts[:renames])]
       el && el['id']
     when 'text', 'title'
       el = els_by_id["text-#{z['id']}"]
