@@ -55,6 +55,7 @@ end
 
 $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
+$chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -526,25 +527,83 @@ def build_scatter_chart(card, dims, meas)
   measure_by_source = meas.zip(mcols).to_h
   dim_by_source = dims.zip(dcols).to_h
 
-  # Preserve Domo's visual-role order in the exported rows. This is not merely
-  # cosmetic: source parity rows follow XTIME, VALUE, SERIES, BUBBLESIZE order
-  # for Top Salespeople and SERIES, XTIME, VALUE, BUBBLESIZE for Top Subjects.
-  ordered = Array(card['columns']).filter_map do |source|
+  # A Sigma scatter evaluates aggregates per raw row unless it sources an
+  # explicit table grouping. Build that hidden grouping first, then bind the
+  # visible scatter to it with raw references (the released, UI-readback shape).
+  # This is what turns 300 SEND_REPORT rows into one point per Subject.
+  helper_ordered = Array(card['columns']).filter_map do |source|
     dim_hit = dims.find { |d| d['column'] == source['column'] && d['mapping'] == source['mapping'] }
     next dim_by_source[dim_hit] if dim_hit
     measure_hit = meas.find { |m| m['column'] == source['column'] && m['mapping'] == source['mapping'] }
     measure_by_source[measure_hit] if measure_hit
   end
 
+  # Raw refs are name-based. Give duplicated source names (Avg Amount / Sum
+  # Amount) role-qualified names so the grouped columns remain independently
+  # addressable.
+  names = Hash.new(0)
+  helper_ordered.each { |c| names[c['name']] += 1 }
+  meas.each do |source|
+    col = measure_by_source[source]
+    next unless col && names[col['name']] > 1
+    role = source['mapping'].to_s.split('_').map(&:capitalize).join(' ')
+    col['name'] = "#{col['name']} (#{role})"
+  end
+
+  helper_id = "src-#{eid(card)}"
+  grouping_id = "grp-#{eid(card)}"
+  helper_name = "#{card['title']} (Grouped Source)"
+  helper = {
+    'id' => helper_id, 'kind' => 'table', 'name' => helper_name,
+    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'columns' => helper_ordered,
+    'order' => helper_ordered.map { |c| c['id'] },
+    'groupings' => [{
+      'id' => grouping_id,
+      'groupBy' => dcols.map { |c| c['id'] },
+      'calculations' => mcols.map { |c| c['id'] },
+    }],
+    'visibleAsSource' => false,
+  }
+  limit = card['limit'].to_i
+  if limit.positive?
+    order_name = Array(card['orderBy']).first.to_s
+    rank_source = meas.find { |m| m['column'].to_s == order_name } || meas.last
+    rank_col = rank_source && measure_by_source[rank_source]
+    if rank_col
+      helper['filters'] = [{
+        'id' => "topn-#{helper_id}", 'columnId' => rank_col['id'],
+        'kind' => 'top-n', 'rankingFunction' => 'rank',
+        'mode' => 'top-n', 'rowCount' => limit,
+      }]
+    end
+  end
+
+  scatter_by_helper_id = {}
+  ordered = helper_ordered.map do |source_col|
+    sid = source_col['id'].sub(/\A[dm]-/, 's-')
+    sid = "s-#{source_col['id']}" if sid == source_col['id']
+    scatter_by_helper_id[source_col['id']] = {
+      'id' => sid, 'name' => source_col['name'],
+      'formula' => "[#{helper_name}/#{source_col['name']}]",
+    }
+  end
+
   by_mapping = lambda do |mapping|
     hit = meas.find { |m| m['mapping'].to_s.upcase == mapping }
-    hit && measure_by_source[hit]
+    helper_col = hit && measure_by_source[hit]
+    helper_col && scatter_by_helper_id[helper_col['id']]
   end
   xcol = by_mapping.call('XTIME') || mcols.first
   ycol = by_mapping.call('VALUE') || mcols.find { |m| m != xcol }
   size_col = by_mapping.call('BUBBLESIZE')
   identity = dims.find { |d| d['mapping'].to_s.upcase == 'SERIES' } || dims.first
-  identity_col = identity && dim_by_source[identity]
+  identity_helper = identity && dim_by_source[identity]
+  identity_col = identity_helper && scatter_by_helper_id[identity_helper['id']]
+
+  # Fallbacks above use helper columns; normalize them to visible scatter refs.
+  xcol = scatter_by_helper_id[xcol['id']] if xcol && !xcol['id'].to_s.start_with?('s-')
+  ycol = scatter_by_helper_id[ycol['id']] if ycol && !ycol['id'].to_s.start_with?('s-')
 
   unless xcol && ycol
     warn_card(card, 'scatter-chart: could not resolve distinct XTIME and VALUE measures — ' \
@@ -552,12 +611,13 @@ def build_scatter_chart(card, dims, meas)
   end
   {
     'id' => eid(card), 'kind' => 'scatter-chart', 'name' => card['title'],
-    'source' => { 'kind' => 'table', 'elementId' => 'master' },
+    'source' => { 'kind' => 'table', 'elementId' => helper_id, 'groupingId' => grouping_id },
     'columns' => ordered,
     'xAxis' => xcol ? { 'columnId' => xcol['id'], 'format' => AXIS_OFF } : nil,
     'yAxis' => ycol ? { 'columnIds' => [ycol['id']], 'format' => AXIS_OFF } : nil,
     'size' => size_col ? { 'id' => size_col['id'] } : nil,
     'color' => identity_col ? { 'by' => 'category', 'column' => identity_col['id'] } : nil,
+    '_scatterHelper' => helper,
   }.compact
 end
 
@@ -1480,6 +1540,7 @@ def build_element(card, overrides, master_ds = nil)
 
   before = $companion_elements.length
   el = build_element_body(card, overrides)
+  scatter_helper = el && el['_scatterHelper']
   uniquify_column_ids!(el)
   resolve_channel_collisions!(el)
   if el.nil?
@@ -1500,11 +1561,19 @@ def build_element(card, overrides, master_ds = nil)
   end
 
   if routed
-    retarget_to_submaster!(el, sm)
+    if scatter_helper
+      retarget_to_submaster!(scatter_helper, sm)
+    else
+      retarget_to_submaster!(el, sm)
+    end
     $companion_elements[before..-1].each { |c| retarget_to_submaster!(c, sm) }
     warn_card(card, "routed to sub-master '#{sm['name']}' for DataSet #{ds} (bead ziht) — " \
                     'verify column coverage against the card PNG; the sub-master passes through ' \
                     "every column of #{sm['name']}, not just the ones this card uses.")
+  end
+  if scatter_helper
+    el.delete('_scatterHelper')
+    $chart_helpers << scatter_helper
   end
   el
 end
@@ -1619,12 +1688,20 @@ def build_element_body(card, overrides)
          end
   end
 
-  # B4: this card's OWN filter clauses -> ELEMENT filters on its element (see
-  # apply_card_filters! above) — never a page control (see build_controls
-  # below). Applied here, after the case-branch, so it covers every kind
-  # (bar/line/scatter/donut/table/map/combo/kpi-fallback) built above.
-  el = apply_card_filters!(card, el)
-  el = apply_card_date_window!(card, el)
+  # Scatter/bubble charts aggregate through a hidden grouped source table.
+  # Their predicates must filter that source BEFORE grouping; attaching them to
+  # the visible scatter would evaluate against already-grouped raw refs and can
+  # leave one point per warehouse row.
+  if el && el['_scatterHelper']
+    helper = apply_card_filters!(card, el['_scatterHelper'])
+    helper = apply_card_date_window!(card, helper)
+    el['_scatterHelper'] = helper
+  else
+    # B4: this card's OWN filter clauses -> ELEMENT filters on its element (see
+    # apply_card_filters! above) — never a page control (see build_controls).
+    el = apply_card_filters!(card, el)
+    el = apply_card_date_window!(card, el)
+  end
 
   if companion
     if el
@@ -1770,14 +1847,14 @@ if $PROGRAM_NAME == __FILE__
   dominant_table = dominant_el['name']
   File.write(File.join(OUT, 'chart-specs.json'),
              JSON.pretty_generate('pages' => out_pages,
-                                  'data_elements' => $sub_masters.values,
+                                  'data_elements' => $sub_masters.values + $chart_helpers,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."

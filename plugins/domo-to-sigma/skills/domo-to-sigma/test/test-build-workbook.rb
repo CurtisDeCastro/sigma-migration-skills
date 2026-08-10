@@ -627,6 +627,7 @@ puts "== B4: a filter on a column the card ALREADY plots reuses that column — 
 # Amount, filters: [{"column":"IsWon",...,"values":["true"]}].
 $warnings = []
 $companion_elements = []
+$chart_helpers = []
 top_salespeople = build_element({
   'id' => '2071758146', 'title' => 'Top Salespeople', 'chartType' => 'badge_bubble',
   'sigmaKindHint' => 'scatter-chart',
@@ -634,12 +635,14 @@ top_salespeople = build_element({
                  { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
   'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
 }, {})
-before_size = top_salespeople['columns'].size
-flt2 = top_salespeople['filters'].find { |f| f['values'] == ['true'] }
-dim_col_for_iswon = top_salespeople['columns'].find { |c| c['id'] == 'd-iswon' }
+top_salespeople_helper = $chart_helpers.last
+before_size = top_salespeople_helper['columns'].size
+flt2 = top_salespeople_helper['filters'].find { |f| f['values'] == ['true'] }
+dim_col_for_iswon = top_salespeople_helper['columns'].find { |c| c['id'] == 'd-iswon' }
 ok(!dim_col_for_iswon.nil?, 'IsWon is plotted as the dimension column, id d-iswon')
-eq(flt2['columnId'], 'd-iswon', 'the filter reuses the EXISTING dimension column\'s id, not a new hidden one')
-eq(before_size, 2, 'no extra column was appended — reuse, not duplication')
+eq(flt2['columnId'], 'd-iswon',
+   'the grouped source filter reuses its EXISTING dimension column, not a duplicate')
+eq(before_size, 2, 'no extra helper column was appended — reuse, not duplication')
 
 puts "== B4: an operator with no faithful Sigma translation is dropped LOUDLY, never silently =="
 $warnings = []
@@ -961,8 +964,10 @@ eq(revenue['color'], { 'by' => 'category', 'column' => 'd-account' },
    'SERIES account remains a bound split dimension')
 
 puts "== live parity: scatter channels follow XTIME/VALUE/SERIES/BUBBLESIZE roles =="
+$chart_helpers = []
 scatter = build_element({
   'id' => 'c47', 'title' => 'Top Subjects', 'chartType' => 'badge_bubble',
+  'orderBy' => ['Clicks'], 'limit' => 10,
   'columns' => [
     { 'column' => 'Subject', 'mapping' => 'SERIES' },
     { 'column' => 'Delivered', 'aggregation' => 'SUM', 'mapping' => 'XTIME' },
@@ -971,12 +976,20 @@ scatter = build_element({
   ],
 }, {})
 eq(scatter['columns'].map { |c| c['id'] },
-   %w[d-subject m-delivered m-opens m-clicks],
+   %w[s-subject s-delivered s-opens s-clicks],
    'each source role appears once, in source order')
-eq(scatter.dig('xAxis', 'columnId'), 'm-delivered', 'XTIME measure binds x')
-eq(scatter.dig('yAxis', 'columnIds'), ['m-opens'], 'VALUE measure binds y')
-eq(scatter.dig('size', 'id'), 'm-clicks', 'BUBBLESIZE binds size without a duplicate export column')
-eq(scatter['color'], { 'by' => 'category', 'column' => 'd-subject' }, 'SERIES identifies each point')
+eq(scatter.dig('xAxis', 'columnId'), 's-delivered', 'XTIME measure binds x')
+eq(scatter.dig('yAxis', 'columnIds'), ['s-opens'], 'VALUE measure binds y')
+eq(scatter.dig('size', 'id'), 's-clicks', 'BUBBLESIZE binds size without a duplicate export column')
+eq(scatter['color'], { 'by' => 'category', 'column' => 's-subject' }, 'SERIES identifies each point')
+helper = $chart_helpers.last
+eq(scatter['source'], { 'kind' => 'table', 'elementId' => helper['id'],
+                        'groupingId' => helper['groupings'].first['id'] },
+   'scatter binds to an explicit hidden grouping')
+eq(helper['groupings'].first['groupBy'], ['d-subject'], 'helper groups to one point per Subject')
+eq(helper['groupings'].first['calculations'], %w[m-delivered m-opens m-clicks],
+   'helper pre-aggregates every scatter measure')
+eq(helper['filters'].first['rowCount'], 10, 'source top-N is enforced on the grouped helper')
 
 puts "== live parity: numeric comparison filters compile to hidden boolean predicates =="
 compared = build_element({
