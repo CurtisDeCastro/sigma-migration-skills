@@ -2245,7 +2245,7 @@ def observed_section_elements(cards)
           .sort_by(&:last).each_with_index.map do |(name, _y), i|
     {
       'id' => "text-observed-section-#{i}", 'kind' => 'text',
-      'name' => name, 'body' => "### #{name}\n\n---",
+      'name' => name, 'body' => "### #{name}",
     }
   end
 end
