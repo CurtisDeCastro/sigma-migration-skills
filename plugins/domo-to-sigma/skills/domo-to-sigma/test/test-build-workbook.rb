@@ -1112,6 +1112,9 @@ Dir.mktmpdir do |dir|
     }, {})
     eq(visual['kind'], 'image', 'captured source visual is the visible element')
     eq(visual['id'], 'el-c51', 'visible image keeps the card-stable coverage id')
+    eq(visual.dig('source', 'kind'), 'url', 'image uses the released source.kind=url shape')
+    ok(visual.dig('source', 'url').start_with?('data:image/png;base64,'),
+       'captured PNG is embedded in the released image source URL')
     verify = $visual_verification_elements.last
     eq(verify['id'], 'el-c51-verify', 'live converted chart gets a distinct verification id')
     eq(verify['kind'], 'bar-chart', 'verification keeps the closest live native chart')

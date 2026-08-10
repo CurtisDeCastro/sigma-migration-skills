@@ -933,14 +933,15 @@ def image_card?(card)
   card['chartType'].to_s =~ IMAGE_CHART_TYPE_RE ? true : false
 end
 
-# build_image(card) -> {id, kind:'image', url:"data:image/png;base64,<b64>"} or
+# build_image(card) -> {id, kind:'image', source:{kind:'url',url:"data:..."}} or
 # nil when no PNG was captured (Tier B / not captured) — the caller falls back
 # and warns; NEVER emit an image element with an empty/broken url.
 def build_image(card)
   path = png_path(card)
   return nil unless path && File.exist?(path.to_s)
-  { 'id' => eid(card), 'kind' => 'image', 'name' => card['title'],
-    'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" }
+  { 'id' => eid(card), 'kind' => 'image', 'alt' => card['title'],
+    'source' => { 'kind' => 'url',
+                  'url' => "data:image/png;base64,#{Base64.strict_encode64(File.binread(path))}" } }
 end
 
 # Translated Beast Mode ids (those that actually produced a sigmaFormula and so
