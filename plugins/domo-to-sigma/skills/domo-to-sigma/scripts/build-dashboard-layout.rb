@@ -801,22 +801,26 @@ def build_page_synthesized(dashboard, page, opts, structure)
     c1 = [[to_icol.call((z['x_pct'] || 0).to_f + (z['w_pct'] || 0).to_f), c0 + 1].max, 25].min
     r0 = to_row.call((z['y_pct'] || 0).to_f)
     r1 = [to_row.call((z['y_pct'] || 0).to_f + (z['h_pct'] || 0).to_f), r0 + 1].max
-    [eid, c0, c1, r0, r1, min_for.call(z, eid)]
+    [eid, c0, c1, r0, r1, min_for.call(z, eid),
+     z['_source'].to_s.start_with?('observed-from-screenshot')]
   end.compact
   cluster_bands(items).each_with_index do |band, bi|
     base = band.map { |i| i[3] }.min
     # rebase rows container-relative; close horizontal gaps between row-
     # overlapping neighbours (Tableau leaves legend/spacer gaps Sigma doesn't
     # render) and stretch the rightmost tile to the container edge.
-    rebased = band.map { |i| [i[0], i[1], i[2], i[3] - base + 1, i[4] - base + 1, i[5]] }
-    rebased.each do |it|
-      rights = rebased.select { |o| o[1] > it[1] && o[3] < it[4] && it[3] < o[4] }
-      it[2] = rights.empty? ? 25 : [rights.map { |o| o[1] }.min, it[1] + 1].max
+    rebased = band.map { |i| [i[0], i[1], i[2], i[3] - base + 1, i[4] - base + 1, i[5], i[6]] }
+    observed_band = rebased.any? { |it| it[6] }
+    unless observed_band
+      rebased.each do |it|
+        rights = rebased.select { |o| o[1] > it[1] && o[3] < it[4] && it[3] < o[4] }
+        it[2] = rights.empty? ? 25 : [rights.map { |o| o[1] }.min, it[1] + 1].max
+      end
     end
     # an under-filled band (lint rule e) also closes LEFT gaps: each tile
     # stretches back to its left row-overlapping neighbour (or column 1), so a
     # lone small tile fills the row instead of shipping dead space.
-    if SigmaLayout.band_fill(rebased) < MIN_BAND_FILL
+    if !observed_band && SigmaLayout.band_fill(rebased) < MIN_BAND_FILL
       rebased.sort_by { |it| [it[1], it[3], it[0].to_s] }.each do |it|
         lefts = rebased.select { |o| !o.equal?(it) && o[1] < it[1] && o[3] < it[4] && it[3] < o[4] }
         it[1] = [lefts.empty? ? 1 : lefts.map { |o| o[2] }.max, it[2] - 1].min
