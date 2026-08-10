@@ -148,6 +148,8 @@ eq(combo['yAxis']['columnIds'],
    [ { 'columnId' => combo['columns'][1]['id'], 'type' => 'line' },
      { 'columnId' => combo['columns'][2]['id'], 'type' => 'bar' } ],
    'badge_line_bar preserves Domo role order: first measure line, second bar')
+eq(combo.dig('yAxis2', 'columnIds'), [combo['columns'][2]['id']],
+   'bar series uses the secondary axis so line-rate and bar-volume scales both remain visible')
 
 duplicate_combo = build_element({
   'id' => 'c11b', 'title' => 'Page View Growth', 'chartType' => 'badge_line_bar',
@@ -172,6 +174,8 @@ symbar = build_element({ 'id' => 'c12', 'title' => 'Actual vs Marker', 'chartTyp
                                         { 'column' => 'marker', 'aggregation' => 'SUM' } ] }, {})
 eq(symbar['kind'], 'combo-chart', 'badge_symbol_bar → combo-chart, NOT bar-chart (substring "_bar" would mis-route it)')
 eq(symbar['yAxis']['columnIds'][1]['type'], 'scatter', 'the symbol overlay renders as a scatter series')
+eq(symbar.dig('yAxis2', 'columnIds'), [symbar['columns'][1]['id']],
+   'bar layer uses the secondary axis beside scatter markers')
 
 puts "== Problem 1: fabricated chartType tokens are flagged, never silently mapped =="
 $warnings = []
@@ -1090,6 +1094,29 @@ Dir.mktmpdir do |dir|
        'section text follows screenshot y-order, not discovery card order')
     eq(section_els.map { |e| e['body'] }, ['### First', '### Second'],
        'each observed section is visible authored text')
+  end
+end
+
+puts "== no-native visual fallback keeps a live verification element =="
+Dir.mktmpdir do |dir|
+  FileUtils.mkdir_p(File.join(dir, 'png', 'cards'))
+  File.binwrite(File.join(dir, 'png', 'cards', 'c51.png'), "\x89PNG\r\n\x1A\nfixture")
+  stub_const(:OUT, dir) do
+    $visual_verification_elements = []
+    visual = build_element({
+      'id' => 'c51', 'title' => 'Device Treemap', 'chartType' => 'badge_treemap',
+      'columns' => [
+        { 'column' => 'Device', 'mapping' => 'ITEM' },
+        { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
+      ],
+    }, {})
+    eq(visual['kind'], 'image', 'captured source visual is the visible element')
+    eq(visual['id'], 'el-c51', 'visible image keeps the card-stable coverage id')
+    verify = $visual_verification_elements.last
+    eq(verify['id'], 'el-c51-verify', 'live converted chart gets a distinct verification id')
+    eq(verify['kind'], 'bar-chart', 'verification keeps the closest live native chart')
+    eq(verify.dig('yAxis', 'columnIds'), ['m-visits'],
+       'verification element remains queryable for strict value parity')
   end
 end
 
