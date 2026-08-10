@@ -1129,13 +1129,18 @@ Dir.mktmpdir do |dir|
   }))
   stub_const(:OUT, dir) do
     section_els = observed_section_elements([{ 'id' => 'a' }, { 'id' => 'b' }, { 'id' => 'c' }])
-    eq(section_els.map { |e| e['id'] },
+    text_els = section_els.select { |e| e['kind'] == 'text' }
+    divider_els = section_els.select { |e| e['kind'] == 'divider' }
+    eq(text_els.map { |e| e['id'] },
        %w[text-observed-section-0 text-observed-section-1],
        'section ids match build-domo-layout observed-section ids')
-    eq(section_els.map { |e| e['name'] }, %w[First Second],
+    eq(text_els.map { |e| e['name'] }, %w[First Second],
        'section text follows screenshot y-order, not discovery card order')
-    eq(section_els.map { |e| e['body'] }, ['### First', '### Second'],
+    eq(text_els.map { |e| e['body'] }, ['### First', '### Second'],
        'each observed section is visible authored text')
+    eq(divider_els.map { |e| e['id'] },
+       %w[divider-observed-section-0 divider-observed-section-1],
+       'each observed section gets a real divider element')
   end
 end
 
