@@ -1519,6 +1519,12 @@ def apply_card_date_window!(card, el)
                     'own filters — apply the predicate on its source element instead.')
     return el
   end
+  if type == 'INTERVAL_OFFSET' && card['chartType'].to_s.downcase == 'badge_pop_bar_line'
+    warn_card(card, "date window NOT applied (#{payload}): Domo POP expands the selected bucket " \
+                    'with prior-period rows and synthetic period/index channels; a one-bucket ' \
+                    'predicate would drop those channels. Recreate this card with the POP plugin.')
+    return el
+  end
 
   unless %w[ROLLING_PERIOD INTERVAL_OFFSET].include?(type)
     warn_card(card, "date window NOT applied (#{payload}): unsupported dateTimeRangeType #{type}.")
@@ -1940,7 +1946,14 @@ def build_element_body(card, overrides)
     # Beast Mode itself (live gauges: last-30-days completion, last-7-days
     # visitors). Reapplying the card's visual INTERVAL_OFFSET window can make
     # that calculation empty/null. Preserve the summary formula's own scope.
-    return kpi if card.dig('summaryNumber', '_isCalc')
+    if card.dig('summaryNumber', '_isCalc')
+      if card['dateRangeFilter'].is_a?(Hash)
+        warn_card(card, 'date window NOT applied to calculated KPI: the Summary Number Beast Mode ' \
+                        'owns a distinct relative window, while the card window scopes the gauge ' \
+                        'CURRENT/TARGET channels. Applying both changes or nulls the headline value.')
+      end
+      return kpi
+    end
     return apply_card_date_window!(card, kpi)
   end
 

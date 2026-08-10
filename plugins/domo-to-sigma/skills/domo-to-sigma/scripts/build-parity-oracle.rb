@@ -240,6 +240,29 @@ def dedupe_identical_columns(rows, columns)
    dropped.map { |idx| columns[idx] || idx }]
 end
 
+def normalize_parity_header(value)
+  value.to_s.gsub(/\([^)]*\)\z/, '').gsub(/[^a-z0-9]/i, '').downcase
+end
+
+def realign_actual_columns(rows, actual_columns, expected_columns)
+  actual_columns = Array(actual_columns)
+  expected_columns = Array(expected_columns)
+  return [rows, actual_columns] unless actual_columns.length == expected_columns.length
+  unused = (0...actual_columns.length).to_a
+  order = expected_columns.map do |wanted|
+    idx = unused.find {
+      |candidate| normalize_parity_header(actual_columns[candidate]) ==
+                   normalize_parity_header(wanted)
+    }
+    break unless idx
+    unused.delete(idx)
+    idx
+  end
+  return [rows, actual_columns] unless order.length == expected_columns.length && order.none?(&:nil?)
+  [Array(rows).map { |row| order.map { |idx| Array(row)[idx] } },
+   order.map { |idx| actual_columns[idx] }]
+end
+
 stale_evidence = []
 canonicalised = 0
 
@@ -378,8 +401,9 @@ charts.each do |c|
                     'reason' => "no Sigma actual: #{reason}" }
     next
   end
+  act_rows, act_columns = realign_actual_columns(act['rows'], act['columns'], card['columns'])
   act_rows, act_columns, _dropped_actual_columns =
-    dedupe_identical_columns(act['rows'], act['columns'])
+    dedupe_identical_columns(act_rows, act_columns)
 
   # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
   # mutates a local the emitted hash no longer references, which is exactly the

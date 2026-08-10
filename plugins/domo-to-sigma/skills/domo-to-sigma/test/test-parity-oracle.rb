@@ -182,6 +182,16 @@ dedupe_src = oracle_src[/^def same_parity_value\?\(left, right\)\n.*?(?=^stale_e
 ok(dedupe_src, 'extracted identical-column normalization helpers')
 eval(dedupe_src, TOPLEVEL_BINDING) if dedupe_src # rubocop:disable Security/Eval
 if dedupe_src
+  aligned, headers = realign_actual_columns(
+    [['Bree Spence', 8, 40_593.75, 324_750]],
+    ['Owner Name', 'Is Won', 'Amount (Value)', 'Amount (Bubblesize)'],
+    ['IsWon', 'Amount', 'Owner.Name', 'Amount']
+  )
+  eq(aligned, [[8, 40_593.75, 'Bree Spence', 324_750]],
+     'scatter export is realigned to Domo XTIME/VALUE/SERIES/BUBBLESIZE order')
+  eq(headers, ['Is Won', 'Amount (Value)', 'Owner Name', 'Amount (Bubblesize)'],
+     'realigned headers stay parallel')
+
   rows, cols, dropped = dedupe_identical_columns(
     [['2026-07-12', '129.0', 208, '129'],
      ['2026-07-13', '66.0', 95, '66']],
