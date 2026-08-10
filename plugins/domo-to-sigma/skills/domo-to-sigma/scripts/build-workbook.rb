@@ -1043,7 +1043,8 @@ end
 
 def pluginize_visual(card, live_el)
   mode = PLUGIN_VISUAL_MODE[card['chartType'].to_s.downcase]
-  plugin_id = plugin_config['visual_plugin_id'].to_s
+  plugin_id = (mode == 'calendar' ? plugin_config['calendar_plugin_id'] :
+                                   plugin_config['visual_plugin_id']).to_s
   return nil unless mode && !plugin_id.empty? && live_el.is_a?(Hash)
 
   parity_source = live_el
@@ -1055,17 +1056,33 @@ def pluginize_visual(card, live_el)
              Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('d-') }&.dig('id')
   value_id = direct_source ? 'm-value' :
              Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('m-', 'v-') }&.dig('id')
-  config = { 'source' => { 'kind' => 'element', 'elementId' => plugin_source['id'] },
-             'mode' => mode }
-  config['label'] = label_id.to_s if label_id
-  config['value'] = value_id.to_s if value_id
-  config['date'] = label_id.to_s if mode == 'calendar' && label_id
+  source_binding = { 'kind' => 'element', 'elementId' => plugin_source['id'] }
+  column_binding = ->(column_id) {
+    { 'kind' => 'column', 'columnId' => column_id.to_s, 'source' => 'source' }
+  }
+  if mode == 'calendar'
+    config = {
+      'source' => source_binding,
+      'aggregation' => 'Sum',
+      'title' => card['title'].to_s,
+      'showTotal' => true,
+      'colorTheme' => 'Blue',
+      'firstDay' => 'Sunday',
+      'dateColumn' => column_binding.call(label_id),
+      'valueColumn' => column_binding.call(value_id),
+    }
+  else
+    config = { 'source' => source_binding, 'mode' => mode }
+    config['label'] = column_binding.call(label_id) if label_id
+    config['value'] = column_binding.call(value_id) if value_id
+  end
   # Never change an existing native chart's kind in place to `plugin`: Sigma's
   # PUT readback preserves config JSON but the editor/runtime can retain the
   # old element state and leave every picker blank. A fresh plugin element id
   # follows the proven WS2 acceptance create path and hydrates config.
   plugin = { 'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
              'pluginId' => plugin_id, 'config' => config }
+  plugin['displayName'] = 'Heatmap Calendar' if mode == 'calendar'
   [plugin, [parity_source, direct_source].compact]
 end
 

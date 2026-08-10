@@ -79,9 +79,12 @@
       var sourceId=cfg&&cfg.source;
       if(sourceId&&typeof sourceId==="object")sourceId=sourceId.elementId;
       if(!sourceId){demo(cfg&&cfg.mode);return}
+      function columnId(binding){
+        return binding&&typeof binding==="object"?binding.columnId:binding;
+      }
       unsub=client.elements.subscribeToElementData(sourceId,function(data){
-        try{draw({mode:cfg.mode||"treemap",labels:data&&data[cfg.label],
-          values:data&&data[cfg.value],dates:data&&data[cfg.date]})}catch(e){demo(cfg.mode)}
+        try{draw({mode:cfg.mode||"treemap",labels:data&&data[columnId(cfg.label)],
+          values:data&&data[columnId(cfg.value)],dates:data&&data[columnId(cfg.date)]})}catch(e){demo(cfg.mode)}
       })
     }
     client.config.subscribe(bindConfig);

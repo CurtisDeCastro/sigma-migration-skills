@@ -1101,7 +1101,8 @@ end
 puts "== no-native chart family uses a hosted plugin with live data source =="
 Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'plugin-config.json'),
-             JSON.generate('visual_plugin_id' => 'plugin-test-id'))
+             JSON.generate('visual_plugin_id' => 'plugin-test-id',
+                           'calendar_plugin_id' => 'calendar-test-id'))
   File.write(File.join(dir, 'dataset-map.json'), JSON.generate(
     'ds-plugin' => { 'connectionId' => 'conn-1', 'database' => 'DB',
                      'schema' => 'PUBLIC', 'table' => 'DEVICES' }
@@ -1133,8 +1134,30 @@ Dir.mktmpdir do |dir|
        'direct source SQL targets the mapped warehouse table')
     eq(visual.dig('config', 'source', 'elementId'), direct_source['id'],
        'plugin subscribes to the direct selectable table')
-    eq(visual.dig('config', 'label'), 'd-label', 'plugin label binds direct source dimension')
-    eq(visual.dig('config', 'value'), 'm-value', 'plugin value binds direct source measure')
+    eq(visual.dig('config', 'label'),
+       { 'kind' => 'column', 'columnId' => 'd-label', 'source' => 'source' },
+       'plugin label uses the proven structured column binding')
+    eq(visual.dig('config', 'value'),
+       { 'kind' => 'column', 'columnId' => 'm-value', 'source' => 'source' },
+       'plugin value uses the proven structured column binding')
+
+    calendar = build_element({
+      'id' => 'c52', 'title' => 'Activity Calendar', 'chartType' => 'badge_calendar',
+      'datasetId' => 'ds-plugin',
+      'dateGrain' => { 'column' => 'Activity Date', 'dateTimeElement' => 'DAY' },
+      'columns' => [
+        { 'column' => 'Activity Date', 'mapping' => 'DATE' },
+        { 'column' => 'Description', 'mapping' => 'EVENT' },
+      ],
+    }, {})
+    eq(calendar['pluginId'], 'calendar-test-id',
+       'calendar card reuses the proven live calendar registration')
+    eq(calendar.dig('config', 'dateColumn'),
+       { 'kind' => 'column', 'columnId' => 'd-label', 'source' => 'source' },
+       'calendar date uses the working plugin column config shape')
+    eq(calendar.dig('config', 'valueColumn'),
+       { 'kind' => 'column', 'columnId' => 'm-value', 'source' => 'source' },
+       'calendar value uses the working plugin column config shape')
   end
 end
 
