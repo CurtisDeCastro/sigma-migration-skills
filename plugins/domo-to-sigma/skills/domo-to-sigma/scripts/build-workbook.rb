@@ -56,7 +56,6 @@ end
 $companion_elements = [] # bead 08sf — Task 5 populates this
 $sub_masters = {}        # bead ziht — datasetId => sub-master element Hash
 $chart_helpers = []      # hidden grouped source tables for scatter/bubble charts
-$visual_verification_elements = [] # live value twins for static no-native visual fallbacks
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -909,10 +908,6 @@ end
 # NOTE: 'richtext' is deliberately excluded — it overlaps the text/title row
 # (refs/card-to-element.md); richtext stays a text element, not an image.
 IMAGE_CHART_TYPE_RE = /image|logo|drawing|picture/i
-STATIC_VISUAL_FALLBACK_TYPES = %w[
-  badge_calendar badge_treemap badge_word_cloud badge_filledgauge
-  badge_pop_bar_line badge_vert_symbol_overlay
-].freeze
 
 # The staged capture path capture_card (domo-capture-visuals.rb) writes to, or
 # the card's own override if the caller already resolved one.
@@ -1608,25 +1603,9 @@ def build_element(card, overrides, master_ds = nil)
     return nil
   end
 
-  verification_el = nil
-  if STATIC_VISUAL_FALLBACK_TYPES.include?(card['chartType'].to_s.downcase)
-    visual = build_image(card)
-    if visual
-      verification_el = el
-      verification_el['id'] = "#{eid(card)}-verify"
-      verification_el['name'] = card['title']
-      el = visual
-      warn_card(card, 'used the captured Domo card PNG as the visible visual because this chart shape ' \
-                      'has no filter-safe native Sigma equivalent; a live hidden verification element ' \
-                      'retains the converted data and remains in strict value parity.')
-    end
-  end
-
   if routed
     if scatter_helper
       retarget_to_submaster!(scatter_helper, sm)
-    elsif verification_el
-      retarget_to_submaster!(verification_el, sm)
     else
       retarget_to_submaster!(el, sm)
     end
@@ -1639,7 +1618,6 @@ def build_element(card, overrides, master_ds = nil)
     el.delete('_scatterHelper')
     $chart_helpers << scatter_helper
   end
-  $visual_verification_elements << verification_el if verification_el
   el
 end
 
@@ -1931,15 +1909,14 @@ if $PROGRAM_NAME == __FILE__
   dominant_table = dominant_el['name']
   File.write(File.join(OUT, 'chart-specs.json'),
              JSON.pretty_generate('pages' => out_pages,
-                                  'data_elements' => $sub_masters.values + $chart_helpers +
-                                                     $visual_verification_elements,
+                                  'data_elements' => $sub_masters.values + $chart_helpers,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$visual_verification_elements.size} static-visual verification element(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."

@@ -43,7 +43,8 @@ kpi = build_kpi({ 'id' => 'c1', 'title' => 'Revenue',
 eq(kpi['kind'], 'kpi-chart', 'kind kpi-chart')
 eq(kpi['columns'][0]['formula'], 'Sum([Master/Sales Amount])', 'value = Sum of measure, source-prefixed (NOT Count of id)')
 eq(kpi['value'], { 'columnId' => kpi['columns'][0]['id'] }, 'value uses columnId (not id)')
-eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'decimalPlaces' => 0 }, 'currency format carried (proven decimalPlaces shape, not a d3 formatString)')
+eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'formatString' => '$,.0f' },
+   'currency format carries a released Sigma d3 format string')
 
 puts "== #1 KPI: COUNT-of-id (Domo table default) is flagged, not silent =="
 $warnings = []
@@ -1094,32 +1095,6 @@ Dir.mktmpdir do |dir|
        'section text follows screenshot y-order, not discovery card order')
     eq(section_els.map { |e| e['body'] }, ['### First', '### Second'],
        'each observed section is visible authored text')
-  end
-end
-
-puts "== no-native visual fallback keeps a live verification element =="
-Dir.mktmpdir do |dir|
-  FileUtils.mkdir_p(File.join(dir, 'png', 'cards'))
-  File.binwrite(File.join(dir, 'png', 'cards', 'c51.png'), "\x89PNG\r\n\x1A\nfixture")
-  stub_const(:OUT, dir) do
-    $visual_verification_elements = []
-    visual = build_element({
-      'id' => 'c51', 'title' => 'Device Treemap', 'chartType' => 'badge_treemap',
-      'columns' => [
-        { 'column' => 'Device', 'mapping' => 'ITEM' },
-        { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
-      ],
-    }, {})
-    eq(visual['kind'], 'image', 'captured source visual is the visible element')
-    eq(visual['id'], 'el-c51', 'visible image keeps the card-stable coverage id')
-    eq(visual.dig('source', 'kind'), 'url', 'image uses the released source.kind=url shape')
-    ok(visual.dig('source', 'url').start_with?('data:image/png;base64,'),
-       'captured PNG is embedded in the released image source URL')
-    verify = $visual_verification_elements.last
-    eq(verify['id'], 'el-c51-verify', 'live converted chart gets a distinct verification id')
-    eq(verify['kind'], 'bar-chart', 'verification keeps the closest live native chart')
-    eq(verify.dig('yAxis', 'columnIds'), ['m-visits'],
-       'verification element remains queryable for strict value parity')
   end
 end
 

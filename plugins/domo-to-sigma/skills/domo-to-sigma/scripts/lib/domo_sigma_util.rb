@@ -73,18 +73,17 @@ module DomoSigma
   # (the same precedence the Tableau KPI emitter uses) ONLY to pick a category
   # (currency/percent/number) — never to build a format string.
   #
-  # Field-proven shape only: {kind:"number", decimalPlaces:N} POSTs cleanly
-  # (a d3/Excel formatString can 400). Sigma's documented format schema
-  # (sigma-workbooks/reference/specification/formatting.md) has no distinct
-  # currency/percent `kind` — just `kind: number` with an optional raw
-  # formatString or structured fields (currencySymbol, prefix, …) that have
-  # NOT been field-verified in combination with decimalPlaces. So currency
-  # and percent are classified (for future use) but, absent a documented/
-  # verified currency|percent shape, both fall back to the same proven
-  # {kind:"number", decimalPlaces:prec} rather than guessing.
+  # Sigma's released format schema uses d3 `formatString`; the old
+  # `decimalPlaces` field is not in the schema and was silently stripped on
+  # readback, leaving long raw decimals in every KPI. Preserve Domo's category,
+  # precision, grouping, currency/percent multiplier, and abbreviated display.
   def sigma_format(domo_fmt, name = nil)
-    prec = (domo_fmt.is_a?(Hash) && (domo_fmt['precision'] || domo_fmt['decimals'])) || 0
-    type = domo_fmt.is_a?(Hash) ? (domo_fmt['type'] || domo_fmt['format']).to_s.upcase : ''
+    raw_format = domo_fmt.is_a?(Hash) ? domo_fmt['format'].to_s : ''
+    explicit_prec = domo_fmt.is_a?(Hash) && (domo_fmt['precision'] || domo_fmt['decimals'])
+    inferred_prec = raw_format[/\.(0+)/, 1]&.length
+    prec = (explicit_prec || inferred_prec || 0).to_i
+    type = domo_fmt.is_a?(Hash) ? domo_fmt['type'].to_s.upcase : ''
+    abbreviated = type == 'ABBREVIATED'
     category =
       case type
       when 'CURRENCY', 'MONEY'                            then :currency
@@ -92,13 +91,30 @@ module DomoSigma
       when 'COMMA', 'NUMBER', 'DECIMAL', 'LONG', 'DOUBLE'  then :number
       else
         n = name.to_s.downcase
-        if    n =~ /revenue|sales|profit|cost|amount|budget|price|\$/ then :currency
+        if    raw_format.include?('$') || n =~ /revenue|sales|profit|cost|amount|budget|price|\$/ then :currency
         elsif n =~ /rate|percent|pct|%|margin|ratio|share/            then :percent
-        elsif !type.empty? || domo_fmt.is_a?(Hash)                    then :number
+        elsif abbreviated || !type.empty? || domo_fmt.is_a?(Hash)     then :number
         end
       end
     return nil unless category
-    { 'kind' => 'number', 'decimalPlaces' => prec }
+
+    if abbreviated
+      # Domo's 0.0 abbreviation keeps roughly four significant digits
+      # (950.9K); d3's SI formatter is the released Sigma equivalent.
+      sig = [prec + 3, 2].max
+      prefix = category == :currency ? (domo_fmt['currency'] || '$').to_s : ''
+      return { 'kind' => 'number', 'formatString' => "#{prefix}.#{sig}~s" }
+    end
+
+    format_string =
+      case category
+      when :percent then ",.#{prec}%"
+      when :currency
+        symbol = domo_fmt.is_a?(Hash) ? (domo_fmt['currency'] || '$').to_s : '$'
+        "#{symbol},.#{prec}f"
+      else ",.#{prec}f"
+      end
+    { 'kind' => 'number', 'formatString' => format_string }
   end
 
   # Does this column name look like a row-key / id (the Domo table-summary COUNT trap)?
