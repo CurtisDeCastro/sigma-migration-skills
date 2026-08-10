@@ -215,6 +215,31 @@ def max_date(rows)
   ds.max
 end
 
+def same_parity_value?(left, right)
+  return true if left == right
+  return left.to_f == right.to_f if left.to_s.match?(/\A-?\d+(?:\.\d+)?\z/) &&
+                                    right.to_s.match?(/\A-?\d+(?:\.\d+)?\z/)
+  false
+end
+
+def dedupe_identical_columns(rows, columns)
+  rows = Array(rows).map { |row| Array(row) }
+  columns = Array(columns)
+  return [rows, columns, []] if rows.empty?
+  keep = []
+  dropped = []
+  (0...rows.map(&:length).max).each do |idx|
+    prior = keep.find { |candidate|
+      rows.all? { |row| same_parity_value?(row[candidate], row[idx]) }
+    }
+    prior ? dropped << idx : keep << idx
+  end
+  return [rows, columns, []] if dropped.empty?
+  [rows.map { |row| keep.map { |idx| row[idx] } },
+   keep.map { |idx| columns[idx] },
+   dropped.map { |idx| columns[idx] || idx }]
+end
+
 stale_evidence = []
 canonicalised = 0
 
@@ -353,6 +378,8 @@ charts.each do |c|
                     'reason' => "no Sigma actual: #{reason}" }
     next
   end
+  act_rows, act_columns, _dropped_actual_columns =
+    dedupe_identical_columns(act['rows'], act['columns'])
 
   # Canonicalise the dimension BEFORE the row is recorded — doing it afterwards
   # mutates a local the emitted hash no longer references, which is exactly the
@@ -376,7 +403,7 @@ charts.each do |c|
     # requested columns makes every tile raise — measured here, not guessed.
     # Without it the export's own column order is used, which is already the
     # element's plotted order. `columns` is still carried for diagnostics.
-    'actual'         => { 'rows' => act['rows'], 'columns' => act['columns'] },
+    'actual'         => { 'rows' => act_rows, 'columns' => act_columns },
   }
 
   # ---- warehouse-freshness evidence, collected as we go -------------------
@@ -384,7 +411,7 @@ charts.each do |c|
   # on BOTH sides, which is the only shape where "whose data is newer" is a
   # meaningful question.
   ed = max_date(exp_rows)
-  ad = max_date(act['rows'])
+  ad = max_date(act_rows)
   stale_evidence << { 'chart' => name, 'element_id' => eid,
                       'domo_max' => ed.to_s, 'sigma_max' => ad.to_s,
                       'days' => (ed - ad).to_i } if ed && ad && ed > ad

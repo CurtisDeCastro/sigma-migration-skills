@@ -178,5 +178,21 @@ if canon_src
      'a second string dimension prevents coalescing legitimate category rows')
 end
 
+dedupe_src = oracle_src[/^def same_parity_value\?\(left, right\)\n.*?(?=^stale_evidence =)/m]
+ok(dedupe_src, 'extracted identical-column normalization helpers')
+eval(dedupe_src, TOPLEVEL_BINDING) if dedupe_src # rubocop:disable Security/Eval
+if dedupe_src
+  rows, cols, dropped = dedupe_identical_columns(
+    [['2026-07-12', '129.0', 208, '129'],
+     ['2026-07-13', '66.0', 95, '66']],
+    ['Date', 'Unique Page Views', 'Page Views', 'Visitors']
+  )
+  eq(rows, [['2026-07-12', '129.0', 208], ['2026-07-13', '66.0', 95]],
+     'numeric-equivalent duplicate visual channel is removed from Sigma rows')
+  eq(cols, ['Date', 'Unique Page Views', 'Page Views'],
+     'column headers stay aligned after removal')
+  eq(dropped, ['Visitors'], 'dropped channel is auditable')
+end
+
 puts $failures.zero? ? "\nALL PASS" : "\n#{$failures} FAILURE(S)"
 exit($failures.zero? ? 0 : 1)
