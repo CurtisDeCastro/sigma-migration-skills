@@ -625,7 +625,9 @@ def build_page_synthesized(dashboard, page, opts, structure)
   header_zones = Array(structure[:header]).reject {
     |z| z['id'].to_s.start_with?('observed-section-')
   }
-  kpi_rows     = structure[:kpi_rows]
+  kpi_rows     = Array(structure[:kpi_rows]).map { |row|
+    Array(row).reject { |z| z['_source'].to_s.start_with?('observed-from-screenshot') }
+  }.reject(&:empty?)
   rail         = structure[:sidebar]
 
   # --- header band (rows 1..1+HEADER_ROWS) -----------------------------------
