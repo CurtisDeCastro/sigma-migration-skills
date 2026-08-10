@@ -1102,11 +1102,17 @@ puts "== no-native chart family uses a hosted plugin with live data source =="
 Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'plugin-config.json'),
              JSON.generate('visual_plugin_id' => 'plugin-test-id'))
+  File.write(File.join(dir, 'dataset-map.json'), JSON.generate(
+    'ds-plugin' => { 'connectionId' => 'conn-1', 'database' => 'DB',
+                     'schema' => 'PUBLIC', 'table' => 'DEVICES' }
+  ))
   stub_const(:OUT, dir) do
     $plugin_config = nil
+    $plugin_dataset_map = nil
     $plugin_source_elements = []
     visual = build_element({
       'id' => 'c51', 'title' => 'Device Treemap', 'chartType' => 'badge_treemap',
+      'datasetId' => 'ds-plugin',
       'columns' => [
         { 'column' => 'Device', 'mapping' => 'ITEM' },
         { 'column' => 'Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' },
@@ -1115,16 +1121,18 @@ Dir.mktmpdir do |dir|
     eq(visual['kind'], 'plugin', 'visible element is a real Sigma plugin, not a captured image')
     eq(visual['pluginId'], 'plugin-test-id', 'plugin registration id comes from operator sidecar')
     eq(visual.dig('config', 'mode'), 'treemap', 'Domo chart family selects plugin render mode')
-    source = $plugin_source_elements.last
-    eq(source['id'], 'el-c51-verify', 'converted live chart is retained on the hidden data page')
-    eq(source['kind'], 'table', 'plugin source is normalized to a selectable table element')
-    eq(source['visibleAsSource'], true, 'plugin source is explicitly selectable in Sigma')
-    eq(source.dig('groupings', 0, 'groupBy'), ['d-device'],
-       'plugin table groups by the source dimension')
-    eq(visual.dig('config', 'source', 'elementId'), source['id'],
-       'plugin subscribes to that live element')
-    eq(visual.dig('config', 'label'), 'd-device', 'plugin label binds the source dimension')
-    eq(visual.dig('config', 'value'), 'm-visits', 'plugin value binds the source measure')
+    parity_source = $plugin_source_elements.find { |e| e['id'] == 'el-c51-verify' }
+    direct_source = $plugin_source_elements.find { |e| e['id'] == 'src-plugin-el-c51' }
+    eq(parity_source['kind'], 'bar-chart',
+       'converted live chart remains as strict parity evidence')
+    eq(direct_source['kind'], 'table', 'plugin picker gets a direct SQL table like the proven gauge')
+    eq(direct_source.dig('source', 'kind'), 'sql', 'plugin source avoids a derived-element picker gap')
+    ok(direct_source.dig('source', 'statement').include?('"DB"."PUBLIC"."DEVICES"'),
+       'direct source SQL targets the mapped warehouse table')
+    eq(visual.dig('config', 'source', 'elementId'), direct_source['id'],
+       'plugin subscribes to the direct selectable table')
+    eq(visual.dig('config', 'label'), 'd-label', 'plugin label binds direct source dimension')
+    eq(visual.dig('config', 'value'), 'm-value', 'plugin value binds direct source measure')
   end
 end
 

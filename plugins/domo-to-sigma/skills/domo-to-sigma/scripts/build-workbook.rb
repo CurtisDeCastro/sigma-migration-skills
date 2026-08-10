@@ -953,39 +953,116 @@ def plugin_config
   $plugin_config ||= {}
 end
 
+def plugin_dataset_map
+  return $plugin_dataset_map if defined?($plugin_dataset_map) && $plugin_dataset_map.is_a?(Hash)
+  path = File.join(OUT, 'dataset-map.json')
+  $plugin_dataset_map = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
+  $plugin_dataset_map ||= {}
+end
+
+def sf_ident(value)
+  %("#{value.to_s.gsub('"', '""')}")
+end
+
+def sf_literal(value)
+  return value.to_s if value.is_a?(Numeric)
+  "'#{value.to_s.gsub("'", "''")}'"
+end
+
+def plugin_sql_source(card, mode)
+  mapped = plugin_dataset_map[card['datasetId'].to_s]
+  return nil unless mapped.is_a?(Hash)
+  conn = mapped['connectionId'].to_s
+  path = %w[database schema table].map { |k| mapped[k].to_s }
+  return nil if conn.empty? || path.any?(&:empty?)
+
+  dims, meas = split_cols(card)
+  dim = dims.first
+  measure = meas.first
+  return nil unless dim
+  date_col = card.dig('dateGrain', 'column')
+  label_expr = mode == 'calendar' && date_col ?
+                 "DATE_TRUNC('DAY', #{sf_ident(date_col)})" : sf_ident(dim['column'])
+  value_expr =
+    if mode == 'calendar' || !measure
+      'COUNT(*)'
+    else
+      agg = sigma_agg(measure['aggregation'], measure['distinct']).upcase
+      agg = 'COUNT(DISTINCT' if agg == 'COUNTDISTINCT'
+      agg == 'COUNT(DISTINCT' ?
+        "COUNT(DISTINCT #{sf_ident(measure['column'])})" :
+        "#{agg}(#{sf_ident(measure['column'])})"
+    end
+  predicates = []
+  Array(card['filters']).each do |filter|
+    col = sf_ident(filter['column'])
+    vals = Array(filter['values'])
+    next if vals.empty?
+    list = vals.map { |v| sf_literal(v) }.join(', ')
+    case filter['operator'].to_s.upcase
+    when 'IN', 'EQUALS', 'LEGACY' then predicates << "#{col} IN (#{list})"
+    when 'NOT_IN', 'NOT_EQUALS'   then predicates << "#{col} NOT IN (#{list})"
+    when 'GREATER_THAN'           then predicates << "#{col} > #{sf_literal(vals.first)}"
+    when 'GREATER_THAN_OR_EQUAL'  then predicates << "#{col} >= #{sf_literal(vals.first)}"
+    when 'LESS_THAN'              then predicates << "#{col} < #{sf_literal(vals.first)}"
+    when 'LESS_THAN_OR_EQUAL'     then predicates << "#{col} <= #{sf_literal(vals.first)}"
+    end
+  end
+  drf = card['dateRangeFilter'] || {}
+  rng = drf['dateTimeRange'] || {}
+  if rng['dateTimeRangeType'] == 'ROLLING_PERIOD' && rng['count'].to_i.positive?
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      lookback = rng['count'].to_i - 1
+      qdate = sf_ident(raw_date)
+      predicates << "#{qdate} >= DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{lookback}, CURRENT_DATE()))"
+      predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, DATE_TRUNC('#{unit.upcase}', CURRENT_DATE()))"
+    end
+  end
+  table = path.map { |part| sf_ident(part) }.join('.')
+  sql = "SELECT #{label_expr} AS LABEL, #{value_expr} AS VALUE FROM #{table}"
+  sql += " WHERE #{predicates.join(' AND ')}" unless predicates.empty?
+  sql += " GROUP BY #{label_expr} ORDER BY VALUE DESC"
+  limit = card['limit'].to_i
+  limit = 500 if limit <= 0 && mode == 'treemap'
+  sql += " LIMIT #{limit}" if limit.positive?
+  {
+    'id' => "src-plugin-#{eid(card)}", 'kind' => 'table',
+    'name' => "#{card['title']} (Direct Plugin Source)",
+    'source' => { 'kind' => 'sql', 'connectionId' => conn, 'statement' => sql },
+    'columns' => [
+      { 'id' => 'd-label', 'name' => (mode == 'calendar' ? 'Date' : col_label(dim)),
+        'formula' => '[Custom SQL/LABEL]' },
+      { 'id' => 'm-value', 'name' => (measure ? col_label(measure) : 'Count'),
+        'formula' => '[Custom SQL/VALUE]' },
+    ],
+    'order' => %w[d-label m-value],
+  }
+end
+
 def pluginize_visual(card, live_el)
   mode = PLUGIN_VISUAL_MODE[card['chartType'].to_s.downcase]
   plugin_id = plugin_config['visual_plugin_id'].to_s
   return nil unless mode && !plugin_id.empty? && live_el.is_a?(Hash)
 
-  source = live_el
-  source['id'] = "#{eid(card)}-verify"
-  source['name'] = "#{card['title']} (Plugin Source)"
-  source['kind'] = 'table'
-  source['visibleAsSource'] = true
-  %w[xAxis yAxis yAxis2 color size stacking orientation barStyle lineAreaStyle
-     pointStyle seriesLineAreaStyle seriesPointStyle].each { |key| source.delete(key) }
-  visible = Array(source['columns']).reject { |c| c['hidden'] }
-  source['order'] = Array(source['columns']).map { |c| c['id'] }
-  dims = visible.select { |c| c['id'].to_s.start_with?('d-') }
-  meas = visible.select { |c| c['id'].to_s.start_with?('m-', 'v-') }
-  if dims.any? && meas.any?
-    source['groupings'] = [{
-      'id' => "grp-#{source['id']}",
-      'groupBy' => dims.map { |c| c['id'] },
-      'calculations' => meas.map { |c| c['id'] },
-    }]
-  end
-  label = visible.find { |c| c['id'].to_s.start_with?('d-') } || visible.first
-  value = visible.find { |c| c['id'].to_s.start_with?('m-', 'v-') }
-  config = { 'source' => { 'kind' => 'element', 'elementId' => source['id'] },
+  parity_source = live_el
+  parity_source['id'] = "#{eid(card)}-verify"
+  parity_source['name'] = "#{card['title']} (Parity Source)"
+  direct_source = plugin_sql_source(card, mode)
+  plugin_source = direct_source || parity_source
+  label_id = direct_source ? 'd-label' :
+             Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('d-') }&.dig('id')
+  value_id = direct_source ? 'm-value' :
+             Array(parity_source['columns']).find { |c| !c['hidden'] && c['id'].to_s.start_with?('m-', 'v-') }&.dig('id')
+  config = { 'source' => { 'kind' => 'element', 'elementId' => plugin_source['id'] },
              'mode' => mode }
-  config['label'] = label['id'].to_s if label
-  config['value'] = value['id'].to_s if value
-  config['date'] = label['id'].to_s if mode == 'calendar' && label
+  config['label'] = label_id.to_s if label_id
+  config['value'] = value_id.to_s if value_id
+  config['date'] = label_id.to_s if mode == 'calendar' && label_id
   plugin = { 'id' => eid(card), 'kind' => 'plugin',
              'pluginId' => plugin_id, 'config' => config }
-  [plugin, source]
+  [plugin, [parity_source, direct_source].compact]
 end
 
 # Translated Beast Mode ids (those that actually produced a sigmaFormula and so
@@ -1652,9 +1729,9 @@ def build_element(card, overrides, master_ds = nil)
     return nil
   end
 
-  plugin_source = nil
+  plugin_sources = []
   if (pluginized = pluginize_visual(card, el))
-    el, plugin_source = pluginized
+    el, plugin_sources = pluginized
     warn_card(card, "recreated #{card['chartType']} as hosted Sigma plugin '#{el['pluginId']}' " \
                     'bound to a live hidden source element; no captured source pixels are embedded.')
   end
@@ -1662,8 +1739,10 @@ def build_element(card, overrides, master_ds = nil)
   if routed
     if scatter_helper
       retarget_to_submaster!(scatter_helper, sm)
-    elsif plugin_source
-      retarget_to_submaster!(plugin_source, sm)
+    elsif plugin_sources.any?
+      plugin_sources.each do |source|
+        retarget_to_submaster!(source, sm) unless source.dig('source', 'kind') == 'sql'
+      end
     else
       retarget_to_submaster!(el, sm)
     end
@@ -1676,7 +1755,7 @@ def build_element(card, overrides, master_ds = nil)
     el.delete('_scatterHelper')
     $chart_helpers << scatter_helper
   end
-  $plugin_source_elements << plugin_source if plugin_source
+  $plugin_source_elements.concat(plugin_sources)
   el
 end
 
