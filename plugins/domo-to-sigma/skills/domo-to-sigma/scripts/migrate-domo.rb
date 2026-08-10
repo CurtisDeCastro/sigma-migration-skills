@@ -554,6 +554,43 @@ def phase_build_workbook!(opts)
   done_phase!('build-workbook')
 end
 
+# Source-derived presentation styling (card headers, compact KPI/axis formats,
+# categorical order) — the automation that replaces the hand-authored sidecars
+# the gold acceptance run first used. Runs BEFORE build-workbook (the builders
+# read these sidecars) and is a NICE-TO-HAVE refinement: a failure never fails
+# the run, and any operator-authored sidecar already on disk is preserved
+# (derive-presentation-overrides.rb only writes files that don't already exist
+# unless --force). In live mode collect-parity-expected.rb (Domo-only, no Sigma
+# dependency) runs first so the display-scaling decisions see real values;
+# offline/metadata-only still produces headers, KPI font sizing, and category
+# order from whatever the fixture carries.
+def phase_derive_presentation!(opts, collect_expected:)
+  hr('derive-presentation-overrides')
+  manifest = File.join(DISCOVERY, 'presentation-overrides.json')
+  if !opts[:force] && File.exist?(manifest)
+    log 'discovery/presentation-overrides.json already present — skip (idempotent; pass --force to rederive)'
+    skip_phase!('derive-presentation-overrides', 'already derived (idempotent skip)')
+    return
+  end
+  if collect_expected
+    expected_path = File.join(OUT, 'parity-expected.json')
+    if opts[:force] || !File.exist?(expected_path)
+      ok_e, code_e, _e = run_script!('collect-parity-expected.rb', '--workdir', OUT)
+      log "collect-parity-expected exited #{code_e} — deriving from metadata only" unless ok_e
+    end
+  end
+  args = ['--workdir', OUT, '--discovery', DISCOVERY]
+  args << '--force' if opts[:force]
+  ok, code, _out = run_script!('derive-presentation-overrides.rb', *args)
+  if ok
+    done_phase!('derive-presentation-overrides')
+  else
+    skip_phase!('derive-presentation-overrides',
+                "derive-presentation-overrides.rb exited #{code} — builders fall back to plain " \
+                'formatting; not fatal')
+  end
+end
+
 def phase_build_domo_layout!(opts)
   hr('build-domo-layout')
   layout_path = File.join(DISCOVERY, 'dashboard-layout.json')
@@ -690,6 +727,7 @@ def run_offline!(opts)
   skip_phase!('capture-visuals', 'offline: PNG assets (if any) are pre-seeded by the fixture at png/cards/*.png; no live render')
 
   phase_convert_beast_modes!(opts)
+  phase_derive_presentation!(opts, collect_expected: false)
   phase_build_workbook!(opts)
 
   hr('build-workbook-spec')
@@ -854,6 +892,7 @@ def run_live!(opts)
     done_phase!('post-and-readback-dm')
   end
 
+  phase_derive_presentation!(opts, collect_expected: !tier_b)
   phase_build_workbook!(opts)
 
   hr('build-workbook-spec')

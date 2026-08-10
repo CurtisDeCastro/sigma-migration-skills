@@ -129,6 +129,7 @@ grid is only 6 wide, so widths scale ×4).
 | `scripts/preflight-columns.rb` | 2.9 | Check every mapped dataset's Domo columns against the REAL warehouse table schema (live Sigma catalog lookup); reports gaps + auto-suggests (never auto-applies) a derivation formula for a known pattern |
 | `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names); honors a Phase-2.5 reuse decision |
 | `post-and-readback.rb` *(vendored)* | 4 | POST DM/WB + capture server element IDs / column labels |
+| `scripts/derive-presentation-overrides.rb` | 5 (pre) | Source facts (discovery + early Domo card-data) → **layout-safe** styling sidecars (`kpi-format-overrides.json`, `chart-axis-overrides.json`, `category-order-overrides.json`) so Domo-faithful compact KPIs / axes / category order are automatic, not hand-authored. Preserves any operator-authored sidecar already on disk. |
 | `scripts/build-workbook.rb` | 5 | Cards → Sigma chart/table/KPI element specs (`chart-specs.json`) + controls |
 | `build-workbook-spec.rb` *(vendored)* | 5 | Assemble master + pages from `chart-specs.json` + `dm-ids.json` → POST-ready workbook spec |
 | `scripts/qa-check.rb` | 5e | Domo-specific spec gate: KPI-not-count-of-id, filter fan-out, no bar-as-table, text-wrap, gridlines-off |
@@ -417,6 +418,19 @@ server element IDs, verify zero error columns.
 ---
 
 ## Phase 5 — Workbook
+
+**Phase 5 (pre) — presentation overrides (automatic, runs before build-workbook).**
+`migrate-domo.rb` runs `scripts/derive-presentation-overrides.rb` first (live:
+after an early `collect-parity-expected.rb`, which reads Domo card-data only and
+needs no Sigma). It derives the **layout-safe** styling sidecars the builders
+consume — Domo-style compact KPI display, compact currency axes, and source
+category order — from source facts, so a customer run reproduces the gold-path
+styling without hand-authored files. It only writes sidecars that don't already
+exist (an operator's hand-authored sidecar always wins) and never fails the run.
+It deliberately does **not** auto-author `card-header-overrides.json` (that
+override adds `header-*` text elements the automated layout has no zone for; the
+source Summary Number is already surfaced by the companion-KPI mechanism). The
+`domo/orders-presentation` corpus case pins this derivation offline/creds-free.
 
 `ruby scripts/build-workbook.rb` → map each card to a Sigma element, following
 **`refs/card-to-element.md`** (the chart map). **Read the per-card PNG from

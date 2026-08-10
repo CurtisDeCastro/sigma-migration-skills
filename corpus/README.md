@@ -38,6 +38,7 @@ corpus/
 | cognos/sales-overview-charts-report | report-spec XML (plugin fixtures) | workbook (17 elements) |
 | looker/skilltest-orders | LookML model+views+dashboard (plugin fixtures) | DM (explore + join) |
 | domo/orders-smoke | synthetic Domo DataSets + cards + Beast Modes | DM (2 elements) |
+| domo/orders-presentation | synthetic Domo cards + card-data snapshot | presentation-override derivation pin (checks.sh, no golden DM) |
 
 ## Runner
 
