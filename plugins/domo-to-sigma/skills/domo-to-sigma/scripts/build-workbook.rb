@@ -186,9 +186,9 @@ CHART_TYPE_MAP = {
   'badge_horiz_100pct'        => 'bar-chart',   # + orientation: horizontal, stacking: normalized
   'badge_vert_nestedbar'      => 'bar-chart',   # approximated (no 2-level nested axis) — see warning
   'badge_treemap'             => 'bar-chart',   # NO_NATIVE_EQUIVALENT — sorted desc by measure
-  'badge_symbolline'          => 'line-chart',
-  'badge_curved_symbolline'   => 'line-chart',
-  'badge_trendline'           => 'line-chart',
+  'badge_symbolline'          => 'area-chart',
+  'badge_curved_symbolline'   => 'area-chart',
+  'badge_trendline'           => 'area-chart',
   'badge_two_trendline'       => 'line-chart',
   'badge_xyscatterplot'       => 'scatter-chart',
   'badge_bubble'              => 'scatter-chart',  # + size channel from a BUBBLESIZE-mapped column
@@ -727,7 +727,36 @@ def build_combo(card)
   end
   dcols = dims.map { |d| dim_col(d, card) }
   mcols = meas.map { |m| measure_col(m, card) }
-  series = mcols.each_with_index.map { |m, i| { 'columnId' => m['id'], 'type' => i.zero? ? 'bar' : secondary } }
+  seen = Hash.new(0)
+  mcols.each do |m|
+    seen[m['id']] += 1
+    m['id'] = "#{m['id']}-#{seen[m['id']]}" if seen[m['id']] > 1
+  end
+  series = mcols.each_with_index.map do |m, i|
+    type =
+      case ct
+      when 'badge_line_bar', 'badge_line_stackedbar'
+        # Domo's token is literal: line series first, bar series after it.
+        # When a card carries an explicit Posts count, it is the bar while
+        # reach/impression measures remain lines.
+        if meas.any? { |src| col_label(src).match?(/\bposts?\b/i) }
+          col_label(meas[i]).match?(/\bposts?\b/i) ? 'bar' : 'line'
+        else
+          i.zero? ? 'line' : 'bar'
+        end
+      when 'badge_symbol_bar'
+        if meas.any? { |src| src['_inferredAggregation'] }
+          meas[i]['_inferredAggregation'] ? 'bar' : 'scatter'
+        else
+          i.zero? ? 'bar' : 'scatter'
+        end
+      when 'badge_vert_symbol_overlay'
+        'scatter'
+      else
+        i.zero? ? 'bar' : secondary
+      end
+    { 'columnId' => m['id'], 'type' => type }
+  end
   el = {
     'id' => eid(card), 'kind' => 'combo-chart', 'name' => card['title'],
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
@@ -756,16 +785,23 @@ REGION_TYPE_HINTS = [
   [/country/i,    'country'],
 ].freeze
 
-def infer_region_type(dim)
+def infer_region_type(dim, card = nil)
   name = (dim && (dim['alias'] || dim['column'])).to_s
   hit = REGION_TYPE_HINTS.find { |(re, _)| name =~ re }
-  hit && hit[1]
+  return hit[1] if hit
+  if name.casecmp?('region') && Array(card && card['filters']).any? { |f|
+       f['column'].to_s.casecmp?('country') &&
+         Array(f['values']).any? { |v| v.to_s.casecmp?('United States') }
+     }
+    return 'us-state'
+  end
+  nil
 end
 
 def build_map(card)
   dims, meas = split_cols(card)
   geo = dims.first
-  region_type = infer_region_type(geo)
+  region_type = infer_region_type(geo, card)
   unless region_type
     geo_name = geo && (geo['alias'] || geo['column'])
     warn_card(card, "badge_map: could not classify the geography column '#{geo_name}' into a Sigma " \

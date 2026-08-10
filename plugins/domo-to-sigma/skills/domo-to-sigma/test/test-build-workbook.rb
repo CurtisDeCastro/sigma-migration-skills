@@ -145,9 +145,24 @@ combo = build_element({ 'id' => 'c11', 'title' => 'Revenue vs Target', 'chartTyp
                                        { 'column' => 'target', 'aggregation' => 'SUM', 'alias' => 'Target' } ] }, {})
 eq(combo['kind'], 'combo-chart', 'badge_line_bar → combo-chart, NOT line-chart (substring "badge_line" would mis-route it)')
 eq(combo['yAxis']['columnIds'],
-   [ { 'columnId' => combo['columns'][1]['id'], 'type' => 'bar' },
-     { 'columnId' => combo['columns'][2]['id'], 'type' => 'line' } ],
-   'first measure renders as the bar series, second as the line series')
+   [ { 'columnId' => combo['columns'][1]['id'], 'type' => 'line' },
+     { 'columnId' => combo['columns'][2]['id'], 'type' => 'bar' } ],
+   'badge_line_bar preserves Domo role order: first measure line, second bar')
+
+duplicate_combo = build_element({
+  'id' => 'c11b', 'title' => 'Page View Growth', 'chartType' => 'badge_line_bar',
+  'columns' => [
+    { 'column' => 'Date', 'mapping' => 'ITEM' },
+    { 'column' => 'Unique Page Views', 'aggregation' => 'AVG', 'mapping' => 'SERIES' },
+    { 'column' => 'Page Views', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+    { 'column' => 'Unique Page Views', 'aggregation' => 'SUM', 'mapping' => 'SERIES' },
+  ],
+}, {})
+combo_ids = duplicate_combo.dig('yAxis', 'columnIds').map { |s| s['columnId'] }
+eq(combo_ids.uniq.length, 3,
+   'duplicate raw columns keep distinct channel ids for Avg and Sum series')
+eq(combo_ids, duplicate_combo['columns'].drop(1).map { |c| c['id'] },
+   'combo channels retarget the suffixed duplicate id, never repeat the first formula')
 
 # badge_symbol_bar contains the substring '_bar' — must be combo-chart, not bar-chart.
 $warnings = []
@@ -247,6 +262,18 @@ geomap = build_element({ 'id' => 'c20', 'title' => 'Sales by State', 'chartType'
                          'columns' => [ { 'column' => 'store_state' }, { 'column' => 'sales', 'aggregation' => 'SUM' } ] }, {})
 eq(geomap['kind'], 'region-map', 'badge_map with a recognizable state column → region-map')
 eq(geomap['region']['regionType'], 'us-state', 'regionType inferred from the column name')
+
+$warnings = []
+ga_region = build_element({
+  'id' => 'c20b', 'title' => 'New Visits by State', 'chartType' => 'badge_map',
+  'columns' => [{ 'column' => 'Region', 'mapping' => 'ITEM' },
+                { 'column' => 'New Visits', 'aggregation' => 'SUM', 'mapping' => 'VALUE' }],
+  'filters' => [{ 'column' => 'Country', 'operator' => 'IN', 'values' => ['United States'] }],
+}, {})
+eq(ga_region['kind'], 'region-map',
+   'Google Analytics Region + United States filter resolves as a US-state map')
+eq(ga_region.dig('region', 'regionType'), 'us-state',
+   'the card-local country context grounds the otherwise ambiguous Region field')
 
 $warnings = []
 badgeo = build_element({ 'id' => 'c21', 'title' => 'Custom Territory Map', 'chartType' => 'badge_map',
@@ -610,7 +637,7 @@ projected_sales = build_element({
                  { 'column' => 'Amount', 'aggregation' => 'SUM', 'mapping' => 'VALUE' } ],
   'filters' => [ { 'column' => 'IsWon', 'operator' => 'LEGACY', 'values' => ['true'] } ],
 }, {})
-eq(projected_sales['kind'], 'line-chart', 'still the expected chart kind')
+eq(projected_sales['kind'], 'area-chart', 'Domo trendline keeps its filled area shape')
 ok(projected_sales.key?('filters'), 'the card filter produced an element filter (it used to produce NOTHING)')
 flt = projected_sales['filters'].find { |f| f['values'] == ['true'] }
 ok(!flt.nil?, 'the filter carries the REAL value ["true"] — not dropped, not empty (B4 core fix)')

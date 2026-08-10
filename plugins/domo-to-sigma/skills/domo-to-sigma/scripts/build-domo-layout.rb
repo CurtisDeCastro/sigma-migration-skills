@@ -256,6 +256,12 @@ end
 def build_dashboard_with_observed(name, cards, observed, kind_map)
   observed_cards, unobserved_cards = cards.partition { |c| observed.key?(c['id'].to_s) }
   return nil if observed_cards.empty?
+  attached_companions, unobserved_cards = unobserved_cards.partition do |c|
+    c['_primary_card_id'] && observed.key?(c['_primary_card_id'].to_s)
+  end
+  companions_by_primary = attached_companions.each_with_object({}) do |c, out|
+    out[c['_primary_card_id'].to_s] = c
+  end
 
   unless unobserved_cards.empty?
     warn "  ⚠ discovery/layout-observed.json covers #{observed_cards.length} of #{cards.length} " \
@@ -267,12 +273,14 @@ def build_dashboard_with_observed(name, cards, observed, kind_map)
     o = observed[c['id'].to_s]
     kh = zone_chart_kind_for(c, kind_map)
     is_filter = kh == 'filter'
+    companion = companions_by_primary[c['id'].to_s]
+    companion_share = companion ? 0.24 : 0.0
     {
       'id'         => c['id'],
       'x_pct'      => (o['x'].to_f * 100.0).round(2),
-      'y_pct'      => (o['y'].to_f * 100.0).round(2),
+      'y_pct'      => ((o['y'].to_f + o['h'].to_f * companion_share) * 100.0).round(2),
       'w_pct'      => (o['w'].to_f * 100.0).round(2),
-      'h_pct'      => (o['h'].to_f * 100.0).round(2),
+      'h_pct'      => (o['h'].to_f * (1.0 - companion_share) * 100.0).round(2),
       'kind'       => is_filter ? 'filter' : 'chart',
       'caption'    => zone_caption_for(c, kh),
       'chart_kind' => is_filter ? nil : kh,
@@ -280,6 +288,18 @@ def build_dashboard_with_observed(name, cards, observed, kind_map)
       'children'   => [],
       '_source'    => 'observed-from-screenshot',
     }.compact
+  end
+  companion_zones = attached_companions.map do |c|
+    o = observed[c['_primary_card_id'].to_s]
+    {
+      'id' => c['id'], 'kind' => 'chart', 'caption' => c['title'],
+      'chart_kind' => 'kpi', 'measures' => ['value'], 'children' => [],
+      'x_pct' => (o['x'].to_f * 100.0).round(2),
+      'y_pct' => (o['y'].to_f * 100.0).round(2),
+      'w_pct' => (o['w'].to_f * 100.0).round(2),
+      'h_pct' => (o['h'].to_f * 0.24 * 100.0).round(2),
+      '_source' => 'observed-from-screenshot-summary',
+    }
   end
 
   # Optional 'section' grouping (schema note above): one thin heading zone per
@@ -299,7 +319,7 @@ def build_dashboard_with_observed(name, cards, observed, kind_map)
     }
   end
 
-  zones = obs_zones + hdr_zones
+  zones = obs_zones + companion_zones + hdr_zones
   observed_max_y_pct = obs_zones.map { |z| z['y_pct'] + z['h_pct'] }.max
 
   unless unobserved_cards.empty?
@@ -1080,8 +1100,10 @@ if $PROGRAM_NAME == __FILE__
     end
     Array(orphan_companions_by_page[pname]).each do |comp|
       next if card_el_ids.include?(comp['id'])
+      primary_card_id = comp['id'].to_s[/\Ael-(.+)-summary\z/, 1]
       pcards << { 'id' => comp['id'], 'title' => comp['name'], 'chartType' => 'badge_singlevalue',
-                  'sigmaKindHint' => 'kpi-chart', '_size' => '', '_pageOrder' => -1, '_synthesized' => true }
+                  'sigmaKindHint' => 'kpi-chart', '_size' => '', '_pageOrder' => -1,
+                  '_synthesized' => true, '_primary_card_id' => primary_card_id }
     end
   end
 
