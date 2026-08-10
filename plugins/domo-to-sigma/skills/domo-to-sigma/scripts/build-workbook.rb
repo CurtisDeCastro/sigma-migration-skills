@@ -1019,6 +1019,16 @@ def plugin_sql_source(card, mode)
       predicates << "#{qdate} >= DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{lookback}, CURRENT_DATE()))"
       predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, DATE_TRUNC('#{unit.upcase}', CURRENT_DATE()))"
     end
+  elsif rng['dateTimeRangeType'] == 'INTERVAL_OFFSET'
+    raw_date = drf['column'].is_a?(Hash) ? drf['column']['column'] : drf['column']
+    unit = DOMO_DATE_INTERVAL_UNIT[rng['interval'].to_s.upcase]
+    if raw_date && unit
+      qdate = sf_ident(raw_date)
+      offset = rng['offset'].to_i
+      lower = "DATE_TRUNC('#{unit.upcase}', DATEADD('#{unit.upcase}', -#{offset}, CURRENT_DATE()))"
+      predicates << "#{qdate} >= #{lower}"
+      predicates << "#{qdate} < DATEADD('#{unit.upcase}', 1, #{lower})"
+    end
   end
   table = path.map { |part| sf_ident(part) }.join('.')
   sql = "SELECT #{label_expr} AS LABEL, #{value_expr} AS VALUE FROM #{table}"
@@ -1409,17 +1419,11 @@ def apply_card_date_window!(card, el)
     return el
   end
 
-  # Refuse anything whose boundary semantics are not established. Guessing is the
-  # same silent-wrong-numbers class as bead znvg: a wrong window compiles green.
-  unless type == 'ROLLING_PERIOD'
-    warn_card(card, "date window NOT applied (#{payload}): only ROLLING_PERIOD has an established Sigma " \
-                    "mapping here. Domo's exact boundary semantics for #{type} (offset/count) are not " \
-                    'documented in any source available to this converter, and a wrong window compiles ' \
-                    'cleanly while returning wrong numbers everywhere — so it is refused rather than ' \
-                    'guessed. Hand-author the equivalent window and re-run, or establish the semantics live.')
+  unless %w[ROLLING_PERIOD INTERVAL_OFFSET].include?(type)
+    warn_card(card, "date window NOT applied (#{payload}): unsupported dateTimeRangeType #{type}.")
     return el
   end
-  unless offset.zero?
+  if type == 'ROLLING_PERIOD' && !offset.zero?
     warn_card(card, "date window NOT applied (#{payload}): a non-zero ROLLING_PERIOD offset shifts the " \
                     'window back by whole intervals; that boundary is unestablished here. Refused rather ' \
                     'than guessed.')
@@ -1431,7 +1435,7 @@ def apply_card_date_window!(card, el)
                     "mapping (handled: #{DOMO_DATE_INTERVAL_UNIT.keys.join('/')}).")
     return el
   end
-  unless count.positive?
+  if type == 'ROLLING_PERIOD' && !count.positive?
     warn_card(card, "date window NOT applied (#{payload}): count must be positive to express a lookback.")
     return el
   end
@@ -1456,13 +1460,23 @@ def apply_card_date_window!(card, el)
 
   lookback = count - 1
   slug = date_col.downcase.gsub(/\W+/, '-')
-  win_id = "f-datewin-#{slug}-#{unit}-#{count}"
+  suffix = type == 'INTERVAL_OFFSET' ? "offset-#{offset}" : count.to_s
+  win_id = "f-datewin-#{slug}-#{unit}-#{suffix}"
   unless Array(el['columns']).any? { |c| c['id'] == win_id }
-    lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{lookback}, Today())))
-    upper = %(DateAdd("#{unit}", 1, DateTrunc("#{unit}", Today())))
+    if type == 'INTERVAL_OFFSET'
+      # Live-established against the gold page: offset=1 means the previous
+      # completed calendar bucket (month/quarter/week); offset=0 means current.
+      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
+      upper = %(DateAdd("#{unit}", 1, #{lower}))
+      label = "#{offset.zero? ? 'Current' : "#{offset} #{unit}#{offset == 1 ? '' : 's'} ago"} (#{date_col})"
+    else
+      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{lookback}, Today())))
+      upper = %(DateAdd("#{unit}", 1, DateTrunc("#{unit}", Today())))
+      label = "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})"
+    end
     el['columns'] = Array(el['columns']) + [{
       'id' => win_id,
-      'name' => "In last #{count} #{unit}#{count == 1 ? '' : 's'} (#{date_col})",
+      'name' => label,
       'formula' => %(If(#{date_formula} >= #{lower} and #{date_formula} < #{upper}, "in", "out")),
       'hidden' => true
     }]

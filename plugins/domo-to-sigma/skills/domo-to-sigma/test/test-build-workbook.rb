@@ -924,13 +924,7 @@ ok(Array(nowin['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
 ok(Array(nowin['columns']).none? { |c| c['id'].to_s.start_with?('f-datewin') },
    'and no orphan window column')
 
-puts "== step 6: INTERVAL_OFFSET is NOT guessed — it is dropped LOUDLY =="
-# 5 of the 29 windowed cards are INTERVAL_OFFSET (offset>=1, count=0). Domo's
-# exact boundary semantics for those are not documented in any source available
-# here, and guessing is the SAME silent-wrong-numbers class as the 2-arg DateDiff
-# operand order (bead znvg): a wrong window compiles clean and returns wrong
-# values everywhere. So it is refused with a warning naming the exact payload,
-# rather than shipped as a plausible guess.
+puts "== step 6: INTERVAL_OFFSET maps to one completed calendar bucket =="
 $warnings = []
 io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartType' => 'badge_line',
                      'dateRangeFilter' => {
@@ -939,12 +933,13 @@ io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartT
                                             'interval' => 'WEEK', 'offset' => 1, 'count' => 0 } },
                      'columns' => [{ 'column' => 'created_on' },
                                    { 'column' => 'v', 'aggregation' => 'SUM' }] }, {})
-ok(Array(io['filters']).none? { |f| f['id'].to_s.start_with?('dw-') },
-   'no window filter is invented for INTERVAL_OFFSET')
-ok($warnings.any? { |w| w['warning'].to_s.include?('INTERVAL_OFFSET') },
-   'the refusal is warned, not silent')
-ok($warnings.any? { |w| w['warning'].to_s.include?('offset') },
-   'the warning echoes the payload so it is actionable')
+io_filter = Array(io['filters']).find { |f| f['id'].to_s.start_with?('dw-') }
+ok(io_filter, 'INTERVAL_OFFSET emits an element-local window filter')
+io_col = io['columns'].find { |c| c['id'] == io_filter['columnId'] }
+ok(io_col['formula'].include?('DateTrunc("week", DateAdd("week", -1, Today()))'),
+   'offset 1 starts at the previous calendar week boundary')
+ok(io_col['formula'].include?('< DateAdd("week", 1, DateTrunc("week", DateAdd("week", -1, Today())))'),
+   'window ends exclusively at the next boundary')
 
 puts "== step 6: an unresolvable date column is dropped LOUDLY, never a broken filter =="
 $warnings = []
