@@ -736,6 +736,13 @@ def build_page_synthesized(dashboard, page, opts, structure)
   cy1 = cy0 + 1.0 if cy1 <= cy0
   cx0 = all_content.map { |z| (z['x_pct'] || 0).to_f }.min || 0.0
   cx1 = all_content.map { |z| (z['x_pct'] || 0).to_f + (z['w_pct'] || 0).to_f }.max || 100.0
+  if all_content.any? { |z| z['_source'].to_s.start_with?('observed-from-screenshot') }
+    # Operator-observed classic-page geometry is already expressed against the
+    # full screenshot canvas. Do not normalize its occupied left-hand strip to
+    # 100% width: the large right whitespace is real Domo composition.
+    cx0 = 0.0
+    cx1 = 100.0
+  end
   cx1 = cx0 + 1.0 if cx1 <= cx0
   rows_avail = [page_rows + 1 - content_r0, 4].max
   to_row = lambda do |y|
