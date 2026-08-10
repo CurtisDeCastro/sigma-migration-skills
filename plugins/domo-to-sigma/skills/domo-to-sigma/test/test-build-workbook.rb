@@ -1134,8 +1134,8 @@ Dir.mktmpdir do |dir|
        'section ids match build-domo-layout observed-section ids')
     eq(section_els.map { |e| e['name'] }, %w[First Second],
        'section text follows screenshot y-order, not discovery card order')
-    eq(section_els.map { |e| e['body'] }, ['### First', '### Second'],
-       'each observed section is visible authored text')
+    eq(section_els.map { |e| e['body'] }, ["### First\n\n---", "### Second\n\n---"],
+       'each observed section is visible authored text with a divider rule')
   end
 end
 

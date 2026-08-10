@@ -941,6 +941,25 @@ def build_table(card)
       'kind' => 'top-n', 'rankingFunction' => 'rank', 'mode' => 'top-n', 'rowCount' => limit,
     }]
   end
+
+  override_path = File.join(OUT, 'table-display-overrides.json')
+  overrides = (JSON.parse(File.read(override_path)) rescue {}) if File.exist?(override_path)
+  display_rule = overrides && overrides[card['id'].to_s]
+  if display_rule.is_a?(Hash) && display_rule['formula'] && display_rule['max']
+    helper = {
+      'id' => display_rule['filterColumnId'].to_s,
+      'name' => display_rule['filterColumnName'].to_s,
+      'formula' => display_rule['formula'].to_s,
+      'hidden' => true
+    }
+    el['columns'] << helper
+    el['order'] << helper['id']
+    el['filters'] = Array(el['filters']).reject { |filter| filter['kind'] == 'top-n' }
+    el['filters'] << {
+      'id' => "source-cap-#{el['id']}", 'columnId' => helper['id'],
+      'kind' => 'number-range', 'max' => display_rule['max'].to_f
+    }
+  end
   el
 end
 
@@ -2226,7 +2245,7 @@ def observed_section_elements(cards)
           .sort_by(&:last).each_with_index.map do |(name, _y), i|
     {
       'id' => "text-observed-section-#{i}", 'kind' => 'text',
-      'name' => name, 'body' => "### #{name}",
+      'name' => name, 'body' => "### #{name}\n\n---",
     }
   end
 end
