@@ -187,7 +187,7 @@ CHART_TYPE_MAP = {
   'badge_horiz_100pct'        => 'bar-chart',   # + orientation: horizontal, stacking: normalized
   'badge_vert_nestedbar'      => 'bar-chart',   # approximated (no 2-level nested axis) — see warning
   'badge_treemap'             => 'bar-chart',   # NO_NATIVE_EQUIVALENT — sorted desc by measure
-  'badge_symbolline'          => 'area-chart',
+  'badge_symbolline'          => 'line-chart',
   'badge_curved_symbolline'   => 'area-chart',
   'badge_trendline'           => 'area-chart',
   'badge_two_trendline'       => 'line-chart',
@@ -456,6 +456,12 @@ def build_kpi(card, overrides)
               { 'id' => vid, 'name' => label,
                 'formula' => "#{sigma_agg(agg, sn['distinct'])}(#{mref(disp)})",
                 'format' => sigma_format(sn['format'], label) }.compact
+  if sn.dig('format', 'type').to_s.match?(/\A(?:currency|money)\z/i) && value_col
+    # Domo's big-number renderer abbreviates currency even when the component
+    # metadata carries a fixed currency pattern (source card: $146.7K while its
+    # subtitle is $146,737.9). Match the visible headline, not just metadata.
+    value_col['format'] = { 'kind' => 'number', 'formatString' => '$.4~s' }
+  end
   if !ov && sn['_isCalc'] && value_col && !value_col['formula'].to_s.empty?
     value_col['formula'] = "Coalesce(#{value_col['formula']}, 0)"
   end
@@ -712,7 +718,11 @@ def build_pie_or_donut(card, kind)
     'source' => { 'kind' => 'table', 'elementId' => 'master' },
     'columns' => [dcol, mcol].compact,
     'value' => mcol ? { 'id' => mcol['id'] } : nil,   # ⚠ donut/pie use value.id, NOT columnId
-    'color' => dcol ? { 'id' => dcol['id'] } : nil,
+    'color' => dcol ? {
+      'id' => dcol['id'],
+      'sort' => (mcol ? { 'by' => mcol['id'], 'direction' => 'descending' } :
+                         { 'direction' => 'ascending' })
+    } : nil,
   }.compact
 end
 

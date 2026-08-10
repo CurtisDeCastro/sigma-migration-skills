@@ -43,8 +43,8 @@ kpi = build_kpi({ 'id' => 'c1', 'title' => 'Revenue',
 eq(kpi['kind'], 'kpi-chart', 'kind kpi-chart')
 eq(kpi['columns'][0]['formula'], 'Sum([Master/Sales Amount])', 'value = Sum of measure, source-prefixed (NOT Count of id)')
 eq(kpi['value'], { 'columnId' => kpi['columns'][0]['id'] }, 'value uses columnId (not id)')
-eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'formatString' => '$,.0f' },
-   'currency format carries a released Sigma d3 format string')
+eq(kpi['columns'][0]['format'], { 'kind' => 'number', 'formatString' => '$.4~s' },
+   'currency KPI matches Domo visible abbreviated headline')
 
 puts "== #1 KPI: COUNT-of-id (Domo table default) is flagged, not silent =="
 $warnings = []
