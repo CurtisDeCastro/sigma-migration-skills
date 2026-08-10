@@ -967,9 +967,9 @@ io = build_element({ 'id' => 'c43', 'title' => 'Survey Completion Rate', 'chartT
 io_filter = Array(io['filters']).find { |f| f['id'].to_s.start_with?('dw-') }
 ok(io_filter, 'INTERVAL_OFFSET emits an element-local window filter')
 io_col = io['columns'].find { |c| c['id'] == io_filter['columnId'] }
-ok(io_col['formula'].include?('DateAdd("day", -1, DateTrunc("week"'),
-   'week offset uses Domo Sunday boundary')
-ok(io_col['formula'].include?('< DateAdd("week", 1, DateAdd("day", -1, DateTrunc("week"'),
+ok(io_col['formula'].include?('DateTrunc("week", DateAdd("week", -1, Today()))'),
+   'Sigma week offset uses its Domo-compatible Sunday boundary')
+ok(io_col['formula'].include?('< DateAdd("week", 1, DateTrunc("week"'),
    'window ends exclusively at the next boundary')
 
 calc_kpi = build_element({

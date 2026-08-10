@@ -1598,14 +1598,9 @@ def apply_card_date_window!(card, el)
     if type == 'INTERVAL_OFFSET'
       # Live-established against the gold page: offset=1 means the previous
       # completed calendar bucket (month/quarter/week); offset=0 means current.
-      lower =
-        if unit == 'week'
-          # Domo weeks start Sunday; Sigma/Snowflake's default week boundary
-          # can be Monday. Shift +1 day before truncating, then back one day.
-          %(DateAdd("day", -1, DateTrunc("week", DateAdd("day", 1, DateAdd("week", -#{offset}, Today())))))
-        else
-          %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
-        end
+      # Sigma DateTrunc("week") is already Sunday-based like Domo. (The direct
+      # Snowflake plugin SQL path shifts explicitly because Snowflake is Monday.)
+      lower = %(DateTrunc("#{unit}", DateAdd("#{unit}", -#{offset}, Today())))
       upper = %(DateAdd("#{unit}", 1, #{lower}))
       label = "#{offset.zero? ? 'Current' : "#{offset} #{unit}#{offset == 1 ? '' : 's'} ago"} (#{date_col})"
     else
