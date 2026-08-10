@@ -9,7 +9,7 @@ svg{display:block;width:100%;height:100%}
 <script>
 (function(){
   var svg=document.getElementById("g"),last={value:50,target:100,format:"int"};
-  function fmt(n,f){if((f||"").indexOf("%")>=0)return(Number(n)*100).toFixed(1)+"%";return Math.round(Number(n)).toLocaleString()}
+  function fmt(n,f){if((f||"").indexOf("%")>=0){var m=(f||"").match(/\.(\d+)/);return(Number(n)*100).toFixed(m?Number(m[1]):0)+"%"}return Math.round(Number(n)).toLocaleString()}
   function point(cx,cy,r,deg){var a=(deg-180)*Math.PI/180;return{x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)}}
   function arc(cx,cy,r,a,b){var s=point(cx,cy,r,b),e=point(cx,cy,r,a);return"M "+s.x+" "+s.y+" A "+r+" "+r+" 0 0 0 "+e.x+" "+e.y}
   function draw(value,target,format){

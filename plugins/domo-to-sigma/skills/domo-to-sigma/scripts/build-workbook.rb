@@ -1097,13 +1097,13 @@ def plugin_gauge_source(card)
     if percent && source_formula
       domo_formula_to_snowflake(source_formula)
     elsif grain_date
-      "COUNT(DISTINCT #{sf_ident(grain_date)})"
+      "COUNT(DISTINCT #{sf_ident(grain_date)}) / 100.0"
     elsif current
       snowflake_aggregate(current)
     else
       '0'
     end
-  target_expr = percent ? '1' : (grain_date ? '100' : (target ? snowflake_aggregate(target) : '1'))
+  target_expr = (percent || grain_date) ? '1' : (target ? snowflake_aggregate(target) : '1')
   predicates = []
   drf = card['dateRangeFilter'] || {}
   rng = drf['dateTimeRange'] || {}
@@ -1155,7 +1155,14 @@ def pluginize_visual(card, live_el)
     headline = live_el
     headline['id'] = "#{eid(card)}-summary"
     $companion_elements << headline
-    format = card.dig('summaryNumber', 'format', 'type').to_s.downcase.include?('percent') ? '.1%' : 'int'
+    format =
+      if card.dig('summaryNumber', 'format', 'type').to_s.downcase.include?('percent')
+        '.1%'
+      elsif card.dig('dateGrain', 'column')
+        '.0%'
+      else
+        'int'
+      end
     plugin = {
       'id' => "#{eid(card)}-plugin-v1", 'kind' => 'plugin',
       'pluginId' => plugin_id,
