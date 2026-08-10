@@ -478,7 +478,9 @@ def apply_kpi_display_override!(card, kpi)
   path = File.join(OUT, 'kpi-format-overrides.json')
   all = (JSON.parse(File.read(path)) rescue {}) if File.exist?(path)
   rule = all && all[card['id'].to_s]
-  return kpi unless rule.is_a?(Hash) && rule['scale'].to_f.nonzero?
+  return kpi unless rule.is_a?(Hash)
+  kpi['value']['fontSize'] = rule['fontSize'].to_i if rule['fontSize'].to_i.positive?
+  return kpi unless rule['scale'].to_f.nonzero?
   raw = Marshal.load(Marshal.dump(kpi))
   raw['id'] = "#{kpi['id']}-verify"
   raw['name'] = "#{kpi['name']} (Parity)"
