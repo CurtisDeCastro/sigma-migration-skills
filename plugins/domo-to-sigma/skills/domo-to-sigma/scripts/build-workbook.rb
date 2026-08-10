@@ -1296,7 +1296,12 @@ end
 # `el['order']`, when the element kind has one — only `table` does) in place.
 def filter_target_column(el, col)
   slug = col.to_s.downcase.gsub(/\W+/, '-')
-  existing = Array(el['columns']).find { |c| %W[d-#{slug} m-#{slug} f-#{slug}].include?(c['id']) }
+  candidates = Array(el['columns']).select { |c| %W[d-#{slug} m-#{slug} f-#{slug}].include?(c['id']) }
+  existing = candidates.find { |c| c['id'].to_s.start_with?('d-', 'f-') }
+  existing ||= candidates.find { |c|
+    c['id'].to_s.start_with?('m-') &&
+      c['formula'].to_s !~ /\A(?:Sum|Avg|Count|CountDistinct|Min|Max)\(/
+  }
   return existing['id'] if existing
   name, formula = resolve_filter_column(col)
   return nil unless formula

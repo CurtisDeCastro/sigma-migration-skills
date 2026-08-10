@@ -676,6 +676,24 @@ eq(flt2['columnId'], 'd-iswon',
    'the grouped source filter reuses its EXISTING dimension column, not a duplicate')
 eq(before_size, 2, 'no extra helper column was appended — reuse, not duplication')
 
+puts "== B4: a raw-value filter never targets an aggregated measure of the same column =="
+$chart_helpers = []
+build_element({
+  'id' => 'c39b', 'title' => 'Won Deals', 'chartType' => 'badge_bubble',
+  'columns' => [
+    { 'column' => 'IsWon', 'aggregation' => 'COUNT', 'mapping' => 'XTIME' },
+    { 'column' => 'Amount', 'aggregation' => 'AVG', 'mapping' => 'VALUE' },
+    { 'column' => 'Owner', 'mapping' => 'SERIES' },
+  ],
+  'filters' => [{ 'column' => 'IsWon', 'operator' => 'IN', 'values' => ['true'] }],
+}, {})
+agg_helper = $chart_helpers.last
+raw_filter = agg_helper['filters'].find { |f| f['values'] == ['true'] }
+eq(raw_filter['columnId'], 'f-iswon',
+   'list filter uses a hidden raw IsWon column, not Count(IsWon)')
+eq(agg_helper['columns'].find { |c| c['id'] == 'f-iswon' }['formula'], '[Master/Is Won]',
+   'hidden filter target preserves row-level boolean semantics')
+
 puts "== B4: an operator with no faithful Sigma translation is dropped LOUDLY, never silently =="
 $warnings = []
 $companion_elements = []
