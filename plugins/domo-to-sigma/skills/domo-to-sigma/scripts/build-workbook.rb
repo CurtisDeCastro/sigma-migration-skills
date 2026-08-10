@@ -59,6 +59,7 @@ $chart_helpers = []      # hidden grouped source tables for scatter/bubble chart
 $plugin_source_elements = [] # hidden live sources for hosted no-native plugin visuals
 $kpi_verification_elements = [] # raw-value twins when visible KPI display is scaled/formatted
 $chart_verification_elements = [] # raw-value twins when visible axes are display-scaled
+$table_verification_elements = [] # export-stable twins when visible table styling is presentation-only
 
 # bead ziht: dm-spec.json is build-dm.rb's PRE-post spec (already at this
 # script's own OUT dir — build-dm.rb writes it to discovery/, same as
@@ -1043,6 +1044,12 @@ def build_table(card)
         }
       }
     end
+    parity_table = Marshal.load(Marshal.dump(el))
+    parity_table['id'] = "#{el['id']}-verify"
+    parity_table['name'] = "#{el['name']} (Parity)"
+    parity_table.delete('tableStyle')
+    $table_verification_elements << parity_table
+    el['visibleAsSource'] = false
   end
   el
 end
@@ -2422,14 +2429,15 @@ if $PROGRAM_NAME == __FILE__
                                   'data_elements' => $sub_masters.values + $chart_helpers +
                                                      $plugin_source_elements +
                                                      $kpi_verification_elements +
-                                                     $chart_verification_elements,
+                                                     $chart_verification_elements +
+                                                     $table_verification_elements,
                                   'dominant_dataset_id' => master_ds,
                                   'dominant_table' => dominant_table,
                                   'dominant_dm_element_id' => dominant_el['id']))
   warn "  ⚠ could not resolve the dominant dataset's warehouse table — build-workbook-spec.rb " \
        "will fall back to positional DM-element selection (bead 0ku5)" if dominant_table.to_s.empty?
   File.write(File.join(OUT, 'warnings.json'), JSON.pretty_generate($warnings))
-  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s), #{$chart_verification_elements.size} chart parity twin(s))"
+  warn "  wrote #{File.join(OUT, 'chart-specs.json')} (#{out_pages.sum { |p| p['elements'].size }} elements across #{out_pages.size} page(s), #{$sub_masters.size} sub-master(s), #{$chart_helpers.size} grouped chart helper(s), #{$plugin_source_elements.size} plugin source element(s), #{$kpi_verification_elements.size} KPI parity twin(s), #{$chart_verification_elements.size} chart parity twin(s), #{$table_verification_elements.size} table parity twin(s))"
   warn "  wrote #{File.join(OUT, 'warnings.json')} (#{$warnings.size} warning(s))"
   $warnings.first(20).each { |w| warn "    ⚠ #{w['card']}: #{w['warning']}" }
   warn "\n  Next: build-workbook-spec.rb --chart-specs discovery/chart-specs.json --dm-ids discovery/dm-ids.json ..."
