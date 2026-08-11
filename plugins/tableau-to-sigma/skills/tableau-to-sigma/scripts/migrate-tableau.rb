@@ -4215,6 +4215,10 @@ if reuse_dm_id
       { 'id' => p['id'], 'name' => p['name'],
         'elements' => (p['elements'] || []).map do |e|
           el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+          if e['kind'] == 'control'
+            el['controlId'] = e['controlId']
+            el['controlType'] = e['controlType']
+          end
           el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
           el
         end }
@@ -4994,6 +4998,26 @@ else
   spec['name'] = display_wb_name if opts[:name]
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
+end
+# A control in the workbook cannot reference a control in the data model by
+# merely reusing `[controlId]`: formula control scope is document-local. Bridge
+# every matching Tableau parameter control through the released parameters[]
+# target shape, using ONLY the post/GET readback census in dm_els.
+require File.join(HERE, 'lib', 'dm_control_binding')
+dm_control_bindings = DmControlBinding.bind!(
+  spec, data_model_id: dm_id, data_model_elements: dm_els
+)
+File.write(
+  File.join(WORK, 'dm-control-bindings.json'),
+  JSON.pretty_generate(dm_control_bindings)
+)
+if dm_control_bindings[:bound].any?
+  line "DM control binding: #{dm_control_bindings[:bound].size} workbook control instance(s) " \
+       'target readback-confirmed data-model controls through parameters[]'
+end
+dm_control_bindings[:ambiguous].each do |ambiguity|
+  line "WARN: workbook control '#{ambiguity['workbook_control']}' matches multiple data-model controls " \
+       "(#{ambiguity['data_model_controls'].join(', ')}) — no parameters[] target emitted; disambiguate the control IDs"
 end
 # ---- PR-17: thin per-page master instances (default ON) ---------------------
 # Final structural pass over the assembled spec — runs AFTER the multi-metric
