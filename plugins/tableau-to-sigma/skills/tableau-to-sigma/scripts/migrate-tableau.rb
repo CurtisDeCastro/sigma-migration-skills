@@ -3591,15 +3591,19 @@ calcs.select { |c| c['requires_custom_sql'] }.each do |c|
   }
 end
 
-# (b) custom-SQL datasource blocks — DM must source via kind:sql, not warehouse-table.
+# (b) custom-SQL datasource blocks — preserve the semantics, but do not mistake
+#     source SQL for a mandate to embed SQL in the target model. Tables are the
+#     maintainable default when decomposition is exact + equivalence-proven.
 custom_sql.each do |b|
   q = (b['query'] || b['sql'] || '').to_s.gsub(/\s+/, ' ').strip[0, 120]
   questions << {
     'id' => 'custom_sql_datasource', 'severity' => 'review',
-    'detail' => "Datasource is backed by Custom SQL; the DM element must use source.kind=sql: #{q}",
-    'options' => ['source the DM element via Custom SQL (kind: sql)',
+    'detail' => "Datasource is backed by Tableau Custom SQL. Prefer warehouse-table elements + relationships/calcs " \
+                "when they preserve every join/filter/grain rule and pass the equivalence probe; otherwise retain source.kind=sql: #{q}",
+    'options' => ['normalize to warehouse-table elements (only with a passing semantic equivalence proof)',
+                  'preserve the Custom SQL in source.kind=sql for exact parity',
                   'abort and refactor the source in the warehouse first'],
-    'default' => 'source the DM element via Custom SQL (kind: sql)'
+    'default' => 'normalize to warehouse-table elements when equivalence is provable; otherwise preserve source.kind=sql'
   }
 end
 
