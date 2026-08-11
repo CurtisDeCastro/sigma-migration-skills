@@ -281,15 +281,62 @@ errors.
 
 ## Panels, headers, sidebars, and navigation
 
-`document.panels` stores panel metadata; panel content is placed by a
-`<Page id="<panel-id>">` layout block just like overlay content. Preserve panel
-metadata from readback and consult the live `panels` schema for the current
-header/sidebar variants.
+> **LIVE-CONFIRMED 2026-08-10** on a workspace with navigation enabled: a
+> workbook with a header panel and a sidebar panel round-trips through
+> `GET /v2/workbooks/{id}/spec` with both `document.panels[]` entries, the
+> `document.settings.navigation` block, and `<Panel>` layout nodes intact, and
+> the panels render. **Workspace entitlement gate:** on an org where the
+> feature is not enabled, any spec carrying `document.settings.navigation` is
+> rejected with `400 settings.navigation: workbook navigation settings are not
+> enabled for this workspace`; the identical spec without it returns 200.
 
-Workbook chrome is configured separately under `document.settings.navigation`.
-It controls built-in page headers, page tabs, and sidebar navigation; the
-`kind: navigation` canvas element is an independent in-layout menu. Use
-settings navigation for workbook-wide chrome and a navigation element when the
-menu must occupy a grid region or provide curated destinations.
+`document.panels[]` holds page **headers** and page **sidebars** — chrome that
+sits outside the scrolling page grid. Each entry is discriminated by `type`
+(`"header"` or `"sidebar"`); both require `id` + `type`, and optionally carry
+`title`, `pages[]` (page ids the panel applies to), `config`
+(`scroll`/`borderStyle`/`backgroundColor`), and — sidebars only — `width`
+(`small`/`medium`/`large`). A page may have at most one header and one sidebar,
+and only normal pages (not modals/drawers) can carry panels.
+
+```yaml
+document:
+  panels:
+    - id: main-header
+      type: header
+      title: Main Header
+      pages: [overview, detail]
+    - id: nav-sidebar
+      type: sidebar
+      title: Navigation
+      pages: [overview, detail]
+      width: medium
+```
+
+Panel *content* is placed by a dedicated layout **`<Panel>`** block whose `id`
+matches the panel's `id` — NOT a `<Page>` block (that was the pre-2026-08
+guess; live readback uses its own `<Panel>` tag). It takes the same
+`type="grid"` / `gridTemplateColumns` / `gridTemplateRows` attributes as a
+`<Page>` and holds `<Element>` children the same way; each placed element must
+exist in flat `document.elements`. Live-confirmed shape:
+
+```xml
+<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="kchtzPvp2c"/>
+<Panel type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="main-header">
+  <Element elementId="header-text" gridColumn="3 / 15" gridRow="1 / 3"/>
+</Panel>
+<Panel type="grid" gridTemplateColumns="repeat(6, 1fr)" gridTemplateRows="auto" id="nav-sidebar">
+  <Element elementId="sidebar-text" gridColumn="3 / 6" gridRow="5 / 11"/>
+</Panel>
+```
+
+Workbook chrome is switched on separately under
+`document.settings.navigation` (`pageHeader`/`pageSidebar` = `enabled` |
+`disabled`; `primary` = `sidebar` (default) | `header` — which owns the top
+corner when a page has both; `pageTabsInViewMode` = `shown` | `hidden`). A
+panel defined but not enabled here is saved but never shown. This built-in
+chrome is distinct from the `kind: navigation` canvas element, which is an
+independent in-layout menu occupying a grid region. Use `settings.navigation` +
+`document.panels` for workbook-wide header/sidebar chrome, and a `navigation`
+element when the menu must live inside the page grid.
 
 To study real grid-container idioms, fetch an existing multi-page workbook's spec (`GET /v2/workbooks/{id}/spec`, see SKILL.md Steps 1–2). The OpenAPI doesn't model the `layout` XML string, so a live spec is the way to see production layout.
