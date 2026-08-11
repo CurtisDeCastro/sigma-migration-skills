@@ -761,6 +761,15 @@ else
         'visibility' => p['visibility'],
         'elements' => (p['elements'] || []).map do |e|
           el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+          # Workbook controls can target a data-model control only through an
+          # explicit parameters[] binding. Preserve the READBACK control handle
+          # (and type for audit/debugging) in dm-ids.json so the workbook builder
+          # never guesses from the authored request or tries a cross-document
+          # [controlId] formula reference.
+          if e['kind'] == 'control'
+            el['controlId'] = e['controlId']
+            el['controlType'] = e['controlType']
+          end
           el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
           if e.key?('metrics')
             el['metrics'] = Array(e['metrics']).map do |metric|

@@ -50,6 +50,29 @@ A very common Tableau idiom: a **parameter** (e.g. "Select Metric": Sales / Prof
 3. **`SUM(CASE …)` (CASE inside the aggregate)** and **per-branch `SUM()`** both translate; the outer aggregate comes from the chart shelf, so don't hand-wrap a second time.
 4. If the calc doesn't auto-translate (compound/inequality condition, LOD-wrapped branch, branch referencing another calc), the build emits a manual note — hand-author the control + `Switch` measure per the shape above, then re-verify with #1 and #2.
 
+### Workbook controls that drive data-model calculations
+
+Control formula scope is document-local. A workbook control named
+`ctl-param-region` does **not** drive a data-model calculation that references a
+data-model control merely because the IDs or captions match. The workbook
+control must target the data-model control explicitly:
+
+```json
+"parameters": [
+  {
+    "kind": "data-model",
+    "dataModelId": "<posted-data-model-id>",
+    "controlId": "<readback data-model controlId>"
+  }
+]
+```
+
+The orchestrator adds this binding after the data-model readback and records
+`<WORK>/dm-control-bindings.json`. Never replace it with a workbook formula
+reference to the data-model control. Workbook calculations may reference the
+workbook control as `[<workbook controlId>]`; data-model calculations reference
+their local data-model control, and `parameters[]` is the bridge between them.
+
 ### Migration coverage — WARN vs NOTE (read this before reacting to log volume)
 The build prints two prefixes (bead beads-sigma-59mk). **`NOTE`** = a success
 confirmation or a verify-nudge — NOT a gap (`translated inline:` / `decomposed:` /
