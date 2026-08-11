@@ -91,6 +91,14 @@ formatting), defer to the companion **`sigma-workbooks`** skill
 (**`sigma-authoring`** plugin — install it alongside; this converter assumes
 it); this skill restates only Tableau-conversion-specific patterns.
 
+**Data-model source policy:** model physical warehouse tables as
+`warehouse-table` elements by default. Tableau Custom SQL is source logic to
+preserve, not an automatic instruction to embed that text in Sigma: decompose
+it into table elements + relationships/calculated columns when the same
+semantics can be represented and proven. Keep `source.kind: sql` only for logic
+that cannot be expressed faithfully in the model (or while establishing the
+parity baseline). See `refs/phase-3-datamodel.md`.
+
 ---
 
 ## Step −1 — Mission intake (MANDATORY — before anything else)
