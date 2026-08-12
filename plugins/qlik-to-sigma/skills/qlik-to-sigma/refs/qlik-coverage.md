@@ -6,11 +6,11 @@ Every documented source construct maps to a real, current Sigma target or a loud
 
 **`sigma_verified` legend:** ✅ y = the mapped Sigma target resolved at **query time** in a live migration (no `type=error` column) on the date shown; 🟡 n = target is documented but not yet query-verified.
 
-**Coverage:** 36 documented constructs across 5 dimensions; 12 live-verified.
+**Coverage:** 41 documented constructs across 5 dimensions; 12 live-verified.
 
 ## Visualization / chart kind
 
-_Qlik object vizType -> Sigma workbook element kind. The single source of truth for build-sigma-workbook.py's chart classifier. `auto-chart` is NOT in this table — it is resolved compositionally by shape (no dims -> KPI; >=2 dims -> grouped table; 1 temporal dim -> line; else bar), a cited predicate in build_element._
+_Qlik object vizType -> Sigma workbook element kind. Covers the complete documented native Qlik chart and text-based visualization set that is data-bound (filter panes are covered by the control catalog). The single source of truth for build-sigma-workbook.py's chart classifier. `auto-chart` is NOT in this table — it is resolved compositionally by shape (no dims -> KPI; >=2 dims -> grouped table; 1 temporal dim -> line; else bar), a cited predicate in build_element._
 
 Authoritative source: <https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/visualizations.htm>
 
@@ -30,8 +30,18 @@ Authoritative source: <https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/
 | | | | | _Direct released workbook-as-code kind; preserves the Qlik dimension and ordered measures on xAxis/yAxis._ |
 | `gauge` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/Gauge/gauge-chart.htm) | `progress` | 🟡 n | warn+skip |
 | | | | | _A Qlik value gauge maps to Sigma progress (value mode; bar/ring shape) using formula-string min/max/value fields._ |
-| `boxplot` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/BoxPlot/box-plot.htm) | `table` | 🟡 n | warn+explicit approximation |
-| | | | | _EXPLICIT GAP: Sigma has no released box-plot element kind. Preserve grouped dimensions/statistical measures as a table and report the visual approximation; never silently label it native._ |
+| `boxplot` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/BoxPlot/box-plot.htm) | `box-chart` | 🟡 n | warn+skip |
+| | | | | _Native Sigma box chart; the first dimension is the category axis and an optional second dimension splits the boxes._ |
+| `bulletchart` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/BulletChart/bullet-chart.htm) | `progress` | 🟡 n | warn+explicit approximation |
+| | | | | _Sigma progress preserves the primary value and range but not Qlik's per-dimension bullet repetition, target expression, or qualitative segments._ |
+| `distributionplot` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Mashups/Content/Sense_Mashups/Create/Visualizations/Distributionplot/distributionplot.htm) | `box-chart` | 🟡 n | warn+skip |
+| | | | | _Sigma box chart with all points shown preserves Qlik's value distribution and optional bounding box._ |
+| `histogram` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/Histogram/histogram.htm) | `bar-chart` | 🟡 n | warn+explicit approximation |
+| | | | | _Sigma bar chart emits frequency by numeric value; Qlik's automatic/custom bin boundaries require manual recreation._ |
+| `mekkochart` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/Mekko-Chart/mekko-chart.htm) | `bar-chart` | 🟡 n | warn+explicit approximation |
+| | | | | _Normalized stacked bars preserve group/category contribution; variable group width is not available in Sigma._ |
+| `treemap` | [doc](https://help.qlik.com/en-US/sense/Subsystems/Hub/Content/Sense_Hub/Visualizations/TreeMap/treemap.htm) | `bar-chart` | 🟡 n | warn+explicit approximation |
+| | | | | _Stacked bars preserve dimensions and measure contribution; Sigma has no native treemap layout._ |
 
 ## Number format
 

@@ -45,7 +45,8 @@ CHARTS = [
           drillGroups=[{"dimensionIndex": 0, "fields": ["REGION", "CITY"],
                         "labels": ["Region", "City"]}]),
     chart("scatter", "scatterplot", ["CATEGORY"],
-          measures=["Sum(REVENUE)", "Sum(COST)"], title="Revenue vs cost"),
+          measures=["Sum(REVENUE)", "Sum(COST)"], title="Revenue vs cost",
+          color={"mode": "primary"}),
     {"id": "lb", "vizType": "listbox", "title": "Region", "dimensions": [],
      "measures": [], "listbox": {"field": "REGION", "label": "Region", "tags": []}},
     {"id": "fp", "vizType": "filterpane", "title": "Filters", "dimensions": [],
@@ -112,8 +113,9 @@ def main():
     assert progress["kind"] == "progress"
     assert (progress["min"], progress["max"], progress["shape"]) == ("10", "90", "ring")
     assert isinstance(progress["value"], str) and "source" not in progress
-    assert elements["el-box"]["kind"] == "table"
-    assert "EXPLICIT APPROXIMATION" in run.stderr
+    box = elements["el-box"]
+    assert box["kind"] == "box-chart"
+    assert box["xAxis"]["columnId"] and box["yAxis"]["columnIds"]
 
     styled = elements["el-styled"]
     assert styled["legend"] == {"visibility": "hidden", "position": "right"}
@@ -144,6 +146,7 @@ def main():
     grouped = elements["el-scatter-src"]
     assert scatter["source"]["groupingId"] == grouped["groupings"][0]["id"]
     assert scatter["source"]["elementId"] == grouped["id"]
+    assert scatter["color"] == {"by": "single", "value": "#4477AA"}
     print("ALL PASS")
 
 

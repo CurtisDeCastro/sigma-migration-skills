@@ -3,11 +3,14 @@ name: qlik-to-sigma
 description: >-
   Convert a Qlik Sense / Qlik Cloud app into a Sigma data model and matching
   workbook. Use when the user has a Qlik Cloud tenant/app and wants to recreate
-  it in Sigma. Discovery via qlik-cli (Engine + REST), Qlik-expression →
+  it in Sigma. Discovery via qlik-cli (Engine + REST) or an offline corectl
+  unbuild folder, Qlik-expression →
   Sigma-formula translation via the local vendored convert_qlik_to_sigma
   converter (MCP tool only as a manual fallback), data model + workbook
   creation via the Sigma REST API, and parity verification against
-  the source warehouse. Requires qlik-cli + a Sigma SIGMA_API_TOKEN.
+  the source warehouse. Requires Qlik access or a corectl export, plus Sigma
+  API credentials and a Sigma warehouse connection; MCP and direct warehouse
+  credentials are not required.
 user-invocable: true
 ---
 
@@ -71,6 +74,10 @@ never guesses.
 > - **"Done" is a file on disk, not "pages exist."** Complete only when
 >   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the run
 >   stamped `phase6-success.json` with real elements). An empty workbook is never done.
+> - **MCP and direct Snowflake credentials are optional.** Given `--connection`,
+>   the live path browses `GET /v2/connections/paths`, resolves each source with
+>   `POST /v2/connection/<id>/lookup`, and reads all columns through paginated
+>   `GET /v2/connections/tables/<inode>/columns` before the first write.
 
 ```bash
 eval "$(scripts/vendor/get-token.sh)"          # SIGMA_BASE_URL + SIGMA_API_TOKEN
@@ -79,6 +86,19 @@ ruby scripts/migrate-qlik.rb \
   --database <DB> --schema <SCHEMA> --context <qlik-cli ctx> \
   [--folder <SIGMA_FOLDER_ID>] [--name '<prefix>'] [--yes]
 ```
+
+**Offline corectl export:** when a customer cannot grant live Qlik access, accept
+the standard output of `corectl unbuild` and run the same pipeline:
+
+```bash
+ruby scripts/migrate-qlik.rb \
+  --unbuild <app-unbuild-dir> --connection <SIGMA_CONNECTION_ID> \
+  --database <DB> --schema <SCHEMA> [--folder <SIGMA_FOLDER_ID>] [--yes]
+```
+
+`qlik-unbuild-discover.py` recursively flattens sheet `qChildren` and normalizes
+raw `measures.json` / `dimensions.json`; empty master-item arrays do not imply an
+empty app. Inline chart hypercubes still become `charts.json` and workbook tiles.
 
 discover → convert → data model → workbook → layout → parity, for ANY app, driven
 entirely by the discovery artifacts (no app-specific edits). Exit 10 = genuine human
@@ -119,7 +139,8 @@ every Qlik field name resolves.
 ## Prerequisites
 
 ### Qlik access (see `refs/connection.md`)
-qlik-cli context (OAuth M2M or API key). `qlik context use <ctx>`.
+qlik-cli context (OAuth M2M or API key), or a standard corectl unbuild folder.
+For live access: `qlik context use <ctx>`.
 > **M2M reload limit:** a plain M2M bot cannot reload an app that uses a space
 > data-connection ("Connector not found"). Reload as a real user or via M2M
 > impersonation. (Discovery/extraction works fine under M2M.)
@@ -138,6 +159,8 @@ qlik-cli context (OAuth M2M or API key). `qlik context use <ctx>`.
 bash -c 'eval "$(scripts/vendor/get-token.sh)"; <cmd>'   # sets SIGMA_BASE_URL + SIGMA_API_TOKEN
 ```
 Need a Sigma connection pointing at the same warehouse as the Qlik app (for parity).
+The scripts discover tables and columns through that connection's Sigma REST
+catalog; a Snowflake login/CLI/MCP is not a prerequisite.
 The verified DEMO_DB.DEMO connection is `ab12cd34-5678-40ab-8def-1234567890ab` (Snowflake gxb98765).
 
 ---
@@ -153,6 +176,10 @@ The verified DEMO_DB.DEMO connection is `ab12cd34-5678-40ab-8def-1234567890ab` (
 Assemble into the converter's input JSON (`refs/example-converter-input.json`):
 `{appName, tables:[{name, noOfRows, fields:[{name}]}], masterMeasures:[{title,qDef}], masterDimensions:[]}`.
 **Use the post-rename Qlik field names** so relationships come out clean.
+
+For a corectl export, `--unbuild` runs `qlik-unbuild-discover.py` first. A sheet
+is a full property tree, so every `qChildren` level is flattened recursively and
+assigned back to its owning sheet before the normal Phase 2-6 pipeline starts.
 
 ### Discovery speed & safety (customer scale — 20-40+ apps)
 Discovery is **fully parallel and strictly read-only** (re-engineered 2026-06-11):
@@ -283,8 +310,10 @@ Artifact-driven (NO baked-in table maps or SQL): consumes `converter-out.json` +
 - The converter's warehouse-table **star elements are repointed** via reconcile: path
   tail Qlik-table → real table (`OrderFact`→`ORDER_FACT`), column formulas
   `[REAL_TABLE/<real col display>]` with the Qlik field name kept as the display name.
-  Relationships are by column-**id**, so they survive the repoint. LOAD-expression
-  fields are dropped + reported.
+  Relationships are by column-**id**, so they survive the repoint. Physical columns
+  stay on these star elements; supported row-wise LOAD expressions (`If`, `Match`,
+  string/date helpers, arithmetic) compile to SQL and remain on the denormalized
+  element. Unsupported LOAD functions fail before POST instead of disappearing.
 - The **denormalized custom-SQL element** (reproducing the LOAD joins) — the
   bulletproof master for workbook charts; SQL-element rules in `refs/sigma-build-gotchas.md`.
 - The converter's **metrics are hosted on the denorm element** (it carries every
@@ -296,6 +325,9 @@ Artifact-driven (NO baked-in table maps or SQL): consumes `converter-out.json` +
   describes.
 - POST `/v2/dataModels/spec` body `{folderId, schemaVersion:1, ...spec}`; element ids
   are reassigned on save — the script reads back the persisted denorm element id.
+- Before this POST, `preflight-warehouse.rb` validates every source table and every
+  physical/expression-input column through the supplied Sigma connection's REST
+  catalog. It canonicalizes path/column case and rejects missing or ambiguous tables.
 
 ## Phase 4 — Build the workbook  (`scripts/build-sigma-workbook.py`)
 Artifact-driven: consumes `charts.json` + `layout.json` + `denorm.json` + the DM ids.
@@ -310,6 +342,12 @@ including on `/verify` 2026-08-04): `schemaVersion`/`pages`/`kind`/`layout` nest
 top-level `document` key, `folderId` stays outside it; the DM POST above is unaffected
 and stays flat — then `scripts/vendor/put-layout.rb` applies the layout XML
 (`document.layout`).
+
+**Pre-write source-coverage gate.** The orchestrator dry-compiles the data model
+and workbook before either POST, runs `preflight_lint.rb`, and writes
+`workbook-coverage.json`. Every authored queryable source visual must map to a
+queryable Sigma element. Zero-queryable/Data-only workbooks and partially dropped
+visual sets fail in live and `--dry-run` modes before any object is created.
 
 **DM metric references (leverage the semantic layer, don't duplicate it).** A measure
 column prefers a governed **`[Metrics/<name>]`** reference over re-deriving the aggregation
@@ -400,10 +438,12 @@ A workbook that POSTs 200 and passes numeric/bucket parity can still be visually
 | Script | Phase | Purpose |
 |---|---|---|
 | `scripts/qlik-discover.py` | 1 | Extract data model (load script), master measures/dimensions (read-only `measure/dimension ls` + properties), and sheets/charts from any app → `converter-input.json`. Pooled (`--pool 8`), strictly read-only, `--defer-snapshot`/`--snapshot-only` lanes, `timings.json` evidence. **Validated (57.3s → 12.5s on the 46-object fixture app).** |
+| `scripts/qlik-unbuild-discover.py` | 1 | Normalize a corectl `unbuild` folder into the live discovery contract; recursively flattens sheet `qChildren`, including inline charts when master measure/dimension arrays are empty. Offline and creds-free. |
 | `scripts/qlik-dm-signature.py` | 2.5 | Converter-input JSON → DM-reuse signature (`{warehouse_tables, referenced_columns, measures}`) for `find-or-pick-dm.rb`. **Validated live.** |
 | `scripts/vendor/find-or-pick-dm.rb` | 2.5 | Scan existing Sigma DMs and recommend reuse (score = 0.7·column + 0.2·table + 0.1·metric overlap; `--auto-pick` with tie-window safety). Shared vendor-neutral copy (canonical: tableau-to-sigma). Non-destructive. |
 | `scripts/migrate-qlik.rb` | ALL | **The one command** — chains every phase below for any app/sheet; OPEN-QUESTIONS checkpoint, freshness preflight, bucket parity; `--from-discovery` + `--dry-run` = offline smoke. Discovery runs as a background lane with Sigma-side prep (token, folder, DM-spec prefetch for Phase 2.5) interleaved in the foreground; the engine snapshot runs as its own lane under Phases 2-5; `PHASE TIMINGS` printed at exit. **Validated live 2026-06-11 (68s wall, zero hand-edits, GREEN incl. layout lint).** |
 | `scripts/reconcile-columns.py` | 3 | Auto-derive the Qlik-field → real-warehouse-column map from the load script's `AS` aliases + `FROM` tables (so the DM points at real columns). **Validated.** |
+| `scripts/preflight-warehouse.rb` | 3 | Resolve tables and exhaustively list columns through the supplied Sigma connection's REST catalog; no MCP or direct warehouse credentials. Blocks missing/ambiguous sources before POST. |
 | `scripts/gen-denorm-sql.py` | 3 | Turn reconcile.json into the denormalized SQL element (`real AS qlik` + inferred fact↔dim joins) — feeds `build-sigma-dm.py`. Display names match Sigma's own derivation rule. **Validated.** |
 | `scripts/batch-migrate.py` | 3–6 | Migrate many apps in one pass (one Sigma workbook each, reusing a SHARED DM) — for tenant-scale demos. For distinct apps, run `migrate-qlik.rb` per app. **Validated on 5 apps.** |
 | `scripts/gap-scout.md` | 2 | Sub-agent guide: for each unhandled Qlik expression (`Aggr`/`Dual`/selection-state/`Range*`/`Class`), spawn a scout to find + validate a Sigma translation and persist it. |
@@ -419,6 +459,7 @@ A workbook that POSTs 200 and passes numeric/bucket parity can still be visually
 | `refs/control-parity.md` | 5 | The control-parity contract: lint + sidecar schema + the MCP/export-API answer (export `parameters` is the only way to set a control value). |
 | `refs/example-converter-input.json` | 1–2 | The exact convert_qlik_to_sigma input from the first migration. |
 | `fixtures/retail-orders/` | — | Complete offline discovery+converter input set (sanitized demo app) — see `fixtures/README.md` for the offline smoke path. |
+| `fixtures/corectl-country-unbuild/` | - | Synthetic corectl full-property-tree export: empty master arrays, nested COUNTRY charts, and an `If(Match(...))` calculated LOAD field. |
 
 `qlik-discover.py --app <id>` enumerates master items via the read-only
 `qlik app measure ls` / `qlik app dimension ls` + per-item `properties`
