@@ -12,12 +12,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
 SCRIPTS = os.path.join(SKILL, "scripts")
 BUILDER = os.path.join(SCRIPTS, "build-sigma-workbook.py")
+DISCOVERY = os.path.join(SCRIPTS, "qlik-discover.py")
 CATALOG = os.path.join(SKILL, "refs", "catalogs", "viz-kind.json")
 
 sys.path.insert(0, os.path.join(SCRIPTS, "lib"))
 spec = importlib.util.spec_from_file_location("qlik_workbook_builder", BUILDER)
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
+discovery_spec = importlib.util.spec_from_file_location("qlik_discovery", DISCOVERY)
+discovery = importlib.util.module_from_spec(discovery_spec)
+discovery_spec.loader.exec_module(discovery)
 
 
 EXPECTED = {
@@ -66,7 +70,7 @@ def chart(viz_type):
         measures = ["Sum(REVENUE)", "Sum(COST)"]
     elif viz_type == "histogram":
         dims, measures = [["SCORE"]], []
-    return {
+    record = {
         "id": viz_type,
         "vizType": viz_type,
         "title": viz_type,
@@ -79,6 +83,9 @@ def chart(viz_type):
         "sort": {"interColumnSortOrder": [], "dimensions": [[]] * len(dims), "measures": [{}] * len(measures)},
         "gauge": {"min": 0, "max": 100, "shape": "bar"},
     }
+    if viz_type == "combochart":
+        record["seriesTypes"] = ["bar", "line"]
+    return record
 
 
 def test_catalog_is_complete():
@@ -135,7 +142,10 @@ def test_full_catalog_builds_one_workbook():
         charts_path = os.path.join(directory, "charts.json")
         denorm_path = os.path.join(directory, "denorm.json")
         spec_path = os.path.join(directory, "spec.json")
-        json.dump([chart(source) for source in EXPECTED], open(charts_path, "w", encoding="utf-8"))
+        source_charts = [chart(source) for source in EXPECTED]
+        source_charts.append({"id": "about", "vizType": "text-image", "title": "About",
+                              "markdown": "Authored source narrative."})
+        json.dump(source_charts, open(charts_path, "w", encoding="utf-8"))
         json.dump({"element": {"columns": [
             {"name": name, "formula": f"[Custom SQL/{raw}]"}
             for name, raw in [
@@ -163,6 +173,8 @@ def test_full_catalog_builds_one_workbook():
         for source, target in EXPECTED.items():
             element_id = "el-" + source.replace("-", "")
             assert elements[element_id]["kind"] == target, (source, elements.get(element_id))
+        assert elements["el-about"]["kind"] == "text"
+        assert "Authored source narrative." in elements["el-about"]["body"]
         coverage = json.load(open(os.path.join(directory, "workbook-coverage.json"), encoding="utf-8"))
         assert coverage["status"] == "PASS"
         assert coverage["sourceVisuals"] == len(EXPECTED)
@@ -193,6 +205,81 @@ def test_auto_chart_shape_mapping():
         builder._ids.clear()
         element = builder.build_element(record, auto_resolve, [])
         assert element["kind"] == expected, (dimensions, element["kind"], expected)
+
+
+def test_live_presentation_subtypes_and_content():
+    presentation = discovery._presentation({
+        "lineType": "area", "donut": {"showAsDonut": True},
+    })
+    assert presentation == {"lineType": "area", "showAsDonut": True}
+    assert discovery._combo_series({"qDef": {}}) == "bar"
+    assert discovery._combo_series({"qDef": {"series": {"type": "line"}}}) == "line"
+    assert discovery._content_fields({"markdown": "Source text"}, "text-image") == {
+        "markdown": "Source text"
+    }
+
+    area = chart("linechart")
+    area["presentation"] = {"lineType": "area"}
+    assert builder.build_element(area, RESOLVE, [])["kind"] == "area-chart"
+
+    donut = chart("piechart")
+    donut["presentation"] = {"showAsDonut": True}
+    assert builder.build_element(donut, RESOLVE, [])["kind"] == "donut-chart"
+
+    bars = chart("combochart")
+    bars["seriesTypes"] = ["bar", "bar"]
+    bars["presentation"] = {"grouping": "grouped"}
+    assert bars["seriesTypes"] == ["bar", "bar"]
+    combo = builder.build_element(bars, RESOLVE, [])
+    measure_ids = [column["id"] for column in combo["columns"] if column["id"].startswith("y")]
+    assert combo["kind"] == "bar-chart"
+    assert combo["yAxis"]["columnIds"] == measure_ids
+    assert combo["stacking"] == "none"
+    assert combo["xAxis"]["sort"] == {"by": measure_ids[0], "direction": "descending"}
+
+    mixed = chart("combochart")
+    mixed["seriesTypes"] = ["bar", "line"]
+    mixed_element = builder.build_element(mixed, RESOLVE, [])
+    assert mixed_element["kind"] == "combo-chart"
+    assert mixed_element["yAxis"]["columnIds"][1]["type"] == "line"
+
+    auto_sorted_area = chart("linechart")
+    auto_sorted_area["presentation"] = {"lineType": "area"}
+    area_element = builder.build_element(auto_sorted_area, RESOLVE, [])
+    assert area_element["xAxis"]["sort"]["direction"] == "descending"
+
+    grouped = chart("barchart")
+    grouped["presentation"] = {"grouping": "grouped"}
+    assert "stacking" not in builder.build_element(grouped, RESOLVE, [])
+
+    horizontal = chart("barchart")
+    horizontal["presentation"] = {"orientation": "horizontal"}
+    horizontal_warnings = []
+    assert "orientation" not in builder.build_element(horizontal, RESOLVE, horizontal_warnings)
+    assert any("HORIZONTAL ORIENTATION GAP" in warning for warning in horizontal_warnings)
+
+    colored = chart("barchart")
+    colored["color"] = {"mode": "byDimension"}
+    colored_element = builder.build_element(colored, RESOLVE, [])
+    assert colored_element["color"]["column"] != colored_element["xAxis"]["columnId"]
+
+    expression_colored = chart("linechart")
+    expression_colored["color"] = {"mode": "byExpression", "singleColor": "#4477aa"}
+    assert builder.build_element(expression_colored, RESOLVE, [])["color"] == {
+        "by": "single", "value": "#4477aa"
+    }
+
+    refmarks = builder.qlik_refmarks({
+        "refLines": {"x": [], "y": [{"value": 0.85, "color": 2}]}
+    })
+    assert refmarks[0]["line"]["color"] == "#46C646"
+
+
+def test_sparse_singleton_band_expands_to_full_width():
+    layout, _ = builder.banded_page(
+        "page", [["pivot", 1, 13, 1, 11, {"kind": "pivot-table"}]], "Charts"
+    )
+    assert 'elementId="pivot" gridColumn="1 / 25"' in layout
 
 
 if __name__ == "__main__":

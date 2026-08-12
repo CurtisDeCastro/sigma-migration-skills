@@ -118,8 +118,9 @@ def main():
     assert box["xAxis"]["columnId"] and box["yAxis"]["columnIds"]
 
     styled = elements["el-styled"]
-    assert styled["legend"] == {"visibility": "hidden", "position": "right"}
-    assert styled["orientation"] == "horizontal" and styled["stacking"] == "normalized"
+    assert styled["legend"] == {"visibility": "hidden"}
+    assert "orientation" not in styled and styled["stacking"] == "normalized"
+    assert "HORIZONTAL ORIENTATION GAP" in run.stderr
     assert styled["dataLabel"]["labels"] == "hidden"
     assert "MANUAL GAP" in run.stderr and "REGION > CITY" in run.stderr
 
