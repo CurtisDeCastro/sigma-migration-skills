@@ -181,7 +181,31 @@ def _presentation(props):
         out["grouping"] = str(grouping).lower()
     if show_labels is not None:
         out["showLabels"] = bool(show_labels)
+    line_type = props.get("lineType")
+    if line_type:
+        out["lineType"] = str(line_type).lower()
+    donut = props.get("donut") or {}
+    if isinstance(donut, dict) and donut.get("showAsDonut") is not None:
+        out["showAsDonut"] = bool(donut["showAsDonut"])
     return out or None
+
+
+def _combo_series(measure):
+    """Return the authored Qlik combo-series type; absent means Qlik's bar default."""
+    qdef = measure.get("qDef") or {}
+    raw = measure.get("series") or qdef.get("series")
+    if isinstance(raw, dict):
+        raw = raw.get("type")
+    raw = raw or measure.get("representation") or qdef.get("representation") or "bar"
+    return "line" if str(raw).lower() == "line" else "bar"
+
+
+def _content_fields(props, qtype):
+    """Static Qlik content that must survive even though it has no hypercube."""
+    if qtype != "text-image":
+        return {}
+    markdown = props.get("markdown")
+    return {"markdown": markdown} if isinstance(markdown, str) and markdown.strip() else {}
 
 
 def _gauge(props):
@@ -718,6 +742,9 @@ def main():
         presentation = _presentation(effective)
         if presentation:
             rec["presentation"] = presentation
+        if effective_type == "combochart":
+            rec["seriesTypes"] = [_combo_series(measure) for measure in qmeas]
+        rec.update(_content_fields(effective, effective_type))
         drills = _drill_groups(qdims)
         if drills:
             rec["drillGroups"] = drills

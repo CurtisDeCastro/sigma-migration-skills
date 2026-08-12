@@ -318,6 +318,7 @@ QLIK_MSCHEME = {
     "sc": ["#ffffcc", "#fd8d3c", "#bd0026"],
 }
 QLIK_PRIMARY = "#4477AA"
+QLIK_SINGLE = {3: "#BDBDBD"}
 
 def qlik_color(color, dim_ids, mids, el):
     """Map a Qlik chart color encoding to a Sigma `color` channel, or None.
@@ -338,8 +339,18 @@ def qlik_color(color, dim_ids, mids, el):
         if base.get("format"): dup["format"] = base["format"]
         el["columns"].append(dup)
         return {"by": "scale", "column": cid, "scheme": scheme}
-    if mode in ("byDimension", "byExpression") and dim_ids:
-        return {"by": "category", "column": dim_ids[0]}
+    if mode == "byDimension" and dim_ids:
+        base = next((col for col in el["columns"] if col["id"] == dim_ids[0]), None)
+        if not base: return None
+        cid = nid("clr")
+        el["columns"].append({"id": cid, "formula": base["formula"],
+                              "name": base["name"] + " (color)"})
+        return {"by": "category", "column": cid}
+    if mode == "byExpression":
+        literal = c.get("singleColor")
+        if isinstance(literal, str) and literal.startswith("#"):
+            return {"by": "single", "value": literal}
+        return {"by": "single", "value": QLIK_SINGLE.get(literal, "#BDBDBD")}
     return None
 
 def qlik_refmarks(c):
@@ -357,9 +368,11 @@ def qlik_refmarks(c):
             formula = str(val) if isinstance(val, (int, float)) else (r.get("expr") or "")
             if not formula:
                 continue
+            raw_color = r.get("color")
+            line_color = raw_color if isinstance(raw_color, str) else ({2: "#46C646"}.get(raw_color))
             rm = {"type": "line", "axis": axis,
                   "value": {"type": "formula", "formula": formula},
-                  "line": {"color": r.get("color") or "#ef4444", "width": 2}}
+                  "line": {"color": line_color or "#EF4444", "width": 2}}
             if r.get("label"):
                 rm["label"] = {"visibility": "shown", "text": r["label"]}
             out.append(rm)
@@ -374,26 +387,27 @@ def apply_presentation(el, c):
     }
     if chart_kind and isinstance(legend, dict):
         out = {}
-        if legend.get("show") is not None:
-            out["visibility"] = "shown" if legend.get("show") else "hidden"
+        show = legend.get("show")
+        if show is False:
+            out["visibility"] = "hidden"
         dock = str(legend.get("dock") or "").lower()
-        if dock in ("top", "bottom", "left", "right"):
+        if show is not False and dock in ("top", "bottom", "left", "right"):
             out["position"] = dock
+        elif show is True:
+            out["visibility"] = "shown"
         if out:
             el["legend"] = out
 
     presentation = c.get("presentation") or {}
-    if el.get("kind") == "bar-chart":
-        orientation = str(presentation.get("orientation") or "").lower()
-        if orientation in ("horizontal", "vertical"):
-            el["orientation"] = orientation
     if el.get("kind") == "bar-chart":
         grouping = str(presentation.get("grouping") or "").lower()
         if grouping in ("stacked", "stack"):
             el["stacking"] = "stacked"
         elif grouping in ("normalized", "stacked100", "100%"):
             el["stacking"] = "normalized"
-        elif grouping in ("grouped", "clustered"):
+        elif grouping in ("grouped", "clustered") and len(el.get("yAxis", {}).get("columnIds", [])) > 1:
+            # The live API accepts "none" only when there are multiple series;
+            # single-series grouped bars are represented by omitting stacking.
             el["stacking"] = "none"
     if presentation.get("showLabels") is not None and el.get("kind", "").endswith("-chart"):
         el["dataLabel"] = {
@@ -550,6 +564,22 @@ def build_element(c, resolve, warnings, metrics=None):
         elif mapping.get("approximation"):
             warnings.append(f"'{title}' ({vt}) EXPLICIT APPROXIMATION: {mapping.get('notes')}")
 
+    presentation = c.get("presentation") or {}
+    if vt == "piechart" and presentation.get("showAsDonut"):
+        kind = "donut-chart"
+    elif vt == "linechart" and presentation.get("lineType") == "area":
+        kind = "area-chart"
+    elif vt == "combochart" and c.get("seriesTypes") and set(c["seriesTypes"]) == {"bar"}:
+        # Sigma normalizes an all-bar combo back to bar+line on readback.
+        # A multi-series bar chart preserves the Qlik rendering exactly.
+        kind = "bar-chart"
+    elif vt == "combochart" and c.get("seriesTypes") and set(c["seriesTypes"]) == {"line"}:
+        kind = "line-chart"
+    if kind == "bar-chart" and presentation.get("orientation") == "horizontal":
+        warnings.append(
+            f"'{title}' (barchart) HORIZONTAL ORIENTATION GAP: current Sigma workbook "
+            "spec rejects bar-chart.orientation; emitted the valid default vertical orientation")
+
     if dims_raw and any(d is None for d in dim_disp):
         warnings.append(f"skip '{title}': dim(s) {dims_raw} not on the denorm element"); return None
 
@@ -617,7 +647,7 @@ def build_element(c, resolve, warnings, metrics=None):
     if filters: el["filters"] = filters
 
     sort = qlik_sort(c, dim_ids, mids)
-    if sort is None and kind in ("table", "bar-chart") and mids:
+    if sort is None and kind in ("table", "bar-chart", "line-chart", "area-chart", "combo-chart") and mids:
         sort = (mids[0], "descending")   # Qlik auto-chart default: by measure, desc
 
     if kind == "table":
@@ -644,13 +674,16 @@ def build_element(c, resolve, warnings, metrics=None):
         if len(dim_ids) > 1:
             el["columnsBy"] = [{"id": d} for d in dim_ids[1:]]
         return apply_presentation(el, c)
-    if kind == "pie-chart":
+    if kind in ("pie-chart", "donut-chart"):
         el["value"] = {"id": mids[0]}; el["color"] = {"id": dim_ids[0]}
         el["dataLabel"] = {"labels": "shown"}
         return apply_presentation(el, c)
     if kind == "combo-chart":
-        y = [mids[0]] + [{"columnId": m, "type": "line"} for m in mids[1:]]
+        series = c.get("seriesTypes") or ["bar"] * len(mids)
+        y = [{"columnId": m, "type": series[i] if i < len(series) else "bar"}
+             for i, m in enumerate(mids)]
         el["xAxis"] = {"columnId": dim_ids[0]}; el["yAxis"] = {"columnIds": y}
+        if sort: el["xAxis"]["sort"] = {"by": sort[0], "direction": sort[1]}
         return apply_presentation(el, c)
     if kind == "box-chart":
         el["xAxis"] = {"columnId": dim_ids[0]}
@@ -718,6 +751,19 @@ def build_element(c, resolve, warnings, metrics=None):
     rm = qlik_refmarks(c)
     if rm: el["refMarks"] = rm
     return apply_presentation(el, c)
+
+
+def build_content_element(c):
+    """One source-less Qlik content object -> one source-less Sigma element."""
+    if c.get("vizType") != "text-image":
+        return None
+    title = c.get("title") or "Text"
+    markdown = str(c.get("markdown") or "").strip()
+    body = f"### {title}"
+    if markdown:
+        body += "\n\n" + markdown
+    return {"id": "el-" + re.sub(r"[^a-z0-9]", "", str(c["id"]).lower()),
+            "kind": "text", "name": title, "body": body}
 
 
 def build_tabbed_container(c, charts, resolve, warnings, metrics=None):
@@ -906,6 +952,9 @@ def banded_page(page_id, items, title, id_prefix=None, navigation_id=None):
     if items:
         offset += 1 - min(i[3] for i in items)  # first band starts under the header
     for n, band in enumerate(_decollide_bands(_cluster_bands(items)), 1):
+        if len(band) == 1 and (band[0][2] - band[0][1]) / 24 < 0.60:
+            item = band[0]
+            band = [[item[0], 1, 25, *item[3:]]]
         cid = f"{pfx}-{n}"
         extra.append({"id": cid, "kind": "container"})
         r0 = min(i[3] for i in band); r1 = max(i[4] for i in band)
@@ -1122,6 +1171,10 @@ def main():
                         placed.append((control_subcell(cell, i, len(ctls)), ctl))
                     n_controls += len(ctls)
                     continue
+                if c["vizType"] == "text-image":
+                    el = build_content_element(c)
+                    elems.append(el); placed.append((cell, el))
+                    continue
                 if c["vizType"] == "container":
                     tc, tc_layout, children, sources = build_tabbed_container(
                         c, charts, resolve, warnings, metrics)
@@ -1173,6 +1226,11 @@ def main():
                 elems.extend(ctls)
                 layout_elems.extend(ctls)
                 n_controls += len(ctls)
+                continue
+            if c["vizType"] == "text-image":
+                el = build_content_element(c)
+                elems.append(el)
+                layout_elems.append(el)
                 continue
             if c["vizType"] == "container":
                 tc, tc_layout, children, sources = build_tabbed_container(

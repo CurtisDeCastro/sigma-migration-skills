@@ -93,6 +93,11 @@ def main():
             if f["realColumn"] == "*": continue
             if f["qlikField"].upper().endswith("_KEY"): continue
             value = projection(d, f, al)
+            if value is not None and f.get("isExpression") and jk:
+                # The expression belongs to the Qlik dimension table. A missing
+                # LEFT JOIN has no dimension row, so its calculated fields must
+                # remain null rather than evaluating an ELSE branch on SQL nulls.
+                value = f"CASE WHEN {al}.{real(d, jk)} IS NULL THEN NULL ELSE {value} END"
             if value is not None:
                 select.append(f'{value} AS {f["qlikField"]}')
     if unsupported:
