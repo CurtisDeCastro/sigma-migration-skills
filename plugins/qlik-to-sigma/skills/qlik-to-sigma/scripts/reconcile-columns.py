@@ -11,12 +11,17 @@ source table per `LOAD` block and emits that mapping, so the DM build (or the de
 SQL element) can use `<real col> AS <qlik name>` faithfully.
 
 Output per Qlik table:
-  { qlikTable, sourceTable, fields:[{ qlikField, realColumn, renamed }] }
+  { qlikTable, sourceTable,
+    fields:[{ qlikField, realColumn, renamed, isExpression,
+              loadExpression?, expressionColumns? }] }
 
 Handles: `SQL SELECT ... FROM db.schema.TABLE;` (real migration) and
 `FROM [lib://Conn/FILE.csv]` (CSV fixture). RESIDENT/INLINE are flagged, not resolved.
 """
-import re, json, argparse, sys
+import os, re, json, argparse, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qlik_load_expr import referenced_columns
 
 BLOCK = re.compile(
     r'(\w+)\s*:\s*\n\s*LOAD\b(.*?;)\s*((?:SQL\s+)?SELECT\b.*?;)?\s*(?:\n|$)',
@@ -77,8 +82,13 @@ def parse(qvs):
                     # may be dirty, e.g. mixed Apr/April) -> map to the numeric column
                     real = dual.group(2)
                 renamed = real.upper() != qlik.upper()
-                fields.append({"qlikField": qlik, "realColumn": real, "renamed": renamed,
-                               "isExpression": not re.match(r'^[A-Za-z0-9_]+$', real)})
+                is_expression = not re.match(r'^[A-Za-z0-9_]+$', real)
+                field = {"qlikField": qlik, "realColumn": real, "renamed": renamed,
+                         "isExpression": is_expression}
+                if is_expression:
+                    field["loadExpression"] = real
+                    field["expressionColumns"] = referenced_columns(real)
+                fields.append(field)
             else:
                 col = tok.strip('"')
                 if re.match(r'^[A-Za-z0-9_*]+$', col):

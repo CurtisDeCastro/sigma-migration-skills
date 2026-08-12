@@ -38,7 +38,9 @@ What it builds:
 Outputs: wb-result.json {workbookId, pages, elements, skipped}, layout XML
 (multi-<Page> fragment for put-layout.rb), element-map.json (Sigma element ↔
 Qlik object, incl. dims/measures — feeds the Phase-6 freshness + bucket parity).
-With --dry-run nothing is POSTed.
+Also writes workbook-coverage.json and refuses to POST (or pass a dry run) when
+there are zero queryable elements or any authored queryable source visual was
+not rebuilt. With --dry-run nothing is POSTed.
 
 Env (live mode): SIGMA_BASE_URL + SIGMA_API_TOKEN.
 """
@@ -749,6 +751,47 @@ def emap_entry(el, source, page_id):
     }
 
 
+def source_visual_ids(charts, sheets):
+    """Visuals the source app promises to rebuild, in authored sheet order.
+
+    Static text/images and filter objects are not queryable visuals. A container
+    promises its chart children; a trellis container promises one faceted chart
+    under the container id, matching trellis_base().
+    """
+    ids = []
+    def add(candidate):
+        if not candidate:
+            return
+        viz = candidate.get("vizType")
+        if viz in ("filterpane", "listbox", "sheet", "singlepublic", "appprops",
+                   "LoadModel", "measure", "dimension", "masterobject", "sheetlist"):
+            return
+        if viz == "container":
+            for child_id in candidate.get("children") or []:
+                child = charts.get(child_id)
+                if child and ((child.get("measures") or []) or (child.get("dimensions") or [])):
+                    ids.append(child_id)
+            return
+        if viz in _TRELLIS_KINDS:
+            if candidate.get("children"):
+                ids.append(candidate["id"])
+            return
+        if (candidate.get("measures") or []) or (candidate.get("dimensions") or []):
+            ids.append(candidate["id"])
+
+    if sheets:
+        for sheet in sheets:
+            for cell in sorted(sheet.get("cells") or [], key=lambda item: (item.get("row", 0), item.get("col", 0))):
+                add(charts.get(cell.get("objectId")))
+    else:
+        trellis_owned = trellis_child_ids(charts)
+        for candidate in charts.values():
+            if candidate.get("id") in trellis_owned:
+                continue
+            add(candidate)
+    return list(dict.fromkeys(ids))
+
+
 # ---- container-banded layout (layout-playbook.md, verified 2026-06-10) -----
 # Spec side: a `kind: container` placeholder element per band (+ a header text
 # element). Layout side: canonical <Container> wrapping canonical <Element>
@@ -934,7 +977,9 @@ def main():
     ap.add_argument("--element-map", default="element-map.json")
     ap.add_argument("--control-scope-out", default=None,
                     help="intended-scope contract for the control lint "
-                         "(default: control-scope.json next to --spec-out)")
+                          "(default: control-scope.json next to --spec-out)")
+    ap.add_argument("--coverage-out", default=None,
+                    help="source-visual coverage report (default: workbook-coverage.json next to --spec-out)")
     a = ap.parse_args()
 
     charts = {c["id"]: c for c in json.load(open(a.charts))}
@@ -967,6 +1012,7 @@ def main():
                 if i < len(mlabels) and not mlabels[i]: mlabels[i] = hit["title"]
         if meas: c["measureLabels"] = mlabels
     sheets = json.load(open(a.layout)) if a.layout and os.path.exists(a.layout) else []
+    promised_visual_ids = source_visual_ids(charts, sheets)
     denorm = json.load(open(a.denorm))["element"]
     denorm_cols = [(c["name"], (re.search(r"\[Custom SQL/(.+)\]", c["formula"]) or [None, c["name"]])[1])
                    for c in denorm["columns"]]
@@ -1211,15 +1257,47 @@ def main():
     scope_path = a.control_scope_out or os.path.join(
         os.path.dirname(os.path.abspath(a.spec_out)), "control-scope.json")
     json.dump({"version": 1, "source": "qlik", "sourceFilterSignals": n_signals,
-               "controls": scope, "unbound": unbound},
-              open(scope_path, "w"), indent=2)
+                "controls": scope, "unbound": unbound},
+               open(scope_path, "w"), indent=2)
+
+    built_visual_ids = list(dict.fromkeys(
+        entry.get("qlik", {}).get("objectId") for entry in emap
+        if entry.get("qlik", {}).get("objectId")))
+    unbuilt_visual_ids = [object_id for object_id in promised_visual_ids
+                          if object_id not in built_visual_ids]
+    coverage_path = a.coverage_out or os.path.join(
+        os.path.dirname(os.path.abspath(a.spec_out)), "workbook-coverage.json")
+    coverage = {
+        "sourceVisuals": len(promised_visual_ids),
+        "sourceVisualIds": promised_visual_ids,
+        "queryableElements": len(emap),
+        "builtSourceVisualIds": built_visual_ids,
+        "unbuiltSourceVisualIds": unbuilt_visual_ids,
+        "status": "PASS" if promised_visual_ids and not unbuilt_visual_ids and emap else "FAIL",
+    }
+    json.dump(coverage, open(coverage_path, "w"), indent=2)
 
     n_elem = len(elements) - 1
     result = {"workbookId": None, "pages": len(pages), "elements": n_elem,
+              "queryableElements": len(emap), "sourceVisuals": len(promised_visual_ids),
+              "unbuiltSourceVisuals": unbuilt_visual_ids, "coverageFile": coverage_path,
               "kpis": sum(1 for e in emap if e["kind"] == "kpi-chart"),
               "controls": n_controls, "controlScope": scope_path,
               "nativeTrellis": len(_TRELLIS_RECORDS),
               "warnings": warnings, "layoutFile": a.layout_out, "elementMap": a.element_map}
+    if coverage["status"] != "PASS":
+        for w in warnings: print("   WARN:", w, file=sys.stderr)
+        json.dump(result, open(a.out, "w"), indent=2)
+        if not promised_visual_ids:
+            reason = ("no queryable source visuals were found in the discovery artifacts "
+                      "(the workbook would contain only the hidden Data page)")
+        elif not emap:
+            reason = "zero queryable Sigma elements were built (the workbook would contain only the hidden Data page)"
+        else:
+            reason = "source visual(s) were not rebuilt: " + ", ".join(unbuilt_visual_ids)
+        raise SystemExit(
+            f"FATAL: workbook source-coverage gate failed: {reason}. "
+            f"No workbook was posted; inspect {coverage_path} and the WARN lines above.")
     if a.dry_run:
         print(f"DRY RUN: spec -> {a.spec_out} ({len(pages)} pages, {n_elem} elements)", file=sys.stderr)
     else:
