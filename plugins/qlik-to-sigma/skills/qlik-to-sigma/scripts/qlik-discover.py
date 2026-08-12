@@ -65,6 +65,10 @@ charts.json must never silently become an incomplete Sigma workbook.
 import json, os, re, subprocess, sys, argparse, threading, time
 from concurrent.futures import ThreadPoolExecutor
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qlik_load_script import parse_tables
+from qlik_object_props import effective_chart_properties
+
 T0 = time.time()
 STAGES = {}          # stage name -> seconds (timings.json evidence trail)
 RETRIES = {"n": 0}
@@ -378,44 +382,9 @@ def enumerate_master(app, ctx_args, kind, pool):
     return [shape(it, props) for it, props in zip(items, prop_list)]
 
 
-# ---- load-script → tables/fields (best-effort) ----
-def split_fields(s):
-    """Split a LOAD field list on top-level commas only (paren-depth aware), so
-    function-built fields like `Dual(MONTH_NAME, MONTH_NUMBER) AS MONTH` stay
-    one token instead of shedding a bogus duplicate column."""
-    parts, depth, cur = [], 0, []
-    for ch in s:
-        if ch in "([":
-            depth += 1
-        elif ch in ")]":
-            depth = max(0, depth - 1)
-        if ch == "," and depth == 0:
-            parts.append("".join(cur)); cur = []
-        else:
-            cur.append(ch)
-    if cur:
-        parts.append("".join(cur))
-    return parts
-
+# ---- load-script → final warehouse-backed tables/fields ----
 def parse_script(qvs):
-    tables = []
-    # Match  Label:\n LOAD <fields> (FROM|RESIDENT|SQL|AUTOGENERATE|INLINE)
-    for m in re.finditer(r'(\w+)\s*:\s*\n\s*LOAD\b(.*?)(?:\bFROM\b|\bRESIDENT\b|\bSQL\b|\bSELECT\b|\bAUTOGENERATE\b|\bINLINE\b)',
-                         qvs, re.IGNORECASE | re.DOTALL):
-        name, body = m.group(1), m.group(2)
-        fields = []
-        for tok in split_fields(body):
-            tok = tok.strip().strip(";").strip()
-            if not tok: continue
-            mm = re.search(r'\bAS\s+"?([A-Za-z0-9_]+)"?\s*$', tok, re.IGNORECASE)  # alias wins
-            if mm:
-                fields.append(mm.group(1))
-            else:
-                mm2 = re.match(r'"?([A-Za-z0-9_]+)"?$', tok)
-                if mm2: fields.append(mm2.group(1))
-        if fields:
-            tables.append({"name": name, "noOfRows": 0, "fields": [{"name": f} for f in fields]})
-    return tables
+    return parse_tables(qvs)
 
 
 def qlik_eval(app, ctx_args, expr):
@@ -698,7 +667,8 @@ def main():
         oid, qtype = o.get("qId"), o.get("qType")
         if qtype == "sheet": continue
         props = all_props[oid]
-        hc = props.get("qHyperCubeDef", {})
+        effective, effective_type = effective_chart_properties(props, qtype)
+        hc = effective.get("qHyperCubeDef", {})
         # Carry the object's sort definition so the workbook build can reproduce it:
         # per-dimension qSortCriterias (qSortByNumeric/qSortByAscii/qSortByExpression),
         # per-measure qSortBy, and the column precedence (qInterColumnSortOrder).
@@ -720,29 +690,32 @@ def main():
                     qdims, qmeas = lhc.get("qDimensions", []), lhc.get("qMeasures", [])
                     break
         rec = {
-            "id": oid, "vizType": qtype,
-            "title": _resolve_title(props, a.app, ctx),
+            "id": oid, "vizType": effective_type,
+            "title": _resolve_title(effective, a.app, ctx) or _resolve_title(props, a.app, ctx),
             "sheet": obj_sheet.get(oid),
             "dimensions": [ (dd.get("qDef", {}).get("qFieldDefs") or [dd.get("qLibraryId")]) for dd in qdims ],
             "dimLabels": [ ((dd.get("qDef", {}).get("qFieldLabels") or [None]) or [None])[0] for dd in qdims ],
             "dimNullSuppression": [ bool(dd.get("qNullSuppression")) for dd in qdims ],
             "measures":   [ (mm.get("qDef", {}).get("qDef") or mm.get("qLibraryId")) for mm in qmeas ],
             "measureLabels": [ mm.get("qDef", {}).get("qLabel") for mm in qmeas ],
-            "measureFmts": [ (mm.get("qDef", {}).get("qNumFormat") or {}).get("qFmt") for mm in qmeas ],
+            "measureFmts": [
+                ((mm.get("qNumFormat") or mm.get("qDef", {}).get("qNumFormat") or {}).get("qFmt"))
+                for mm in qmeas
+            ],
             "sort": sort,
             # color encoding (byMeasure gradient / byDimension category) so the
             # builder can reproduce the Qlik chart's color, not default it.
-            "color": props.get("color"),
+            "color": effective.get("color"),
             # reference lines (e.g. a "Margin Target" at x=0.45). refLinesX sit on
             # the X axis, refLines on the measure/Y axis. The builder emits Sigma
             # refMarks from these. value comes from refLineExpr.value (a constant)
             # or refLineExpr.label (an expression string).
-            "refLines": _reflines(props.get("refLine") or {}),
+            "refLines": _reflines(effective.get("refLine") or {}),
         }
-        legend = _legend(props)
+        legend = _legend(effective)
         if legend:
             rec["legend"] = legend
-        presentation = _presentation(props)
+        presentation = _presentation(effective)
         if presentation:
             rec["presentation"] = presentation
         drills = _drill_groups(qdims)

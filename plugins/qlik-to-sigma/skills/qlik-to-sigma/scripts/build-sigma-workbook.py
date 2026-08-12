@@ -316,6 +316,7 @@ QLIK_MSCHEME = {
     "sg": ["#ffffcc", "#fd8d3c", "#bd0026"],                        # sequential
     "sc": ["#ffffcc", "#fd8d3c", "#bd0026"],
 }
+QLIK_PRIMARY = "#4477AA"
 
 def qlik_color(color, dim_ids, mids, el):
     """Map a Qlik chart color encoding to a Sigma `color` channel, or None.
@@ -323,6 +324,9 @@ def qlik_color(color, dim_ids, mids, el):
     be on both yAxis and color); byDimension -> color:{by:category} on the dim."""
     c = color or {}
     mode = c.get("mode")
+    if mode == "primary":
+        literal = c.get("color") or (c.get("paletteColor") or {}).get("color")
+        return {"by": "single", "value": literal or QLIK_PRIMARY}
     if mode == "byMeasure" and mids:
         scheme = list(QLIK_MSCHEME.get(c.get("measureScheme"), QLIK_MSCHEME["sg"]))
         if c.get("reverseScheme"): scheme.reverse()
@@ -677,6 +681,8 @@ def build_element(c, resolve, warnings, metrics=None):
             if len(mids) >= 3:
                 s_sz = _raw(mids[2]); scols.append(s_sz); sc["size"] = {"id": s_sz["id"]}
             sc["columns"] = scols
+            cc = qlik_color(c.get("color"), [s_dim["id"]], [s_x["id"], s_y["id"]], sc)
+            if cc: sc["color"] = cc
             rm = qlik_refmarks(c)
             if rm: sc["refMarks"] = rm   # e.g. a Margin Target line at x=0.45
             return apply_presentation(sc, c)

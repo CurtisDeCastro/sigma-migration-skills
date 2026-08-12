@@ -45,7 +45,8 @@ CHARTS = [
           drillGroups=[{"dimensionIndex": 0, "fields": ["REGION", "CITY"],
                         "labels": ["Region", "City"]}]),
     chart("scatter", "scatterplot", ["CATEGORY"],
-          measures=["Sum(REVENUE)", "Sum(COST)"], title="Revenue vs cost"),
+          measures=["Sum(REVENUE)", "Sum(COST)"], title="Revenue vs cost",
+          color={"mode": "primary"}),
     {"id": "lb", "vizType": "listbox", "title": "Region", "dimensions": [],
      "measures": [], "listbox": {"field": "REGION", "label": "Region", "tags": []}},
     {"id": "fp", "vizType": "filterpane", "title": "Filters", "dimensions": [],
@@ -144,6 +145,7 @@ def main():
     grouped = elements["el-scatter-src"]
     assert scatter["source"]["groupingId"] == grouped["groupings"][0]["id"]
     assert scatter["source"]["elementId"] == grouped["id"]
+    assert scatter["color"] == {"by": "single", "value": "#4477AA"}
     print("ALL PASS")
 
 

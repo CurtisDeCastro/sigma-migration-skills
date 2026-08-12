@@ -13,48 +13,13 @@ import os
 import re
 import shutil
 
+from qlik_load_script import parse_tables
+from qlik_object_props import effective_chart_properties
+
 
 def write_json(path, value):
     with open(path, "w") as handle:
         json.dump(value, handle, indent=2)
-
-
-def split_fields(text):
-    parts, depth, current = [], 0, []
-    for char in text:
-        if char in "([":
-            depth += 1
-        elif char in ")]":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    if current:
-        parts.append("".join(current))
-    return parts
-
-
-def parse_script(qvs):
-    tables = []
-    pattern = re.compile(
-        r"(\w+)\s*:\s*\n\s*LOAD\b(.*?)(?:\bFROM\b|\bRESIDENT\b|\bSQL\b|\bSELECT\b|\bAUTOGENERATE\b|\bINLINE\b)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    for match in pattern.finditer(qvs):
-        name, body = match.group(1), match.group(2)
-        fields = []
-        for token in split_fields(body):
-            token = token.strip().strip(";").strip()
-            alias = re.search(r'\bAS\s+"?([A-Za-z0-9_]+)"?\s*$', token, re.IGNORECASE)
-            plain = re.fullmatch(r'"?([A-Za-z0-9_]+)"?', token)
-            field = alias.group(1) if alias else (plain.group(1) if plain else None)
-            if field:
-                fields.append({"name": field})
-        if fields:
-            tables.append({"name": name, "noOfRows": 0, "fields": fields})
-    return tables
 
 
 def property_of(node):
@@ -110,16 +75,17 @@ def static_title(props):
 
 def normalize_chart(props, sheet_id, child_ids):
     info = props.get("qInfo") or {}
-    hypercube = props.get("qHyperCubeDef") or {}
+    effective, effective_type = effective_chart_properties(props, info.get("qType"))
+    hypercube = effective.get("qHyperCubeDef") or {}
     dimensions = hypercube.get("qDimensions") or []
     measures = hypercube.get("qMeasures") or []
-    visualization = props.get("visualization")
+    visualization = effective.get("visualization")
     qtype = info.get("qType") or (visualization if isinstance(visualization, str) else None) or "unknown"
-    viz_type = visualization if isinstance(visualization, str) and visualization else qtype
+    viz_type = effective_type or (visualization if isinstance(visualization, str) and visualization else qtype)
     record = {
         "id": info.get("qId"),
         "vizType": viz_type,
-        "title": static_title(props),
+        "title": static_title(effective) or static_title(props),
         "sheet": sheet_id,
         "dimensions": [
             (dimension.get("qDef") or {}).get("qFieldDefs")
@@ -137,7 +103,7 @@ def normalize_chart(props, sheet_id, child_ids):
         ],
         "measureLabels": [(measure.get("qDef") or {}).get("qLabel") for measure in measures],
         "measureFmts": [
-            ((measure.get("qDef") or {}).get("qNumFormat") or {}).get("qFmt")
+            (measure.get("qNumFormat") or (measure.get("qDef") or {}).get("qNumFormat") or {}).get("qFmt")
             for measure in measures
         ],
         "sort": {
@@ -149,8 +115,8 @@ def normalize_chart(props, sheet_id, child_ids):
             "measures": [measure.get("qSortBy") or {} for measure in measures],
         },
     }
-    if props.get("color") is not None:
-        record["color"] = props["color"]
+    if effective.get("color") is not None:
+        record["color"] = effective["color"]
     if viz_type == "filterpane":
         record["children"] = child_ids
         record["state"] = props.get("qStateName")
@@ -274,7 +240,7 @@ def main():
     )
     converter_input = {
         "appName": app_name,
-        "tables": parse_script(script),
+        "tables": parse_tables(script),
         "masterMeasures": [{"title": item["title"], "qDef": item["expr"]} for item in measures],
         "masterDimensions": [
             {"title": item["title"], "fieldDef": item["expr"]}

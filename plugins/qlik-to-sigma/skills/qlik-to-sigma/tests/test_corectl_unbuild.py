@@ -12,10 +12,11 @@ SKILL = os.path.dirname(HERE)
 SCRIPTS = os.path.join(SKILL, "scripts")
 FIXTURE = os.path.join(SKILL, "fixtures", "corectl-country-unbuild")
 sys.path.insert(0, SCRIPTS)
+SUBPROCESS_TEXT = {"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"}
 
 
 def run(*args):
-    result = subprocess.run(args, capture_output=True, text=True)
+    result = subprocess.run(args, **SUBPROCESS_TEXT)
     assert result.returncode == 0, result.stdout + result.stderr
     return result
 
@@ -71,7 +72,7 @@ def test_unsupported_load_expression_blocks_instead_of_dropping():
             sys.executable, os.path.join(SCRIPTS, "gen-denorm-sql.py"),
             "--reconcile", reconcile, "--database", "ANALYTICS", "--schema", "PUBLIC",
             "--connection", "conn-offline", "--out", denorm
-        ], capture_output=True, text=True)
+        ], **SUBPROCESS_TEXT)
         assert result.returncode != 0 and "unsupported Qlik LOAD expression" in result.stderr
         assert not os.path.exists(denorm)
 
@@ -85,6 +86,65 @@ def test_load_expression_helpers_compose_with_arithmetic_and_concat():
         "CASE WHEN f.COUNTRY = 'US' THEN f.SALES * 2 ELSE -1 END"
     assert translate("If(COUNTRY = 'A OR B' OR COUNTRY = 'US', 1, 0)", "f", columns) == \
         "CASE WHEN f.COUNTRY = 'A OR B' OR f.COUNTRY = 'US' THEN 1 ELSE 0 END"
+    assert translate("If(LIFETIME_REVENUE>1000,1,0)", "c", {"LIFETIME_REVENUE": "LIFETIME_REVENUE"}) == \
+        "CASE WHEN c.LIFETIME_REVENUE > 1000 THEN 1 ELSE 0 END"
+    assert translate(
+        "If(Match(REGION,'West','Southwest','Northwest'),'West Coast', "
+        "If(Match(REGION,'Northeast','Southeast','South'),'East/South','Central'))",
+        "c", {"REGION": "REGION"},
+    ) == (
+        "CASE WHEN c.REGION IN ('West', 'Southwest', 'Northwest') THEN 'West Coast' ELSE "
+        "CASE WHEN c.REGION IN ('Northeast', 'Southeast', 'South') THEN 'East/South' "
+        "ELSE 'Central' END END"
+    )
+
+
+def test_direct_sql_and_resident_load_resolve_to_final_physical_tables():
+    from qlik_load_script import parse_reconcile, parse_tables
+    script = """CustomerStage:
+LOAD CUSTOMER_KEY, REGION,
+  If(Match(REGION, 'West'), 1, 0) AS IS_WEST;
+SQL SELECT CUSTOMER_KEY, REGION FROM DB.SCHEMA.CUSTOMER_DIM;
+
+CustomerDim:
+LOAD CUSTOMER_KEY, REGION, IS_WEST,
+  If(Match(REGION, 'West'), 'Coast',
+     If(Match(REGION, 'East'), 'Atlantic', 'Other')) AS REGION_GROUP
+RESIDENT CustomerStage;
+DROP TABLE CustomerStage;
+
+OrderFact:
+SQL SELECT ORDER_ID, CUSTOMER_KEY, NET_REVENUE FROM DB.SCHEMA.ORDER_FACT;
+"""
+    reconciled = parse_reconcile(script)
+    assert [table["qlikTable"] for table in reconciled] == ["CustomerDim", "OrderFact"]
+    assert reconciled[0]["sourceTable"] == "DB.SCHEMA.CUSTOMER_DIM"
+    assert reconciled[0]["fields"][2]["loadExpression"] == "If(Match(REGION, 'West'), 1, 0)"
+    assert reconciled[0]["fields"][3]["expressionColumns"] == ["REGION"]
+    assert [table["name"] for table in parse_tables(script)] == ["CustomerDim", "OrderFact"]
+
+
+def test_auto_chart_uses_generated_visualization_and_primary_color():
+    from qlik_object_props import effective_chart_properties
+    props = {
+        "qInfo": {"qId": "auto-1", "qType": "auto-chart"},
+        "visualization": "auto-chart",
+        "qHyperCubeDef": {"qMeasures": [{"qDef": {"qDef": "Count(ID)"}}]},
+        "qUndoExclude": {"generated": {
+            "visualization": "scatterplot",
+            "qHyperCubeDef": {"qMeasures": [
+                {"qDef": {"qDef": "Sum(REVENUE)"}},
+                {"qDef": {"qDef": "Sum(PREMIUM)"}},
+                {"qDef": {"qDef": "Count(ID)"}},
+            ]},
+            "color": {"mode": "primary", "paletteColor": {"index": 6}},
+        }},
+    }
+    effective, viz_type = effective_chart_properties(props, "auto-chart")
+    assert viz_type == "scatterplot"
+    assert [measure["qDef"]["qDef"] for measure in effective["qHyperCubeDef"]["qMeasures"]] == [
+        "Sum(REVENUE)", "Sum(PREMIUM)", "Count(ID)"]
+    assert effective["color"]["mode"] == "primary"
 
 
 def test_one_command_dry_run_builds_both_source_visuals():
@@ -116,7 +176,7 @@ def test_data_only_workbook_is_rejected_in_dry_run():
             "--dry-run", "--out", result_path, "--spec-out", os.path.join(output, "spec.json"),
             "--layout-out", os.path.join(output, "layout.xml"),
             "--element-map", os.path.join(output, "element-map.json")
-        ], capture_output=True, text=True)
+        ], **SUBPROCESS_TEXT)
         assert result.returncode != 0 and "Data page" in result.stderr
         report = json.load(open(result_path))
         assert report["queryableElements"] == 0
@@ -146,7 +206,7 @@ def test_partial_visual_drop_is_rejected_before_post():
             "--dry-run", "--out", result_path, "--spec-out", os.path.join(output, "spec.json"),
             "--layout-out", os.path.join(output, "layout.xml"),
             "--element-map", os.path.join(output, "element-map.json")
-        ], capture_output=True, text=True)
+        ], **SUBPROCESS_TEXT)
         assert result.returncode != 0 and "source visual(s) were not rebuilt: dropped" in result.stderr
         report = json.load(open(result_path))
         assert report["queryableElements"] == 1 and report["unbuiltSourceVisuals"] == ["dropped"]

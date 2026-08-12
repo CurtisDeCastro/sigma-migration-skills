@@ -143,10 +143,13 @@ def split_boolean(text, operator):
             depth += 1
         elif char == ")":
             depth -= 1
-        before_ok = index == 0 or text[index - 1].isspace()
         after = index + len(operator)
-        after_ok = after == len(text) or text[after].isspace()
-        if depth == 0 and before_ok and after_ok and upper[index:after] == operator:
+        if depth == 0 and upper.startswith(operator, index):
+            before_ok = index == 0 or text[index - 1].isspace()
+            after_ok = after == len(text) or text[after].isspace()
+        else:
+            before_ok = after_ok = False
+        if before_ok and after_ok:
             parts.append("".join(current).strip())
             current = []
             index = after
