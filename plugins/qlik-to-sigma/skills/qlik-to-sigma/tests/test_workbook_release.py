@@ -113,8 +113,9 @@ def main():
     assert progress["kind"] == "progress"
     assert (progress["min"], progress["max"], progress["shape"]) == ("10", "90", "ring")
     assert isinstance(progress["value"], str) and "source" not in progress
-    assert elements["el-box"]["kind"] == "table"
-    assert "EXPLICIT APPROXIMATION" in run.stderr
+    box = elements["el-box"]
+    assert box["kind"] == "box-chart"
+    assert box["xAxis"]["columnId"] and box["yAxis"]["columnIds"]
 
     styled = elements["el-styled"]
     assert styled["legend"] == {"visibility": "hidden", "position": "right"}

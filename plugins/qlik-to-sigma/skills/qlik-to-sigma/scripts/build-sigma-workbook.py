@@ -18,9 +18,10 @@ What it builds:
     columns×rows grid, default 24×12) 1:1 onto Sigma's 24-col grid with a
     row-scale of 2 (min — so KPI titles and axis labels render; KPIs are
     bumped to ≥5 grid rows, the title-clip threshold).
-  - Chart kinds from the Qlik vizType (barchart/linechart/piechart/combochart/
-    table/kpi). `auto-chart` is resolved by shape: no dims → KPI; ≥2 dims →
-    grouped table; 1 temporal dim → line; else bar.
+  - Chart kinds from the complete documented Qlik vizType catalog, with loud
+    explicit approximations where Sigma has no equivalent. `auto-chart` is
+    resolved by shape: no dims → KPI; ≥2 dims → grouped table; 1 temporal dim
+    → line; else bar.
   - Qlik measure expressions are translated token-wise (Sum/Avg/Min/Max/Count,
     Count(DISTINCT …) → CountDistinct, simple Set Analysis {<F={v}>} →
     Sum(If(...)), arithmetic combinations like Sum(a)/Sum(b)). Untranslatable
@@ -516,6 +517,11 @@ def build_element(c, resolve, warnings, metrics=None):
     labels = c.get("dimLabels") or [None] * len(dims_raw)
     nsup = c.get("dimNullSuppression") or [True] * len(dims_raw)
     mexprs = c.get("measures") or []
+    if c.get("vizType") == "histogram" and not mexprs and dims_raw:
+        # Qlik histograms have one numeric dimension and calculate frequency
+        # implicitly. Sigma has no histogram/bin shelf, so retain the frequency
+        # signal as a loud per-value bar approximation rather than dropping it.
+        mexprs = [f"Count({dims_raw[0]})"]
     mlabels = c.get("measureLabels") or [None] * len(mexprs)
     mfmts = c.get("measureFmts") or [None] * len(mexprs)
     for drill in (c.get("drillGroups") or []):
@@ -542,9 +548,7 @@ def build_element(c, resolve, warnings, metrics=None):
             kind = "bar-chart"
             warnings.append(f"'{title}' ({vt}) approximated as bar-chart")
         elif mapping.get("approximation"):
-            warnings.append(
-                f"'{title}' ({vt}) EXPLICIT APPROXIMATION: Sigma has no native box-plot "
-                f"kind; preserved dimensions/statistical measures as {kind} (visual gap)")
+            warnings.append(f"'{title}' ({vt}) EXPLICIT APPROXIMATION: {mapping.get('notes')}")
 
     if dims_raw and any(d is None for d in dim_disp):
         warnings.append(f"skip '{title}': dim(s) {dims_raw} not on the denorm element"); return None
@@ -648,6 +652,14 @@ def build_element(c, resolve, warnings, metrics=None):
         y = [mids[0]] + [{"columnId": m, "type": "line"} for m in mids[1:]]
         el["xAxis"] = {"columnId": dim_ids[0]}; el["yAxis"] = {"columnIds": y}
         return apply_presentation(el, c)
+    if kind == "box-chart":
+        el["xAxis"] = {"columnId": dim_ids[0]}
+        el["yAxis"] = {"columnIds": mids}
+        if len(dim_ids) > 1:
+            el["splitBy"] = {"id": dim_ids[1]}
+        if vt == "distributionplot":
+            el["boxShape"] = {"points": "all-points"}
+        return apply_presentation(el, c)
     if kind == "scatter-chart":
         # A Qlik scatterplot is measure-vs-measure with the dimension as the POINT
         # identity (Qlik measure order = x, y, size). Sigma's scatter axis is a
@@ -698,6 +710,11 @@ def build_element(c, resolve, warnings, metrics=None):
         el["dataLabel"] = {"labels": "shown"}
     cc = qlik_color(c.get("color"), dim_ids, mids, el)
     if cc: el["color"] = cc
+    if vt in ("mekkochart", "treemap") and len(dim_ids) > 1:
+        # Preserve the nested category as a series. Mekko's variable width and
+        # treemap's tiled geometry remain explicit visual gaps in the catalog.
+        el["color"] = {"by": "category", "column": dim_ids[1]}
+        el["stacking"] = "normalized" if vt == "mekkochart" else "stacked"
     rm = qlik_refmarks(c)
     if rm: el["refMarks"] = rm
     return apply_presentation(el, c)
@@ -1054,9 +1071,7 @@ def main():
     elements.append(master)
     page_elements["page-data"] = [master]
 
-    CHARTY = {"kpi", "auto-chart", "barchart", "linechart", "piechart", "combochart",
-              "scatterplot", "table", "pivot-table", "waterfallchart", "gauge",
-              "boxplot"}
+    CHARTY = set(VIZ_CAT.sources()) | {"auto-chart"}
     # master column id / raw warehouse column per display name — control
     # source/filter targets + date-typed detection fallback
     mcol_id = {dn: f"o{i}" for i, (dn, _raw) in enumerate(denorm_cols)}
@@ -1143,7 +1158,7 @@ def main():
             page_elements[pid] = page_els
             layout_pages.append(xml)
     else:
-        # no sheet layout discovered — build every dim+measure chart, auto-layout;
+        # no sheet layout discovered — build every data-bound chart, auto-layout;
         # filterpanes/listboxes still become controls (top band). Children of a
         # filterpane are skipped standalone (the pane emits them).
         pid, elems, layout_elems = "pg-1", [], []
@@ -1171,7 +1186,7 @@ def main():
                 continue
             c = trellis_base(c, charts, warnings)   # container -> its base child chart
             if c is None: continue
-            if not (c.get("measures")): continue
+            if not ((c.get("measures") or []) or (c.get("dimensions") or [])): continue
             el = build_element(c, resolve, warnings, metrics)
             if el is None: continue
             emit_trellis(el, c, resolve, warnings)   # native trellis (no-op if no signal)
