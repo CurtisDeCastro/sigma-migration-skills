@@ -77,6 +77,39 @@ def test_unsupported_load_expression_blocks_instead_of_dropping():
         assert not os.path.exists(denorm)
 
 
+def test_dimension_calculation_stays_null_when_left_join_misses():
+    with tempfile.TemporaryDirectory() as output:
+        reconcile = os.path.join(output, "reconcile.json")
+        denorm = os.path.join(output, "denorm.json")
+        json.dump([
+            {
+                "qlikTable": "Customers", "sourceTable": "CUSTOMERS",
+                "fields": [
+                    {"qlikField": "CUSTOMER_KEY", "realColumn": "CUSTOMER_KEY", "isExpression": False},
+                    {"qlikField": "REGION", "realColumn": "REGION", "isExpression": False},
+                    {"qlikField": "REGION_GROUP", "realColumn": "If(REGION='West','West','Other')",
+                     "loadExpression": "If(REGION='West','West','Other')", "isExpression": True},
+                ],
+            },
+            {
+                "qlikTable": "OrderFact", "sourceTable": "ORDER_FACT",
+                "fields": [
+                    {"qlikField": "ORDER_ID", "realColumn": "ORDER_ID", "isExpression": False},
+                    {"qlikField": "CUSTOMER_KEY", "realColumn": "CUSTOMER_KEY", "isExpression": False},
+                    {"qlikField": "NET_REVENUE", "realColumn": "NET_REVENUE", "isExpression": False},
+                ],
+            },
+        ], open(reconcile, "w"))
+        run(sys.executable, os.path.join(SCRIPTS, "gen-denorm-sql.py"),
+            "--reconcile", reconcile, "--database", "ANALYTICS", "--schema", "PUBLIC",
+            "--connection", "conn-offline", "--out", denorm)
+        sql = json.load(open(denorm))["sql"]
+        assert (
+            "CASE WHEN a.CUSTOMER_KEY IS NULL THEN NULL ELSE CASE WHEN a.REGION = 'West' "
+            "THEN 'West' ELSE 'Other' END END AS REGION_GROUP"
+        ) in sql
+
+
 def test_load_expression_helpers_compose_with_arithmetic_and_concat():
     from qlik_load_expr import translate
     columns = {"COUNTRY": "COUNTRY", "SALES": "SALES"}

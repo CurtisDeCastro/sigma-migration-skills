@@ -563,7 +563,11 @@
           }
         ],
         "xAxis": {
-          "columnId": "x2"
+          "columnId": "x2",
+          "sort": {
+            "by": "y5",
+            "direction": "descending"
+          }
         },
         "yAxis": {
           "columnIds": [
@@ -2081,7 +2085,11 @@
           }
         ],
         "xAxis": {
-          "columnId": "x21"
+          "columnId": "x21",
+          "sort": {
+            "by": "y37",
+            "direction": "descending"
+          }
         },
         "yAxis": {
           "columnIds": [
