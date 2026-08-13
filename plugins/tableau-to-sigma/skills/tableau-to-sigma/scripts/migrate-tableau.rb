@@ -4780,6 +4780,21 @@ if mechanical
     master_columns << dc
     line "integer-dim decode: added master column '#{dc['name']}' (#{dc['formula']}) — list control filters STRING values (raw numeric list-filter targets are silently stripped by Sigma)"
   end
+  # A Tableau calculated filter's formula wins over a same-named DM physical
+  # passthrough. The builder emits only confidently translated, fully resolved
+  # replacements; preserving the passthrough can make a saved selection blank
+  # every dashboard tile when that physical column is NULL.
+  Array(raw_charts.is_a?(Hash) ? raw_charts['master_calc_columns'] : nil).each do |cc|
+    next unless cc.is_a?(Hash) && cc['id'] && cc['name'] && cc['formula']
+    existing = master_columns.find { |column| column['id'] == cc['id'] } ||
+               master_columns.find { |column| column['name'].to_s.casecmp?(cc['name'].to_s) }
+    if existing
+      existing['formula'] = cc['formula']
+    else
+      master_columns << cc
+    end
+    line "calculated-filter fidelity: master '#{cc['name']}' uses the translated Tableau formula, not a same-named passthrough"
+  end
   # Dim-grain helper placeholder resolution: build-charts runs before it knows
   # the live DM element ids, so grain helpers carry source.elementId =
   # "__DM_ELEMENT__:<name>". Resolve against the readback (dm_els) NOW — an

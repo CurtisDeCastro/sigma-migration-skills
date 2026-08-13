@@ -675,7 +675,9 @@ def worksheet_display_title(ws)
   return nil unless ft
   # .elements.to_a('run') / .text — supported by BOTH backends of twb_xml
   # (the Nokogiri shim and the REXML fallback); get_elements is REXML-only.
-  txt = ft.elements.to_a('run').map { |r| r.text.to_s }.join.strip
+  # Tableau writes line breaks as an Æ sentinel plus the actual newline. Keep
+  # the newline but do not leak the sentinel into the Sigma element title.
+  txt = ft.elements.to_a('run').map { |r| r.text.to_s.gsub("Æ", '') }.join.strip
   return nil if txt.empty?
   return nil if txt =~ /\A<[^<>]+>\z/ # "<Sheet Name>" / field-token default
   txt
