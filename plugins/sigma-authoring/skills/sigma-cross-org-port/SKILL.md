@@ -199,8 +199,28 @@ to `!=` on write. All twelve effects are authorable: `clear-control`,
 `open-overlay`, `open-url`, `refresh-element`, `select-tab`, `set-control-value`,
 `update-rows`.
 
+Two effects are only partly authorable — check before promising a rebuild:
+
+- **`open-url` cannot carry a destination.** Its schema requires `openTarget`
+  (`_self` / `_blank` / `_parent`) and exposes **no `url` property**. A
+  spec-authored open-url button therefore opens nothing; the destination is
+  UI-only. Sending a `url` key fails the whole element with the unhelpful
+  `document.elements[N]: Invalid kind: "button"`. Leave such buttons unwired and
+  say so.
+- **`open-document`** likewise carries only what its schema lists — verify the
+  fields you need are there rather than assuming parity with the UI.
+
 Rebuilding needs the *intended* behaviour, which the spec no longer carries —
 answer keys, thresholds, routing. Ask; do not infer it from the data and hope.
+
+And when you do reconstruct answers from data, **check them against the
+workbook's own prose.** On the workbook that motivated this skill, the narrative
+had drifted from the dataset: the text cited 148 orders where the data yields
+156, implied three suspects where exactly one qualifies, and named a "nearest"
+store that is neither nearest nor associated with the surviving suspect. Both
+orgs returned byte-identical result sets, so this was upstream staleness, not a
+port artifact — but it makes "correct" ambiguous, and that is the user's call to
+make, not yours.
 
 ## Phase 4 — Recover image uploads (only if the audit lists any)
 
