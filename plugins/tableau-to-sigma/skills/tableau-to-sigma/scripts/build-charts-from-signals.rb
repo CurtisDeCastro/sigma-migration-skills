@@ -276,7 +276,12 @@ def tile_title(zone, fallback)
   t = zone && zone['display_title']
   return fallback unless t && !t.to_s.strip.empty?
 
-  TableauDynamicTitle.translate(t.to_s.strip, zone['calculations'])
+  # `<Sheet Name>` resolves here (the worksheet is known). Parameter tokens are
+  # deliberately left for the post-pass below: a Sigma dynamic-text reference
+  # only renders against a control the WORKBOOK carries, and no control has been
+  # built yet at tile-build time.
+  TableauDynamicTitle.translate(t.to_s.strip, zone['calculations'],
+                                sheet_name: fallback, control_ids: [])
 end
 
 # Carry an explicitly-authored Tableau color-legend zone into Sigma's native
@@ -765,6 +770,30 @@ def translate_dim_calc(formula, mmap, columns_by_guid = {})
     return master_ref.call(expr.gsub(/\bAND\b/, 'and').gsub(/\bOR\b/, 'or').gsub(/\bNOT\b/, 'not'))
   end
   nil
+end
+
+# A selected Tableau filter bound to a calculated dimension must evaluate the
+# Tableau formula even when the reused DM exposes a same-named physical column.
+# The physical column is not semantic proof and may be entirely NULL. Replace
+# it only when the calculation translates and all dependencies resolve.
+def master_calc_filter_override(caption, formula, mmap, columns_by_guid = {})
+  target = map_column(caption, mmap)
+  return nil unless target
+
+  translated = translate_dim_calc(formula, mmap, columns_by_guid) ||
+               translate_row_level_calc(formula, mmap, columns_by_guid)
+  return nil unless translated
+
+  mapped_names = mmap.values.filter_map { |entry| entry['name'] if entry.is_a?(Hash) }
+  refs = translated.scan(/\[Master\/([^\]]+)\]/).flatten
+  return nil if refs.empty? || refs.any? { |name| !mapped_names.include?(name) }
+  return nil if refs.any? { |name| name.casecmp?(target['name'].to_s) }
+
+  {
+    'id' => target['id'],
+    'name' => target['name'],
+    'formula' => translated.gsub(/\[Master\/([^\]]+)\]/, '[\1]')
+  }
 end
 
 # ---- FIXED-LOD / grain-aware two-stage aggregation --------------------------
@@ -7024,6 +7053,25 @@ norm_cap = ->(s) { s.to_s.strip.downcase.gsub(/[^a-z0-9]+/, '') }
 # filter propagates to every chart sourcing from it). Rides the output JSON as
 # `master_decode_columns` (only when non-empty — additive/byte-identical).
 master_decode_columns = []
+# Source-calculated filters with explicit selections override same-named DM
+# passthroughs on the master. The orchestrator applies these after chart build.
+master_calc_columns = []
+(meta['worksheets'] || {}).each_value do |worksheet|
+  (Array(worksheet['filters']) + Array(worksheet['hidden_filters'])).each do |filter|
+    next if Array(filter['members']).empty?
+    caption = (filter['column_caption'] || filter['caption']).to_s.strip
+    formula = calc_formula_by_caption[caption]
+    next if caption.empty? || formula.to_s.empty?
+
+    override = master_calc_filter_override(caption, formula, mmap, meta['columns_by_guid'] || {})
+    next unless override
+    next if master_calc_columns.any? { |column| column['id'] == override['id'] }
+
+    master_calc_columns << override
+    warnings << "selected calculated filter '#{caption}' overrides the same-named master passthrough " \
+                "with its translated Tableau formula (#{override['formula'][0, 120]})"
+  end
+end
 
 # PR-18 — route an integer-coded discrete-dimension LIST control through a
 # Text() decode helper. A Sigma list/dropdown control sources STRING option
@@ -7912,6 +7960,38 @@ end
 
 all_extras = extras + param_controls + auto_controls
 
+# ---- Tableau title tokens → Sigma dynamic text (post-pass) ------------------
+# Runs AFTER every control is built, because workbook dynamic text renders only
+# against a control the WORKBOOK carries. A Tableau parameter is commonly
+# converted into a DATA-MODEL control, which workbook dynamic text cannot
+# reference; for those the parameter's current value is substituted so the title
+# reads the way the source displayed it. Without this pass the raw Tableau token
+# ships into the element name and Sigma renders it literally, e.g.
+# "Sales Orders - Last <[Parameters].[Parameter 1 3]> weeks" (field-caught).
+begin
+  title_control_ids = all_extras.map { |c| c['controlId'] }.compact
+  title_parameters = meta['parameters'] || []
+  title_calculations = (meta['worksheets'] || {}).values.flat_map { |w| w['calculations'] || [] }
+  title_notes = []
+  (elements + all_extras).each do |el|
+    next unless el.is_a?(Hash)
+
+    %w[name body].each do |field|
+      next unless el[field].is_a?(String)
+
+      translated = TableauDynamicTitle.translate(
+        el[field], title_calculations,
+        parameters: title_parameters, control_ids: title_control_ids, notes: title_notes
+      )
+      el[field] = translated
+    end
+  end
+  title_notes.uniq.each { |note| warnings << note }
+rescue StandardError => e
+  warnings << "title-token translation skipped (#{e.class}: #{e.message}) — raw Tableau parameter " \
+              'tokens may remain in element names; the pre-POST lint (N2) will name them'
+end
+
 # ---- Control-coverage reconciliation — "never miss a .twb parameter/filter" ----
 # Enumerate EVERY extracted parameter + quick-filter and confirm each is
 # accounted for (emitted / needs-wiring / needs-materialization / dropped-with-
@@ -8680,6 +8760,14 @@ if opts[:pages_mode] == :worksheet
         end
         col['formula'] = f
       end
+      # Dynamic text in a title/body references a control the same way a formula
+      # does, so it has to follow the per-page controlId suffix or it points at
+      # an id this page no longer carries and renders nothing.
+      %w[name body].each do |field|
+        next unless el[field].is_a?(String)
+
+        ctl_rewrites.each { |from, to| el[field] = el[field].gsub("{{[#{from}]}}", "{{[#{to}]}}") }
+      end
       # A set-control-value effect's `control` names a param/auto controlId —
       # the SAME id this page just suffixed above. Without this, an emitted
       # action (parameter-action emission is currently gated off in
@@ -8707,6 +8795,7 @@ if opts[:pages_mode] == :worksheet
   # PR-18: decode columns the orchestrator injects into the master element (only
   # when a master-rooted integer-dim control was routed — additive/byte-identical).
   _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  _out['master_calc_columns'] = master_calc_columns if master_calc_columns.any?
   File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-worksheet: #{pages.size} pages, #{auto_controls.size} auto-controls per page" \
        "#{data_elements.any? ? ", #{data_elements.size} hidden data element(s)" : ''})"
@@ -8794,6 +8883,13 @@ elsif opts[:pages_mode] == :dashboard
         f = col['formula'].to_s
         ctl_rewrites.each { |from, to| f = f.gsub("[#{from}]", "[#{to}]") }
         col['formula'] = f
+      end
+      # Dynamic text in a title/body follows the same per-page controlId suffix
+      # as a formula reference (see the page-per-worksheet branch above).
+      %w[name body].each do |field|
+        next unless el[field].is_a?(String)
+
+        ctl_rewrites.each { |from, to| el[field] = el[field].gsub("{{[#{from}]}}", "{{[#{to}]}}") }
       end
       # A parameter-action's set-control-value effect names a param/auto
       # controlId — the SAME id this dashboard page just suffixed above via
@@ -8937,6 +9033,7 @@ elsif opts[:pages_mode] == :dashboard
   # PR-18: decode columns the orchestrator injects into the master element (only
   # when a master-rooted integer-dim control was routed — additive/byte-identical).
   _out['master_decode_columns'] = master_decode_columns if master_decode_columns.any?
+  _out['master_calc_columns'] = master_calc_columns if master_calc_columns.any?
   File.write(opts[:out], JSON.pretty_generate(_out))
   warn "wrote #{opts[:out]} (page-per-dashboard: #{pages.size} page(s), #{data_elements.size} hidden data element(s), #{(param_controls + auto_controls).size} controls per page)"
 else

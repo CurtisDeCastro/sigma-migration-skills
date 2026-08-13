@@ -67,7 +67,7 @@ INVENTORY = [
   { name: 'Dual-axis (synchronized) combo charts',     pat: /synchronized='true'/,
     status: :auto, blurb: 'Synchronized-axis worksheets emit Sigma combo-chart with two yAxis groups.' },
   { name: 'Custom SQL data source',                    pat: /<relation\s[^>]*\btype='text'/,
-    status: :auto, blurb: 'Custom SQL becomes a Sigma data-model element with source.kind="sql".' },
+    status: :auto, blurb: 'Inventory the SQL; prefer equivalent warehouse-table elements and use source.kind="sql" only as the semantics-preserving fallback.' },
   { name: 'Hyper / Tableau extract',                   pat: /<connection\s[^>]*\bclass='hyper'|<extract\s/,
     status: :hint, blurb: 'Workbook has a .hyper extract — Sigma uses live warehouse data. Phase 6 runs in --extract-mode (structural compare) instead of strict-value.' },
   { name: 'Cross-extract drift (live warehouse newer than extract)', pat: /<connection\s[^>]*\bclass='hyper'|<extract\s/,

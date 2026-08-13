@@ -36,10 +36,8 @@
 #      month/date axis canonicalization (MakeDate), stale-source freshness
 #      note (time-boxed wording), title corrections from source captions.
 #   DESCOPED (trial-proven spec-unsupported; emitted as propose-in-UI NOTES,
-#   never spec changes): DM-metric promotion (metric refs don't resolve
-#   through a workbook table layer), chart-as-filter (useAsFilter silently
-#   dropped on readback), pie percent labels (valueFormat:'percent' silently
-#   dropped).
+#   never spec changes): chart-as-filter (useAsFilter silently dropped on
+#   readback), pie percent labels (valueFormat:'percent' silently dropped).
 #
 # Usage:
 #   ruby scripts/enhance-scan.rb --workbook-id <parityWorkbookId> \
@@ -668,19 +666,6 @@ if viz.any? { |(_p, e)| e['kind'] == 'pie-chart' }
               'readback (trial-proven, same class as trellis/tooltip). Value labels persist; percent ' \
               'style must be set in the Sigma UI.',
     'evidence' => "#{viz.count { |(_p, e)| e['kind'] == 'pie-chart' }} pie-chart element(s) present."
-  }
-end
-dm_sourced = masters.any? { |m| m.dig('source', 'kind') == 'data-model' } ||
-             viz.any? { |(_p, e)| e.dig('source', 'kind') == 'data-model' }
-inline_aggs = viz.count { |(_p, e)| (y_col(e) || {})['formula'].to_s =~ /\A(Sum|Avg|Count|CountDistinct|Min|Max)\(/ }
-if dm_sourced && inline_aggs.positive?
-  descoped << {
-    'id' => 'descoped-dm-metric-promotion',
-    'note' => 'DM metric promotion: charts re-implement aggregate formulas inline, but DM metrics are ' \
-              'NOT referenceable from a chart through an intermediate workbook table ([Master/Metric] -> ' \
-              '"Dependency not found"; bare [Metric] compiles to a silent error column — trial-proven). ' \
-              'Promote in the DM and rebind in the Sigma UI if governance requires it.',
-    'evidence' => "#{inline_aggs} chart(s) carry inline aggregate formulas over a data-model source."
   }
 end
 shared_masters = viz.group_by { |(_p, e)| e.dig('source', 'elementId') }.select { |_k, v| v.size >= 2 }

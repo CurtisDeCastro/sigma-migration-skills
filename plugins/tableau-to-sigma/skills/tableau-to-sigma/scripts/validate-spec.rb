@@ -29,6 +29,7 @@ require 'sigma_functions'
 require 'formula_normalize'
 require 'metric_binding' # F4: column/metric collision shape — census admissibility
 require 'workbook_code'
+require 'tableau_dynamic_title' # raw Tableau title tokens must never reach POST
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|
@@ -250,6 +251,30 @@ spec.fetch('pages', []).each do |page|
 end
 
 errors << 'spec contains rgb(...) color strings (Cloudflare WAF blocks)' if JSON.generate(spec).include?('rgb(')
+
+# Raw Tableau title tokens ("<[Parameters].[Parameter 1 3]>", "<Sheet Name>")
+# that survived translation. Sigma has no such syntax and renders the token
+# LITERALLY in the tile header, so the dashboard ships with it visible
+# (field-caught on a live migration). Translate to Sigma dynamic text
+# {{[<controlId>]}} against a control the WORKBOOK carries — workbook dynamic
+# text cannot reference a data-model control — or substitute the parameter's
+# current value. build-charts-from-signals.rb does both automatically; a hit
+# here means a hand-authored or stale spec.
+spec.fetch('pages', []).each do |page|
+  page.fetch('elements', []).each do |el|
+    %w[name body].each do |field|
+      next unless el[field].is_a?(String)
+
+      tokens = TableauDynamicTitle.residual_tokens(el[field]).uniq
+      next if tokens.empty?
+
+      errors << "element \"#{el['name'] || el['id']}\": #{field} carries raw Tableau title token(s) " \
+                "#{tokens.join(', ')} — Sigma renders them literally in the tile header. Use Sigma " \
+                'dynamic text {{[<controlId>]}} bound to a control this WORKBOOK carries (workbook ' \
+                "dynamic text cannot reach a data-model control), or substitute the parameter's value."
+    end
+  end
+end
 
 # ENVELOPE checks (field-caught round 2): a hand-authored spec missing these
 # passed "0 errors" locally and then burned one live 400 per defect, one

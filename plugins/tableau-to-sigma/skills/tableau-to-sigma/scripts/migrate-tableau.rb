@@ -3591,15 +3591,19 @@ calcs.select { |c| c['requires_custom_sql'] }.each do |c|
   }
 end
 
-# (b) custom-SQL datasource blocks — DM must source via kind:sql, not warehouse-table.
+# (b) custom-SQL datasource blocks — preserve the semantics, but do not mistake
+#     source SQL for a mandate to embed SQL in the target model. Tables are the
+#     maintainable default when decomposition is exact + equivalence-proven.
 custom_sql.each do |b|
   q = (b['query'] || b['sql'] || '').to_s.gsub(/\s+/, ' ').strip[0, 120]
   questions << {
     'id' => 'custom_sql_datasource', 'severity' => 'review',
-    'detail' => "Datasource is backed by Custom SQL; the DM element must use source.kind=sql: #{q}",
-    'options' => ['source the DM element via Custom SQL (kind: sql)',
+    'detail' => "Datasource is backed by Tableau Custom SQL. Prefer warehouse-table elements + relationships/calcs " \
+                "when they preserve every join/filter/grain rule and pass the equivalence probe; otherwise retain source.kind=sql: #{q}",
+    'options' => ['normalize to warehouse-table elements (only with a passing semantic equivalence proof)',
+                  'preserve the Custom SQL in source.kind=sql for exact parity',
                   'abort and refactor the source in the warehouse first'],
-    'default' => 'source the DM element via Custom SQL (kind: sql)'
+    'default' => 'normalize to warehouse-table elements when equivalence is provable; otherwise preserve source.kind=sql'
   }
 end
 
@@ -4211,6 +4215,10 @@ if reuse_dm_id
       { 'id' => p['id'], 'name' => p['name'],
         'elements' => (p['elements'] || []).map do |e|
           el = { 'id' => e['id'], 'kind' => e['kind'], 'name' => e['name'] }
+          if e['kind'] == 'control'
+            el['controlId'] = e['controlId']
+            el['controlType'] = e['controlType']
+          end
           el['columnLabels'] = labels_by_el[e['id']] if labels_by_el.key?(e['id'])
           el
         end }
@@ -4772,6 +4780,21 @@ if mechanical
     master_columns << dc
     line "integer-dim decode: added master column '#{dc['name']}' (#{dc['formula']}) — list control filters STRING values (raw numeric list-filter targets are silently stripped by Sigma)"
   end
+  # A Tableau calculated filter's formula wins over a same-named DM physical
+  # passthrough. The builder emits only confidently translated, fully resolved
+  # replacements; preserving the passthrough can make a saved selection blank
+  # every dashboard tile when that physical column is NULL.
+  Array(raw_charts.is_a?(Hash) ? raw_charts['master_calc_columns'] : nil).each do |cc|
+    next unless cc.is_a?(Hash) && cc['id'] && cc['name'] && cc['formula']
+    existing = master_columns.find { |column| column['id'] == cc['id'] } ||
+               master_columns.find { |column| column['name'].to_s.casecmp?(cc['name'].to_s) }
+    if existing
+      existing['formula'] = cc['formula']
+    else
+      master_columns << cc
+    end
+    line "calculated-filter fidelity: master '#{cc['name']}' uses the translated Tableau formula, not a same-named passthrough"
+  end
   # Dim-grain helper placeholder resolution: build-charts runs before it knows
   # the live DM element ids, so grain helpers carry source.elementId =
   # "__DM_ELEMENT__:<name>". Resolve against the readback (dm_els) NOW — an
@@ -4990,6 +5013,26 @@ else
   spec['name'] = display_wb_name if opts[:name]
   spec['folderId'] = opts[:folder] if opts[:folder]
   layout_xml = (Specs.respond_to?(:layout_xml) ? Specs.layout_xml : nil)
+end
+# A control in the workbook cannot reference a control in the data model by
+# merely reusing `[controlId]`: formula control scope is document-local. Bridge
+# every matching Tableau parameter control through the released parameters[]
+# target shape, using ONLY the post/GET readback census in dm_els.
+require File.join(HERE, 'lib', 'dm_control_binding')
+dm_control_bindings = DmControlBinding.bind!(
+  spec, data_model_id: dm_id, data_model_elements: dm_els
+)
+File.write(
+  File.join(WORK, 'dm-control-bindings.json'),
+  JSON.pretty_generate(dm_control_bindings)
+)
+if dm_control_bindings[:bound].any?
+  line "DM control binding: #{dm_control_bindings[:bound].size} workbook control instance(s) " \
+       'target readback-confirmed data-model controls through parameters[]'
+end
+dm_control_bindings[:ambiguous].each do |ambiguity|
+  line "WARN: workbook control '#{ambiguity['workbook_control']}' matches multiple data-model controls " \
+       "(#{ambiguity['data_model_controls'].join(', ')}) — no parameters[] target emitted; disambiguate the control IDs"
 end
 # ---- PR-17: thin per-page master instances (default ON) ---------------------
 # Final structural pass over the assembled spec — runs AFTER the multi-metric

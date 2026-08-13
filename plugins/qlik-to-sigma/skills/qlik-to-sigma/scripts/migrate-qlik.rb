@@ -46,6 +46,7 @@
 #     [--folder <SIGMA_FOLDER_ID>] [--name '<prefix for DM/workbook names>'] \
 #     [--out DIR] [--answers '<json>'] [--yes] \
 #     [--from-discovery DIR]   # reuse an existing discovery dir (e.g. fixtures/) — skips Phase 1
+#     [--unbuild DIR]          # normalize a corectl unbuild folder, then run the same pipeline
 #     [--dry-run]              # offline: no Sigma POSTs, no qlik-cli needed with --from-discovery;
 #                              # emits dm-spec.json / wb-spec.json / layout.xml and stops
 #
@@ -131,6 +132,7 @@ OptionParser.new do |o|
   o.on('--answers JSON')      { |v| opts[:answers]  = v }
   o.on('--yes')               {     opts[:yes]      = true }
   o.on('--from-discovery DIR'){ |v| opts[:from]     = File.expand_path(v) }
+  o.on('--unbuild DIR')       { |v| opts[:unbuild]  = File.expand_path(v) }
   o.on('--prj DIR')           { |v| opts[:prj]      = File.expand_path(v) }
   o.on('--reuse-dm ID')       { |v| opts[:reuse_dm] = v }
   o.on('--no-reuse')          {     opts[:no_reuse] = true }
@@ -141,6 +143,25 @@ OptionParser.new do |o|
   # exit 0 — no creds/args needed. Used by the converter-default regression test.
   o.on('--print-converter')   {     opts[:print_converter] = true }
 end.parse!
+
+abort 'FATAL: choose only one of --unbuild, --prj, or --from-discovery' \
+  if [opts[:unbuild], opts[:prj], opts[:from]].compact.size > 1
+
+# A corectl unbuild is already a complete offline Qlik extraction, but sheets
+# are full property trees whose visuals live recursively under qChildren. Flatten
+# it into the same artifact contract as live discovery before the standard path.
+if opts[:unbuild]
+  abort "FATAL: --unbuild dir not found: #{opts[:unbuild]}" unless File.directory?(opts[:unbuild])
+  unbuild_slug = File.basename(opts[:unbuild]).sub(/-unbuild\z/i, '').gsub(/[^A-Za-z0-9_-]/, '-')
+  disc_dir = opts[:out] || File.expand_path("~/qlik-migration/#{unbuild_slug}-unbuild")
+  FileUtils.mkdir_p(disc_dir)
+  warn "corectl unbuild → discovery artifacts in #{disc_dir}"
+  ok = system(*PyResolve.argv, File.join(HERE, 'qlik-unbuild-discover.py'),
+              '--unbuild', opts[:unbuild], '--out', disc_dir)
+  abort 'FATAL: qlik-unbuild-discover.py failed' unless ok
+  opts[:from] = disc_dir
+  opts[:app] = nil
+end
 
 # QlikView (.qvw) has no Cloud/REST API. A "-prj" project folder is the migration
 # surface: qlik-prj-discover.py parses it into the SAME discovery artifacts the Qlik
@@ -192,7 +213,7 @@ if opts[:print_converter]
   exit 0
 end
 
-abort 'missing --app (or --from-discovery)' unless opts[:app] || opts[:from]
+abort 'missing --app (or --from-discovery/--unbuild/--prj)' unless opts[:app] || opts[:from]
 # intake.rb (front-door) caches the resolved connection in <out>/connection.json; honor it
 # when --connection is omitted so the agent need not re-pass the id it just resolved.
 opts[:conn] ||= (JSON.parse(File.read(File.join(opts[:out], 'connection.json')))['connection_id'] rescue nil) if opts[:out]
@@ -640,6 +661,23 @@ hdr(3, TOTAL, 'Build data model')
 reconcile = File.join(WORK, 'reconcile.json')
 run!([*PyResolve.argv, File.join(HERE, 'reconcile-columns.py'),
       '--script', File.join(WORK, 'script.qvs'), '--out', reconcile])
+
+# No Snowflake/warehouse credentials and no MCP are needed. In live mode the
+# supplied Sigma connection is the catalog authority: browse its paths, resolve
+# every source table, enumerate every column (paginated), and canonicalize the
+# reconcile map before generating SQL or posting anything.
+unless opts[:dry_run]
+  require 'sigma_rest'
+  Sigma.auth_token # child Python builders inherit the minted token through ENV
+  resolved_reconcile = File.join(WORK, 'reconcile-resolved.json')
+  run!(['ruby', File.join(HERE, 'preflight-warehouse.rb'),
+        '--reconcile', reconcile, '--connection', opts[:conn],
+        '--database', opts[:database], '--schema', opts[:schema],
+        '--out', resolved_reconcile, '--report', File.join(WORK, 'warehouse-preflight.json')])
+  reconcile = resolved_reconcile
+else
+  puts '   warehouse catalog preflight skipped (--dry-run: no Sigma API); live runs enforce it before POST'
+end
 denorm_out = File.join(WORK, 'denorm.json')
 run!([*PyResolve.argv, File.join(HERE, 'gen-denorm-sql.py'),
       '--reconcile', reconcile, '--database', opts[:database], '--schema', opts[:schema],
@@ -670,33 +708,62 @@ if opts[:reuse_dm] && !opts[:dry_run]
   end
 end
 
+# Dry-compile the DM first. The resulting ids/spec are sufficient to compile and
+# lint the workbook, so workbook buildability is proven BEFORE the first POST.
 if reuse_denorm_eid
-  # REUSE path — skip the DM POST and build against the existing denorm element.
-  dm_res = { 'dataModelId' => opts[:reuse_dm], 'denormElementId' => reuse_denorm_eid,
-             'folderId' => (opts[:folder] || prep[:folder_id]),
-             'starElements' => reuse_star_count, 'metricsKept' => nil,
-             'metricsDropped' => [], 'reused' => true }
+  candidate_dm_res = { 'dataModelId' => opts[:reuse_dm], 'denormElementId' => reuse_denorm_eid,
+                       'folderId' => (opts[:folder] || prep[:folder_id]),
+                       'starElements' => reuse_star_count, 'metricsKept' => nil,
+                       'metricsDropped' => [], 'reused' => true }
+else
+  dm_base_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-dm.py'),
+                 '--converter-out', conv_out_path, '--reconcile', reconcile,
+                 '--denorm', denorm_out, '--measures', File.join(WORK, 'measures.json'),
+                 '--name', "#{base_name} (Qlik→Sigma)", '--spec-out', File.join(WORK, 'dm-spec.json')]
+  if (fid = opts[:folder] || prep[:folder_id])
+    dm_base_cmd += ['--folder', fid]
+  end
+  run!(dm_base_cmd + ['--out', File.join(WORK, 'dm-preflight-result.json'), '--dry-run'])
+  candidate_dm_res = JSON.parse(File.read(File.join(WORK, 'dm-preflight-result.json')))
+end
+
+pre_wb_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-workbook.py'),
+              '--charts', File.join(WORK, 'charts.json'), '--layout', File.join(WORK, 'layout.json'),
+              '--denorm', denorm_out,
+              '--dm-id', candidate_dm_res['dataModelId'] || 'PREWRITE-DM',
+              '--denorm-element-id', candidate_dm_res['denormElementId'].to_s,
+              '--name', "#{base_name} → Sigma",
+              '--out', File.join(WORK, 'wb-preflight-result.json'),
+              '--spec-out', File.join(WORK, 'wb-preflight-spec.json'),
+              '--layout-out', File.join(WORK, 'layout-preflight.xml'),
+              '--element-map', File.join(WORK, 'element-map-preflight.json'),
+              '--control-scope-out', File.join(WORK, 'control-scope-preflight.json'),
+              '--coverage-out', File.join(WORK, 'workbook-coverage.json'), '--dry-run']
+pre_wb_cmd += ['--dm-spec', File.join(WORK, 'dm-spec.json')] unless reuse_denorm_eid
+pre_wb_cmd += ['--folder', (opts[:folder] || candidate_dm_res['folderId'] || prep[:folder_id])] \
+  if opts[:folder] || candidate_dm_res['folderId'] || prep[:folder_id]
+run!(pre_wb_cmd)
+run!(['ruby', File.join(HERE, 'lib', 'preflight_lint.rb'), File.join(WORK, 'wb-preflight-spec.json')])
+coverage = JSON.parse(File.read(File.join(WORK, 'workbook-coverage.json')))
+puts "   ✓ pre-write source coverage: #{coverage['queryableElements']}/#{coverage['sourceVisuals']} " \
+     'queryable visual(s); workbook lint clean — safe to write'
+
+if reuse_denorm_eid
+  dm_res = candidate_dm_res
   DM_ID = opts[:reuse_dm]
   puts "   REUSING DM #{DM_ID}  ·  denorm element 'Custom SQL' (#{reuse_denorm_eid})  — convert + POST skipped"
+elsif opts[:dry_run]
+  dm_res = candidate_dm_res
+  FileUtils.cp(File.join(WORK, 'dm-preflight-result.json'), File.join(WORK, 'dm-result.json'))
+  DM_ID = nil
 else
-  dm_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-dm.py'),
-            '--converter-out', conv_out_path, '--reconcile', reconcile,
-            '--denorm', denorm_out, '--measures', File.join(WORK, 'measures.json'),
-            '--name', "#{base_name} (Qlik→Sigma)",
-            '--out', File.join(WORK, 'dm-result.json'), '--spec-out', File.join(WORK, 'dm-spec.json')]
-  # --folder: explicit flag wins; else the folder pre-resolved concurrently with
-  # discovery (identical preference order), saving build-sigma-dm.py the lookup.
-  if (fid = opts[:folder] || prep[:folder_id])
-    dm_cmd += ['--folder', fid]
-  end
-  dm_cmd << '--dry-run' if opts[:dry_run]
-  run!(dm_cmd)
+  run!(dm_base_cmd + ['--out', File.join(WORK, 'dm-result.json')])
   dm_res = JSON.parse(File.read(File.join(WORK, 'dm-result.json')))
   DM_ID = dm_res['dataModelId']
-  puts "   dataModelId = #{DM_ID || '(dry-run)'}  denorm element #{dm_res['denormElementId']}  " \
-       "#{dm_res['starElements']} star element(s), #{dm_res['metricsKept']} metric(s)" \
-       "#{dm_res['metricsDropped'].to_a.any? ? "; dropped: #{dm_res['metricsDropped'].join(', ')}" : ''}"
 end
+puts "   dataModelId = #{DM_ID || '(dry-run)'}  denorm element #{dm_res['denormElementId']}  " \
+     "#{dm_res['starElements']} star element(s), #{dm_res['metricsKept']} metric(s)" \
+     "#{dm_res['metricsDropped'].to_a.any? ? "; dropped: #{dm_res['metricsDropped'].join(', ')}" : ''}"
 mark('phase3-dm')
 
 # ---------------------------------------------------------------------------
@@ -715,7 +782,7 @@ wb_cmd = [*PyResolve.argv, File.join(HERE, 'build-sigma-workbook.py'),
 # inline aggregate matches a metric on the denorm element bind to [Metrics/<name>]
 # (governed) instead of re-deriving inline. The reuse path writes no dm-spec.json,
 # so measures stay inline there (unchanged) until a live metric-fetch exists.
-wb_cmd += ['--dm-spec', File.join(WORK, 'dm-spec.json')] unless opts[:reuse_dm]
+wb_cmd += ['--dm-spec', File.join(WORK, 'dm-spec.json')] unless reuse_denorm_eid
 wb_cmd += ['--folder', (opts[:folder] || dm_res['folderId'] || prep[:folder_id])] if opts[:folder] || dm_res['folderId'] || prep[:folder_id]
 wb_cmd << '--dry-run' if opts[:dry_run]
 run!(wb_cmd)
@@ -723,7 +790,7 @@ wb_res = JSON.parse(File.read(File.join(WORK, 'wb-result.json')))
 WB_ID = wb_res['workbookId']
 emap  = JSON.parse(File.read(File.join(WORK, 'element-map.json')))
 puts "   workbookId = #{WB_ID || '(dry-run)'}  (#{wb_res['pages']} page(s), #{wb_res['elements']} element(s), " \
-     "#{wb_res['kpis']} KPI(s), #{wb_res['controls'] || 0} control(s))"
+     "#{wb_res['queryableElements']} queryable, #{wb_res['kpis']} KPI(s), #{wb_res['controls'] || 0} control(s))"
 puts "   control scope contract -> #{wb_res['controlScope']}" if (wb_res['controls'] || 0) > 0
 mark('phase4-wb')
 
@@ -1053,8 +1120,10 @@ puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []
 # stamp a run-scoped success marker only on a genuine green so verify-complete.rb
 # (the done-check the SKILL points at) can't green an empty/hand-built result.
 n_elements = wb_res['elements'].to_i
-built_ok = parity_ok && layout_ok && control_ok && flip_ok && n_elements.positive?
-puts 'ELEMENTS    : 0 workbook elements built — EMPTY workbook, NOT done (investigate the build).' if n_elements.zero?
+n_queryable = wb_res['queryableElements'].to_i
+built_ok = parity_ok && layout_ok && control_ok && flip_ok && n_queryable.positive? &&
+           wb_res['unbuiltSourceVisuals'].to_a.empty?
+puts 'ELEMENTS    : 0 queryable workbook elements built — Data-only workbook, NOT done.' if n_queryable.zero?
 begin
   succ = File.join(WORK, 'phase6-success.json')
   if built_ok
