@@ -14,6 +14,7 @@ Stdlib only. No network. Portable (no shelling out).
 
 import argparse
 import base64
+import collections
 import json
 import mimetypes
 import os
@@ -180,6 +181,43 @@ def normalize_layout(doc, counts):
 # --------------------------------------------------------------------------
 # audit
 # --------------------------------------------------------------------------
+def orphaned_interactivity(doc):
+    """Interactivity the spec DECLARES but never wires up.
+
+    `GET /v2/workbooks/{id}/spec` does not always return a workbook's full
+    action surface — buttons can come back as presentation-only, with their
+    conditional logic omitted entirely (no stub, no marker). A port then
+    faithfully reproduces a workbook that looks right and does nothing.
+
+    Nothing here is a port defect: it is a read-side gap you inherit. But it is
+    invisible unless you look for structures with no reachable writer/opener,
+    so flag the three that give it away."""
+    elements = [e for e in doc.get("elements", []) if isinstance(e, dict)]
+    effects = []
+
+    def collect(d):
+        if d.get("effect"):
+            effects.append(d)
+    walk(doc, collect)
+
+    opened = {e.get("overlayId") for e in effects if e.get("effect") == "open-overlay"}
+    written = {e.get("table") for e in effects
+               if e.get("effect") in ("insert-rows", "update-rows", "delete-rows")}
+
+    overlays = [o.get("id") for o in doc.get("overlays", []) if isinstance(o, dict)]
+    return {
+        "overlays_never_opened": sorted(o for o in overlays if o not in opened),
+        "input_tables_never_written": sorted(
+            e["id"] for e in elements
+            if e.get("kind") == "input-table" and e["id"] not in written),
+        "buttons_with_no_actions": sorted(
+            e["id"] for e in elements
+            if e.get("kind") == "button" and not e.get("actions")),
+        "effect_counts": dict(sorted(collections.Counter(
+            e["effect"] for e in effects).items())),
+    }
+
+
 def audit(doc, cmap, imap):
     """Everything org-scoped that still needs an operator decision."""
     conns, uploads, input_tables = set(), set(), []
@@ -279,6 +317,7 @@ def main():
 
     blockers = audit(doc, cmap, imap)
     blockers["unrepaired_stale_write_columns"] = stale_findings
+    warnings = orphaned_interactivity(doc)
 
     report = {
         "source": {"workbookId": src.get("workbookId"), "name": src.get("name"),
@@ -286,6 +325,7 @@ def main():
         "rewrites": counts,
         "connection_map": cmap,
         "blockers": blockers,
+        "warnings_inherited_from_source": warnings,
         "totals": {"elements": len(doc.get("elements", [])),
                    "pages": len(doc.get("pages", []))},
     }

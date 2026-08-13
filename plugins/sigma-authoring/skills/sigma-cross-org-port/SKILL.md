@@ -136,6 +136,72 @@ The report names every unresolved item and the exact flag that fixes it:
 Resolve every one. The tool exits non-zero while any remain, so a clean audit is
 the gate into Phase 5.
 
+### `warnings_inherited_from_source` — read this every time
+
+**`GET spec` does not reliably return a workbook's full action surface.** Buttons
+can come back as presentation-only — text, colour, alignment, and no `actions`
+key at all. There is no stub and no marker; the logic is simply absent. Port it
+and you get a workbook that looks perfect and does nothing.
+
+You cannot detect this by diffing source against target — both agree, because
+both are missing it. You detect it by looking for **declared structures nothing
+reaches**, which is what this block reports:
+
+- `overlays_never_opened` — a modal/drawer exists but no `open-overlay` targets
+  it. A modal nothing opens is proof that something is missing.
+- `input_tables_never_written` — an input table with no `insert-rows` /
+  `update-rows` / `delete-rows` writer. Cross-check what *reads* it: a scoring
+  or log table that is joined and aggregated but never written is conclusive.
+- `buttons_with_no_actions` — expected for decorative buttons, suspicious for
+  anything named Submit / Save / Enter.
+- `effect_counts` — sanity-check the shape against the UI. Six question pages
+  with one `insert-rows` between them is not a design choice.
+
+Observed live: a 92-element quiz workbook returned 21 `navigate` + 6
+`select-tab` + 1 `insert-rows`, with all 3 modals unopened, 5 of 6 input tables
+unwritten, and all 6 answer-Submit buttons action-less — while its `Scoring`
+element joined those unwritten tables to compute `Points`.
+
+**This is not a port defect and it is not fixable by porting harder.** Report it
+before the user finds it. The rebuild path is real, though — see below.
+
+### Rebuilding lost actions
+
+Conditional actions **are** authorable, so lost logic can be rewritten in code
+once you know the intended behaviour. `trigger` takes either a bare string or
+`{on, condition}`, with condition `type` of `column`, `constant`, or `formula`:
+
+```yaml
+actions:
+  - id: q1Wrong
+    trigger:
+      on: on-click
+      condition: {type: formula, formula: '[Store-Region] != "West"'}
+    effects:
+      - {effect: open-overlay, overlayId: UwRvau7UH-}
+  - id: q1Right
+    trigger:
+      on: on-click
+      condition: {type: formula, formula: '[Store-Region] = "West"'}
+    effects:
+      - effect: insert-rows
+        table: cNFuPUr6pp
+        values:
+          SC1LNFY0UM: {type: constant, value: {type: number, value: 1}}
+          0Z3GUSDJAC: {type: formula, formula: Now()}
+      - {effect: navigate, target: {type: page, page: kSHcc1l5cg}}
+```
+
+Verified to save and read back. Note a condition references a control by
+**`controlId`** (`[Store-Region]`), not by element id, and Sigma normalizes `<>`
+to `!=` on write. All twelve effects are authorable: `clear-control`,
+`close-overlay`, `delete-rows`, `insert-rows`, `navigate`, `open-document`,
+`open-overlay`, `open-url`, `refresh-element`, `select-tab`, `set-control-value`,
+`update-rows`.
+
+Rebuilding needs the *intended* behaviour, which the spec no longer carries —
+answer keys, thresholds, routing. Ask; do not infer it from the data and hope.
+
 ## Phase 4 — Recover image uploads (only if the audit lists any)
 
 Upload keys are org-scoped and the spec API cannot create an upload, so the bytes
@@ -279,3 +345,4 @@ complete port:
 | An image is a thin strip | container row-span expansion; a sibling kept the old span |
 | `Grouping not found: 'base'` | you POSTed a GET spec unmodified |
 | Everything works but looks slightly tighter | API collapsed 3+ newlines in text bodies |
+| Buttons render but do nothing; modals never appear | `GET spec` omitted the action surface — inherited, not caused. See `warnings_inherited_from_source` |

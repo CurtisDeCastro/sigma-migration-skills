@@ -110,6 +110,25 @@ user:
 - **Accumulated runtime data** (log tables, submissions, leaderboards) → empty
   is correct in a fresh org; say so and move on.
 
+### Action logic the read drops
+Worse than non-portable: **absent from the source spec in the first place**, so
+neither the port nor a source/target diff can see it. `GET spec` can return a
+button as presentation-only — no `actions` key, no stub. Observed on a live
+92-element workbook: all 6 answer-Submit buttons, the registration Enter button,
+and a help button came back with no actions; all 3 modals had no `open-overlay`
+targeting them; 5 of 6 input tables had no writer, including the one the
+`Scoring` element joins to compute points.
+
+Detect it structurally, via `port_workbook.py --audit-only` →
+`warnings_inherited_from_source`: overlays never opened, input tables never
+written, buttons with no actions, and the effect-kind histogram. Declared
+structures that nothing reaches are the tell.
+
+Conditional actions are authorable (`trigger: {on, condition}`; condition `type`
+`column` | `constant` | `formula`; conditions reference a control by
+**`controlId`**), so the logic can be rebuilt in code — but rebuilding needs the
+intended behaviour, which the spec no longer carries. Ask for it.
+
 ### Version tags
 `tags` on the workbook (e.g. a `Public` release tag) are org-local publishing
 state, not spec content. Re-tag in the target if it matters.
