@@ -23,6 +23,7 @@ lowercase, mostly-ungranted multi-schema, 100s of tables, heavy `CALCULATE`.
 | Metadata cluster: `sortByColumn` (alpha sort), KPI measure sub-object (target/status/trend), hierarchies `levels[]`, `column.summarizeBy` default agg, nested `displayFolder` | convert | `beads-sigma-lanq.13` (P3) |
 | Report filters (`filterConfig` Where-tree, In/Not/Between/Comparison, ComparisonKind, TopN, RelativeDate, `howCreated` Auto/Drill noise, inverted selection, Passthrough) never extracted | extract-pbir + build-workbook | Track 3a (extract) + 3b (apply: list/number-range/top-n → element/master filters; measure/multi-col/date-range → coverage) SHIPPED; date-range-control emission is the fast-follow |
 | Friendly table name ≠ physical view: element-name/formula-prefix reconciliation | build-DM | `beads-sigma-2xap` (SHIPPED #401) |
+| Sigma connection `friendlyName:false`: title-cased converter refs (for example `Order Id`) must be grounded to exact catalog names (`ORDER_ID`) while retaining explicit display names | build-DM | SHIPPED 1.8.31; `lib/warehouse_column_refs.rb` reads connection metadata + paginated table columns before validation/POST |
 | Cross-table measure referencing a dim column dropped (should translate via the relationship) | convert | `beads-sigma-lanq.8` (P2) |
 | Time-intel date grain hardcoded to month (ignores active hierarchy level) | dax/build | `beads-sigma-wpoz` (P3) |
 
