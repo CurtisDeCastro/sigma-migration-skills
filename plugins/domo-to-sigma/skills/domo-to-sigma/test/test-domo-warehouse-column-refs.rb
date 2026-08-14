@@ -18,4 +18,4 @@ raise unless base['columns'][0] == { 'id' => 'inode-x/TXN_ID', 'formula' => '[TR
 raise unless base['columns'][1]['formula'] == 'Text([TRANSACTIONS/TXN_ID])'
 raise unless view['columns'][0] == { 'id' => 'pass', 'formula' => '[TRANSACTIONS/Txn Id]', 'name' => 'Txn Id' }
 raise unless result[:connection_modes] == { 'conn' => false }
-puts 'test-warehouse-column-refs: PASS'
+puts 'test-domo-warehouse-column-refs: PASS'
