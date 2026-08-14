@@ -175,6 +175,7 @@ require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval
 require_relative 'lib/code_rep' # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
 require_relative 'lib/workbook_code' # flat workbook elements + layout-owned page membership
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
+require_relative 'lib/warehouse_column_refs'
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
 
@@ -2864,6 +2865,16 @@ if mechanical
   fx = MechanicalSpecs.fixup_dm_spec(conv['model'])
   line "DM fixup: rewrote #{fx[:fixed]} formula(s); dropped #{fx[:dropped].size} unresolvable calc col(s)" if fx[:fixed].positive? || fx[:dropped].any?
   dropped_calcs = fx[:dropped]
+  grounding = WarehouseColumnRefs.apply!(
+    conv['model'],
+    requester: ->(method, path, **kwargs) { Sigma.request(method, path, **kwargs) },
+    lister: ->(path) { Sigma.list_entries(path) },
+    drop_unresolved: true
+  )
+  modes = grounding[:connection_modes].map { |id, friendly| "#{id}=#{friendly ? 'friendly' : 'physical'}" }.join(', ')
+  line "connection naming: #{modes}; grounded #{grounding[:rewritten]} formula(s), " \
+       "re-keyed #{grounding[:rekeyed]} id(s), re-prefixed #{grounding[:reprefixed]} ref(s), " \
+       "dropped #{grounding[:dropped].size} catalog-missing passthrough(s)"
   # v5.4: prune orphaned BROKEN leftovers (union-collapse class) AFTER remap +
   # fixup have had their chance to repair refs — strict double condition
   # (broken cross-refs AND unreferenced), loud per-element log.
