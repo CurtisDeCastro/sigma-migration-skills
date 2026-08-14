@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require_relative 'lib/warehouse_column_refs'
+require_relative 'lib/tableau_warehouse_column_refs'
 
 fails = []
 check = ->(condition, message) { puts "  #{condition ? 'PASS' : 'FAIL'}  #{message}"; fails << message unless condition }
@@ -16,7 +16,7 @@ spec = { 'pages' => [{ 'elements' => [{
 }, { 'name' => 'Order View', 'source' => { 'kind' => 'table', 'elementId' => 'fact' },
      'columns' => [{ 'id' => 'pass', 'formula' => '[Order Fact/Order Id]' }] }] }] }
 requester = ->(method, _path, **_kwargs) { method == :get ? { 'friendlyName' => false } : { 'kind' => 'table', 'inodeId' => 't' } }
-result = WarehouseColumnRefs.apply!(spec, requester: requester,
+result = TableauWarehouseColumnRefs.apply!(spec, requester: requester,
                                     lister: ->(_path) { [{ 'name' => 'ORDER_ID' }] }, drop_unresolved: true)
 fact, view = spec['pages'][0]['elements']
 check.call(fact['name'] == 'ORDER_FACT', 'warehouse element uses physical name')
@@ -32,7 +32,7 @@ check.call(result[:dropped].size == 1, 'drop is surfaced in the result')
 
 friendly = Marshal.load(Marshal.dump(spec))
 original = Marshal.load(Marshal.dump(friendly))
-WarehouseColumnRefs.apply!(friendly, requester: ->(_m, _p, **_k) { { 'friendlyName' => true } }, lister: ->(_p) { [] })
+TableauWarehouseColumnRefs.apply!(friendly, requester: ->(_m, _p, **_k) { { 'friendlyName' => true } }, lister: ->(_p) { [] })
 check.call(friendly == original, 'friendly mode is a no-op')
 puts "\n#{fails.empty? ? 'ALL PASS' : "#{fails.size} FAILURE(S)"}"
 exit(fails.empty? ? 0 : 1)

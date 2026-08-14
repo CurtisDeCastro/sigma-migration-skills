@@ -175,7 +175,7 @@ require_relative 'lib/sigma_rest' # in-process Sigma token minting (no bash/eval
 require_relative 'lib/code_rep' # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
 require_relative 'lib/workbook_code' # flat workbook elements + layout-owned page membership
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
-require_relative 'lib/warehouse_column_refs'
+require_relative 'lib/tableau_warehouse_column_refs'
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
 require_relative 'hydrate-custom-sql'
 
@@ -2865,7 +2865,7 @@ if mechanical
   fx = MechanicalSpecs.fixup_dm_spec(conv['model'])
   line "DM fixup: rewrote #{fx[:fixed]} formula(s); dropped #{fx[:dropped].size} unresolvable calc col(s)" if fx[:fixed].positive? || fx[:dropped].any?
   dropped_calcs = fx[:dropped]
-  grounding = WarehouseColumnRefs.apply!(
+  grounding = TableauWarehouseColumnRefs.apply!(
     conv['model'],
     requester: ->(method, path, **kwargs) { Sigma.request(method, path, **kwargs) },
     lister: ->(path) { Sigma.list_entries(path) },
