@@ -2,7 +2,7 @@
 
 require 'json'
 
-module WarehouseColumnRefs
+module DomoWarehouseColumnRefs
   module_function
 
   def normalize(value)

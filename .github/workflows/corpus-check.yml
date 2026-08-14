@@ -351,7 +351,7 @@ jobs:
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-geometry-discover.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-doctor-gate.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-e2e.rb
-            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-warehouse-column-refs.rb
+            plugins/domo-to-sigma/skills/domo-to-sigma/test/test-domo-warehouse-column-refs.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-pdp-detect.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-reuse-check.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-green-gates.rb

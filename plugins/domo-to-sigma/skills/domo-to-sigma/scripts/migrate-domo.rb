@@ -88,7 +88,7 @@ require_relative 'lib/zone_census'
 require_relative 'lib/code_rep'
 require_relative 'lib/layout'
 require_relative 'lib/sigma_rest'
-require_relative 'lib/warehouse_column_refs'
+require_relative 'lib/domo_warehouse_column_refs'
 include DomoSigma
 
 opts = { mode: 'page-per-worksheet', workbook_name: 'Domo Migration' }
@@ -889,7 +889,7 @@ def run_live!(opts)
     skip_phase!('post-and-readback-dm', 'already posted (idempotent skip)')
   else
     dm_spec = JSON.parse(File.read(dm_spec_path))
-    grounding = WarehouseColumnRefs.apply!(
+    grounding = DomoWarehouseColumnRefs.apply!(
       dm_spec,
       requester: ->(method, path, **kwargs) { Sigma.request(method, path, **kwargs) },
       lister: ->(path) { Sigma.list_entries(path) }

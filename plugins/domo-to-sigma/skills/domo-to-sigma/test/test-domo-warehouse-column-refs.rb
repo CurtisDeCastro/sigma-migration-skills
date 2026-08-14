@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require_relative '../scripts/lib/warehouse_column_refs'
+require_relative '../scripts/lib/domo_warehouse_column_refs'
 
 spec = { 'pages' => [{ 'elements' => [{
   'name' => 'Transactions',
@@ -11,7 +11,7 @@ spec = { 'pages' => [{ 'elements' => [{
 }, { 'name' => 'Transactions View', 'source' => { 'kind' => 'table', 'elementId' => 'base' },
      'columns' => [{ 'id' => 'pass', 'formula' => '[Transactions/Txn Id]' }] }] }] }
 requester = ->(method, _path, **_kwargs) { method == :get ? { 'friendlyName' => false } : { 'kind' => 'table', 'inodeId' => 't' } }
-result = WarehouseColumnRefs.apply!(spec, requester: requester, lister: ->(_path) { [{ 'name' => 'TXN_ID' }] })
+result = DomoWarehouseColumnRefs.apply!(spec, requester: requester, lister: ->(_path) { [{ 'name' => 'TXN_ID' }] })
 base, view = spec['pages'][0]['elements']
 raise unless base['name'] == 'TRANSACTIONS'
 raise unless base['columns'][0] == { 'id' => 'inode-x/TXN_ID', 'formula' => '[TRANSACTIONS/TXN_ID]', 'name' => 'Txn Id' }
