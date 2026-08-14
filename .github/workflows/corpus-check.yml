@@ -417,6 +417,7 @@ jobs:
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_tableau_rest.py
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test_pick_destination.py
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_warehouse_column_refs.py
             plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_scout_ledger_integrity.py
             plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_scout_ledger_integrity.py
             plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_warehouse_column_refs.py
