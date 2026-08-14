@@ -87,6 +87,8 @@ require_relative 'lib/domo_sigma_util'
 require_relative 'lib/zone_census'
 require_relative 'lib/code_rep'
 require_relative 'lib/layout'
+require_relative 'lib/sigma_rest'
+require_relative 'lib/domo_warehouse_column_refs'
 include DomoSigma
 
 opts = { mode: 'page-per-worksheet', workbook_name: 'Domo Migration' }
@@ -886,6 +888,16 @@ def run_live!(opts)
     log 'dm-ids.json already present — skip (idempotent; pass --force to re-post)'
     skip_phase!('post-and-readback-dm', 'already posted (idempotent skip)')
   else
+    dm_spec = JSON.parse(File.read(dm_spec_path))
+    grounding = DomoWarehouseColumnRefs.apply!(
+      dm_spec,
+      requester: ->(method, path, **kwargs) { Sigma.request(method, path, **kwargs) },
+      lister: ->(path) { Sigma.list_entries(path) }
+    )
+    File.write(dm_spec_path, JSON.pretty_generate(dm_spec))
+    modes = grounding[:connection_modes].map { |id, friendly| "#{id}=#{friendly ? 'friendly' : 'physical'}" }.join(', ')
+    log "connection naming: #{modes}; grounded #{grounding[:rewritten]} formula(s), " \
+        "re-keyed #{grounding[:rekeyed]} id(s), re-prefixed #{grounding[:reprefixed]} ref(s)"
     ok, code, _out = run_script!('post-and-readback.rb', '--type', 'datamodel', '--spec', dm_spec_path,
                                   '--out', dm_ids_path, '--workdir', OUT)
     fail_phase!('post-and-readback-dm', "post-and-readback.rb --type datamodel exited #{code}") unless ok
