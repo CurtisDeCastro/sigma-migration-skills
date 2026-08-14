@@ -419,6 +419,7 @@ jobs:
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_scout_ledger_integrity.py
             plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/test_scout_ledger_integrity.py
             plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_scout_ledger_integrity.py
+            plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test_warehouse_column_refs.py
             plugins/qlik-to-sigma/skills/qlik-to-sigma/tests/test_metric_reference.py
             plugins/qlik-to-sigma/skills/qlik-to-sigma/tests/test_chart_mappings.py
             plugins/gooddata-to-sigma/skills/gooddata-to-sigma/tests/test_metric_reference.py
