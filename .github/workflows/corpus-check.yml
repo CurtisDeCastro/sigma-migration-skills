@@ -290,6 +290,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-native-query.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-composite-gate.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-convert-model-reprefix.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-warehouse-column-refs.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-materialization-schedules.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-timeintel-route.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-drop-unresolved-columns.rb
