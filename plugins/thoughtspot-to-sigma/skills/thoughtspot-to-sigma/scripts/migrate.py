@@ -38,6 +38,7 @@ import argparse, json, os, re, ssl, subprocess, sys, time, urllib.request, urlli
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import yaml, ts_common, apply_layouts, scout_gate
+from warehouse_column_refs import apply as ground_warehouse_refs
 import metric_binding as _mb    # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 yaml.SafeLoader.add_constructor("tag:yaml.org,2002:value", lambda l, n: l.construct_scalar(n))
@@ -188,6 +189,12 @@ def find_table_elements(dm):
 def build_dm(conv, name, folder):
     """POST the converted Sigma data model. Returns (dmId, denormElemId, denormName)."""
     spec = conv["model"]; spec["name"] = name
+    grounding = ground_warehouse_refs(
+        spec, lambda method, path, body=None: json.loads(sigma(method, path, body)))
+    modes = ", ".join(f"{cid}={'friendly' if value else 'physical'}"
+                      for cid, value in grounding["connectionModes"].items())
+    print(f"  connection naming: {modes}; grounded {grounding['rewritten']} formula(s), "
+          f"re-keyed {grounding['rekeyed']} id(s), re-prefixed {grounding['reprefixed']} ref(s)")
     res = json.loads(sigma("POST", "/v2/dataModels/spec", {"folderId": folder, **spec}))
     dm = res["dataModelId"]
     # discover the denormalized "<root> View" element from the posted DM spec
