@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { api, extractId, parseArgs, elementsOf } from './lib/sigma-rest.mjs';
 import * as CodeRep from './lib/code_rep.mjs';
 import { assertWorkbookContract } from './lib/workbook_contract.mjs';
+import { groundWarehouseRefs } from './lib/warehouse-column-refs.mjs';
 
 const a = parseArgs(process.argv.slice(2));
 if (!a.type || !a.spec || !a.folder) { console.error('need --type datamodel|workbook --spec <spec.json> --folder <folderId>'); process.exit(2); }
@@ -20,6 +21,13 @@ const postPath = a.type === 'datamodel' ? '/v2/dataModels/spec' : '/v2/workbooks
 const colsPath = (id) => a.type === 'datamodel' ? `/v2/dataModels/${id}/columns` : `/v2/workbooks/${id}/columns`;
 
 const spec = JSON.parse(readFileSync(a.spec, 'utf8'));
+if (a.type === 'datamodel') {
+  const grounding = await groundWarehouseRefs(spec, api);
+  const modes = Object.entries(grounding.connectionModes)
+    .map(([id, friendly]) => `${id}=${friendly ? 'friendly' : 'physical'}`).join(', ');
+  console.error(`connection naming: ${modes}; grounded ${grounding.rewritten} formula(s), ` +
+    `re-keyed ${grounding.rekeyed} id(s), re-prefixed ${grounding.reprefixed} ref(s)`);
+}
 // name AFTER the spread — `{name, ...spec}` let spec.name silently override --name (beads-sigma-unff).
 const name = a.name || spec.name || `cognos ${a.type} ${Date.now()}`;
 // Workbook code-rep nests non-metadata fields under `document` (verified live
