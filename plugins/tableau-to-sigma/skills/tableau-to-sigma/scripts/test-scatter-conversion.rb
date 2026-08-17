@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # Focused offline regression for Tableau scatter detection and Sigma emission.
+# Usage: ruby scripts/test-scatter-conversion.rb
 
 require 'json'
 require 'tmpdir'
