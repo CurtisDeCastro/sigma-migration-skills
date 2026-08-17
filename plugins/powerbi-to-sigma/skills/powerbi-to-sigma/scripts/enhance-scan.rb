@@ -36,8 +36,10 @@
 #      month/date axis canonicalization (MakeDate), stale-source freshness
 #      note (time-boxed wording), title corrections from source captions.
 #   DESCOPED (trial-proven spec-unsupported; emitted as propose-in-UI NOTES,
-#   never spec changes): chart-as-filter (useAsFilter silently dropped on
-#   readback), pie percent labels (valueFormat:'percent' silently dropped).
+#   never spec changes): DM-metric promotion (metric refs don't resolve
+#   through a workbook table layer), chart-as-filter (useAsFilter silently
+#   dropped on readback), pie percent labels (valueFormat:'percent' silently
+#   dropped).
 #
 # Usage:
 #   ruby scripts/enhance-scan.rb --workbook-id <parityWorkbookId> \
@@ -56,6 +58,7 @@ require 'optparse'
 HERE = __dir__
 $LOAD_PATH.unshift File.expand_path('lib', HERE)
 require 'sigma_rest'
+require 'enhance_options'
 require 'code_rep'
 
 opts = { max_exports: 12 }
@@ -668,6 +671,19 @@ if viz.any? { |(_p, e)| e['kind'] == 'pie-chart' }
     'evidence' => "#{viz.count { |(_p, e)| e['kind'] == 'pie-chart' }} pie-chart element(s) present."
   }
 end
+dm_sourced = masters.any? { |m| m.dig('source', 'kind') == 'data-model' } ||
+             viz.any? { |(_p, e)| e.dig('source', 'kind') == 'data-model' }
+inline_aggs = viz.count { |(_p, e)| (y_col(e) || {})['formula'].to_s =~ /\A(Sum|Avg|Count|CountDistinct|Min|Max)\(/ }
+if dm_sourced && inline_aggs.positive?
+  descoped << {
+    'id' => 'descoped-dm-metric-promotion',
+    'note' => 'DM metric promotion: charts re-implement aggregate formulas inline, but DM metrics are ' \
+              'NOT referenceable from a chart through an intermediate workbook table ([Master/Metric] -> ' \
+              '"Dependency not found"; bare [Metric] compiles to a silent error column — trial-proven). ' \
+              'Promote in the DM and rebind in the Sigma UI if governance requires it.',
+    'evidence' => "#{inline_aggs} chart(s) carry inline aggregate formulas over a data-model source."
+  }
+end
 shared_masters = viz.group_by { |(_p, e)| e.dig('source', 'elementId') }.select { |_k, v| v.size >= 2 }
 if shared_masters.any?
   descoped << {
@@ -680,9 +696,64 @@ if shared_masters.any?
 end
 
 # ---------------------------------------------------------------------------
+# App-shape signals + option rollup.
+#
+# The detector catalog above answers "which micro-patches are safe here". It
+# does NOT answer the question a human actually has: "what should this app
+# BE?". These two blocks roll the same evidence up into a handful of
+# user-meaningful options so the agent can run a design interview instead of
+# reading out fifteen individual patches. Purely additive — `candidates` and
+# every existing key keep their shape, so older consumers are unaffected.
+# ---------------------------------------------------------------------------
+calc_blob = if WORKDIR
+              [jread(File.join(WORKDIR, 'calc-fields.json')),
+               jread(File.join(WORKDIR, 'dashboard-layout.json'))].compact
+                                                                  .map(&:to_s)
+                                                                  .join(' ')
+            else
+              ''
+            end
+# Profile both spec metadata and sampled exported values. Archetype detection
+# needs structural evidence (field names, formulas, real dimension members),
+# not just vocabulary in calc-fields.json.
+all_elements = spec['elements'] || []
+profile_fields = all_elements.flat_map do |el|
+  (el['columns'] || []).flat_map { |c| [c['name'], c['formula']] }
+end.compact.map(&:to_s)
+profile_members = Hash.new { |h, k| h[k] = [] }
+rows_by_el.each_value do |rows|
+  Array(rows).first(250).each do |row|
+    next unless row.is_a?(Hash)
+    row.each do |field, value|
+      profile_fields << field.to_s
+      next if value.nil? || value.is_a?(Hash) || value.is_a?(Array)
+      values = profile_members[field.to_s]
+      values << value.to_s unless values.include?(value.to_s) || values.size >= 100
+    end
+  end
+end
+data_profile = {
+  'field_names' => profile_fields.uniq,
+  'member_values' => profile_members,
+  'formula_text' => all_elements.flat_map do |el|
+    (el['columns'] || []).map { |c| c['formula'] }
+  end.compact.join(' ')
+}
+option_rollup = EnhanceOptions.build(
+  candidates: candidates,
+  shared_master_chart_count: shared_masters.values.sum(&:size),
+  calc_blob: calc_blob,
+  write_connection_available: !ENV['SIGMA_WRITE_CONNECTION_ID'].to_s.empty?,
+  data_profile: data_profile
+)
+app_signals = option_rollup['signals']
+app_options = option_rollup['app_options']
+
+# ---------------------------------------------------------------------------
 # Emit.
 # ---------------------------------------------------------------------------
 out = {
+  'schemaVersion' => 1,
   'workbook_id' => WB,
   'workbook_name' => wb_name,
   'source' => source,
@@ -690,11 +761,26 @@ out = {
   'elements_scanned' => viz.size,
   'elements_exported' => rows_by_el.count { |_k, v| v },
   'candidates' => candidates,
-  'descoped_notes' => descoped
+  'descoped_notes' => descoped,
+  'signals' => app_signals,
+  'app_options' => app_options
 }
 File.write(OUT, JSON.pretty_generate(out))
 
-puts "enhance-scan: #{candidates.size} candidate(s), #{descoped.size} descoped note(s) -> #{OUT}"
+puts "enhance-scan: #{candidates.size} candidate(s), #{descoped.size} descoped note(s), " \
+     "#{app_options.size} app option(s) -> #{OUT}"
+puts '  app options (present these to the human before applying anything):'
+app_options.each do |o|
+  if o['archetype']
+    puts format('  %-1s [%-6s/%2s] %-34s %s',
+                o['recommended'] ? '*' : ' ', o['confidence'],
+                o['score'], o['id'], o['label'].to_s)
+  else
+    puts format('  %-1s [%-6s] %-34s %s',
+                o['recommended'] ? '*' : ' ', o['risk'], o['id'],
+                o['label'].to_s)
+  end
+end
 candidates.each do |c|
   puts format('  [%-6s] %-38s %s', c['risk'], c['id'], c['proposed'].to_s.gsub(/\s+/, ' ')[0, 100])
 end
