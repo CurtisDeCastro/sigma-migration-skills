@@ -13,6 +13,7 @@
 #     [--editable drivers|line-values|both|none] \
 #     [--approval yes|no] [--scenarios yes|no] \
 #     [--agent analyze|recommend|write-after-approval|none] \
+#     [--unit-of-work TEXT] [--write-mode append|overwrite] \
 #     --out <workdir>/app-plan.json
 
 require 'json'
@@ -23,7 +24,9 @@ opts = {
   editable: nil,
   approval: nil,
   scenarios: nil,
-  agent: nil
+  agent: nil,
+  unit_of_work: nil,
+  write_mode: nil
 }
 parser = OptionParser.new do |p|
   p.on('--enhancements PATH') { |v| opts[:enhancements] = v }
@@ -32,6 +35,8 @@ parser = OptionParser.new do |p|
   p.on('--approval BOOL') { |v| opts[:approval] = v }
   p.on('--scenarios BOOL') { |v| opts[:scenarios] = v }
   p.on('--agent MODE') { |v| opts[:agent] = v }
+  p.on('--unit-of-work TEXT') { |v| opts[:unit_of_work] = v }
+  p.on('--write-mode MODE') { |v| opts[:write_mode] = v }
   p.on('--out PATH') { |v| opts[:out] = v }
 end
 parser.parse!
@@ -92,6 +97,12 @@ die("invalid --agent #{agent.inspect}") unless
   %w[analyze recommend write-after-approval none].include?(agent)
 approval = bool(opts[:approval], defaults[:approval])
 scenarios = bool(opts[:scenarios], defaults[:scenarios])
+write_mode = (opts[:write_mode] || 'append').to_s.downcase
+die("invalid --write-mode #{write_mode.inspect}") unless
+  %w[append overwrite].include?(write_mode)
+unit_of_work = opts[:unit_of_work].to_s.strip
+unit_of_work = defaults[:grain].join(' × ') if unit_of_work.empty?
+
 modules = Array(option['modules']).dup
 modules.concat(Array(option['optional_modules']))
 modules << 'approval-log' if approval
@@ -101,6 +112,21 @@ modules << 'workbook-agent' unless agent == 'none'
 modules.uniq!
 
 prerequisites = Array(option['requires']).dup
+stable_keys = doc.dig('signals', 'stable_key_candidates') || []
+write_gap = prerequisites.any? { |p| p.to_s.downcase.include?('write') }
+l1_ready = !write_gap && !stable_keys.empty?
+
+# Rails before agents (BUILD L1→L3): do not authorize write-after-approval
+# without a governed write path underneath.
+if agent == 'write-after-approval' && !l1_ready
+  die('agent write-after-approval requires L1 readiness first ' \
+      '(stable key candidates + write-enabled connection). ' \
+      'Put the workflow on rails before putting an agent on it.')
+end
+if agent == 'recommend' && !l1_ready
+  warn 'enhance-app-plan: WARN — agent=recommend without L1 write readiness; ' \
+       'keep the agent read-only until a stable key and write connection exist.'
+end
 
 manual_steps = []
 if editable != 'none'
@@ -108,6 +134,14 @@ if editable != 'none'
   manual_steps << 'Publish and type into a real cell in the published view.'
 end
 manual_steps << 'Keep parameter-driven calculations and controls in the workbook document; do not reference data-model controls from workbook formulas.'
+manual_steps << 'STOP: confirm this app-plan (archetype, unit of work, write mode, agents) with the human before any sigma-authoring writeback work.'
+if write_mode == 'append' && editable != 'none'
+  manual_steps << 'Append-only ledger: include is_current, is_deleted, effective_from_ts/effective_to_ts, and created/updated audit columns; supersede on restatement (never destroy).'
+  manual_steps << 'Publish a CURRENT_* warehouse view (is_current=true AND is_deleted=false) as the dashboard read surface.'
+end
+if approval
+  manual_steps << 'Model status lifecycle with a state-history table (old status, new status, who, when, why).'
+end
 
 verification = [
   'Baseline numeric oracle matches the parity workbook/source.',
@@ -130,17 +164,19 @@ plan = {
   'confidence' => option['confidence'],
   'evidence' => option['evidence_items'] || [option['evidence']],
   'sourceSignals' => doc['signals'] || {},
+  'unitOfWork' => unit_of_work,
+  'writeMode' => write_mode,
   'userChoices' => {
     'editable' => editable,
     'approval' => approval,
     'scenarios' => scenarios,
-    'agent' => agent
+    'agent' => agent,
+    'writeMode' => write_mode
   },
   'grain' => {
     'recommended' => defaults[:grain],
     'requiresUniquenessValidation' => true,
-    'stableKeyCandidates' =>
-      doc.dig('signals', 'stable_key_candidates') || []
+    'stableKeyCandidates' => stable_keys
   },
   'editableSurface' => {
     'mode' => editable,
@@ -159,6 +195,8 @@ out = opts[:out] ||
 File.write(out, JSON.pretty_generate(plan))
 puts "enhance-app-plan: #{option['archetype']} (score #{option['score']}, " \
      "#{option['confidence']}) -> #{out}"
+puts "  unitOfWork: #{unit_of_work}"
+puts "  writeMode: #{write_mode}"
 puts "  grain: #{defaults[:grain].join(' × ')}"
 puts "  modules: #{modules.join(', ')}"
 puts "  prerequisites: #{prerequisites.empty? ? '(none)' : prerequisites.join(', ')}"

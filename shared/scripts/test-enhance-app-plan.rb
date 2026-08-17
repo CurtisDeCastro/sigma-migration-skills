@@ -111,21 +111,39 @@ Dir.mktmpdir do |dir|
         planning['manualSteps'].any? { |s| s.include?('Set data entry permission') })
   check('cross-document control ownership guard is present',
         planning['manualSteps'].any? { |s| s.include?('data-model controls') })
+  check('default writeMode is append',
+        planning['writeMode'] == 'append' &&
+          planning.dig('userChoices', 'writeMode') == 'append')
+  check('unitOfWork defaults from grain',
+        planning['unitOfWork'] == 'Scenario × Period × Planning Line',
+        planning['unitOfWork'].inspect)
+  check('STOP confirmation manual step is present',
+        planning['manualSteps'].any? { |s| s.start_with?('STOP:') })
+  check('append ledger manual steps are present',
+        planning['manualSteps'].any? { |s| s.include?('is_current') } &&
+          planning['manualSteps'].any? { |s| s.include?('CURRENT_') })
 
   allocation, = run.call('option-allocation-capacity',
-                         '--approval', 'no', '--agent', 'analyze')
+                         '--approval', 'no', '--agent', 'analyze',
+                         '--write-mode', 'overwrite',
+                         '--unit-of-work', 'Period × Team')
   check('allocation override choices persist',
         allocation.dig('userChoices', 'approval') == false &&
           allocation.dig('userChoices', 'agent') == 'analyze')
   check('allocation grain is Period x Allocation Dimension',
         allocation.dig('grain', 'recommended') ==
           ['Period', 'Allocation Dimension'])
+  check('write-mode and unit-of-work overrides persist',
+        allocation['writeMode'] == 'overwrite' &&
+          allocation['unitOfWork'] == 'Period × Team')
 
   approval, = run.call('option-approval-workflow',
                        '--editable', 'line-values')
   check('approval plan includes one-entity status verification',
         approval['verificationGates']
           .any? { |s| s.include?('another entity is unchanged') })
+  check('approval plan includes state-history manual step',
+        approval['manualSteps'].any? { |s| s.include?('state-history') })
 
   exception, = run.call('option-exception-command-center')
   check('prerequisites list only the option\'s own requirements',
@@ -134,10 +152,26 @@ Dir.mktmpdir do |dir|
         exception['prerequisites'].inspect)
   # Guard: the plan contract offers no bulk row-load choice. Row loading is a
   # build-time decision made against supported Sigma surfaces, not a plan field.
-  check('userChoices exposes exactly the four architecture choices',
+  check('userChoices exposes the architecture choices including writeMode',
         exception['userChoices'].keys.sort ==
-          %w[agent approval editable scenarios],
+          %w[agent approval editable scenarios writeMode],
         exception['userChoices'].keys.inspect)
+
+  # L1-before-agent: write-after-approval without write readiness must fail.
+  gap_fixture = FIXTURE.dup
+  gap_fixture['app_options'] = OPTIONS.map(&:dup)
+  gap_opt = gap_fixture['app_options'].find { |o| o['id'] == 'option-planning-writeback' }
+  gap_opt['requires'] = ['a write-enabled connection']
+  gap_path = File.join(dir, 'enhancements-gap.json')
+  File.write(gap_path, JSON.pretty_generate(gap_fixture))
+  _stdout, err, bad = Open3.capture3(
+    'ruby', SCRIPT, '--enhancements', gap_path,
+    '--option', 'option-planning-writeback',
+    '--agent', 'write-after-approval',
+    '--out', File.join(dir, 'gap.json')
+  )
+  check('write-after-approval without L1 readiness fails',
+        !bad.success? && err.include?('L1 readiness'), err)
 
   _p, _o, err, bad = run.call('option-parity-only')
   check('non-archetype option is rejected',

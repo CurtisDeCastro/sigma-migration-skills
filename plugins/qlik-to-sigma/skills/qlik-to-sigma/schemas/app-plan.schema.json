@@ -9,6 +9,8 @@
     "archetype",
     "confidence",
     "evidence",
+    "unitOfWork",
+    "writeMode",
     "userChoices",
     "grain",
     "editableSurface",
@@ -38,16 +40,19 @@
       "items": { "type": "string" }
     },
     "sourceSignals": { "type": "object" },
+    "unitOfWork": { "type": "string", "minLength": 1 },
+    "writeMode": { "enum": ["append", "overwrite"] },
     "userChoices": {
       "type": "object",
-      "required": ["editable", "approval", "scenarios", "agent"],
+      "required": ["editable", "approval", "scenarios", "agent", "writeMode"],
       "properties": {
         "editable": { "enum": ["drivers", "line-values", "both", "none"] },
         "approval": { "type": "boolean" },
         "scenarios": { "type": "boolean" },
         "agent": {
           "enum": ["analyze", "recommend", "write-after-approval", "none"]
-        }
+        },
+        "writeMode": { "enum": ["append", "overwrite"] }
       },
       "additionalProperties": false
     },

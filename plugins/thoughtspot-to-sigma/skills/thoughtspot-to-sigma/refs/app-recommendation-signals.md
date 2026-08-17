@@ -79,6 +79,17 @@ Ask one primary choice from scored options, quoting evidence. Then ask only:
 1. what users edit (`drivers`, `line-values`, `both`, `none`);
 2. whether approvals are required;
 3. whether multiple scenarios coexist;
-4. agent authority (`analyze`, `recommend`, `write-after-approval`, `none`).
+4. agent authority (`analyze`, `recommend`, `write-after-approval`, `none`);
+5. unit of work (defaults from the archetype grain — make it explicit);
+6. write mode (`append` default; `overwrite` only when destructive updates are intentional).
+
+**STOP:** confirm the resulting `app-plan.json` with the human before any
+writeback authoring.
+
+**Rails before agents.** Refuse `write-after-approval` without L1 readiness
+(stable key + write-enabled connection). Soft-warn on `recommend` without L1.
 
 Record answers in `app-plan.json` before authoring the enhanced clone.
+
+If the human wants a greenfield process design (not a migration uplift), hand
+off to the separate **sigma-app-design** / BUILD Design Pack skill.

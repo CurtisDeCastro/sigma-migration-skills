@@ -65,7 +65,9 @@ Do this, in order:
    That artifact is the audit trail for what was offered and what was approved.
 5. **For an app archetype, ask only architecture-changing follow-ups:**
    what users edit (`drivers|line-values|both|none`), approvals, scenarios,
-   and agent authority. Then write the build contract:
+   agent authority, **unit of work**, and **write mode** (`append` default —
+   overwrite only when the human explicitly wants destructive updates). Then
+   write the build contract:
 
    ```bash
    ruby scripts/enhance-app-plan.rb \
@@ -73,10 +75,13 @@ Do this, in order:
      --option <selected-option-id> \
      --editable <mode> --approval <yes|no> --scenarios <yes|no> \
      --agent <mode> \
+     [--unit-of-work "<grain description>"] [--write-mode append|overwrite] \
      --out <workdir>/app-plan.json
    ```
 
    Validate it against `schemas/app-plan.schema.json` before authoring.
+   **STOP:** summarize the plan back and get explicit human confirmation
+   before any `sigma-authoring` writeback work.
 6. **Report `manual_followups` and `descoped_notes`** in the same summary,
    alongside any skill-local post-publish / UI-only residue.
 
@@ -90,6 +95,34 @@ qualified archetypes contribute optional modules. See
 App options carry **no `candidate_ids`** because Phase E has no generic
 write-back patch ops. They are scoped follow-up work built with the
 `sigma-authoring` recipes, never something `enhance-apply.rb` can execute.
+
+### Rails before agents (L1 → L2 → L3)
+
+Writeback archetypes inherit BUILD's maturity ladder:
+
+| Level | Meaning |
+|---|---|
+| L1 | Governed workflow: stable key, write connection, state tracked |
+| L2 | L1 + AI-compressed tasks |
+| L3 | L2 + agents (semi-autonomous) |
+
+`enhance-app-plan.rb` **refuses** `--agent write-after-approval` unless L1
+readiness is green (stable-key candidates present and no open
+write-connection prerequisite). `recommend` without L1 emits a warning —
+keep the agent read-only until the rails exist.
+
+When `--write-mode append` (the default) and the surface is editable, the
+plan emits ledger + `CURRENT_*` view manual steps. Prefer append-only unless
+the human explicitly chooses overwrite.
+
+### Related: greenfield BUILD / Design Pack
+
+Phase E starts from a **parity-green analytics workbook**. If the human
+actually wants a greenfield process → app design (actors, handoffs, OLTP
+input-table model from a discovery transcript), hand off to the separate
+**sigma-app-design** / BUILD Design Pack skill — do not stretch Phase E into
+a full process-design interview. Phase E's `app-plan.json` is the thin
+migration-side contract; BUILD's Design Pack is the full PRD.
 
 Before offering writeback as build-ready, require:
 
