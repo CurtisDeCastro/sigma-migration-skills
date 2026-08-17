@@ -55,11 +55,13 @@
 # default route on machines without a local build.
 #
 # Phase E (OPT-IN) — Enhance: pass --enhance to run the shared enhancement
-# engine AFTER parity passes: enhance-scan.rb emits candidates; nothing applies
-# without --enhance-accept <ids|all-low-risk> (without it the run stops at exit
-# 14 with the proposals); enhance-apply.rb then clones the parity workbook
-# ("<name> — Enhanced") and applies accepted items one at a time under a
-# parity-unchanged gate. Default = OFF everywhere.
+# engine AFTER parity passes: enhance-scan.rb emits candidates + app_options;
+# design interview via enhance-select.rb / enhance-app-plan.rb; nothing
+# applies without --enhance-accept <ids|all-low-risk> (without it the run
+# stops at exit 14 with the proposals); enhance-apply.rb then clones the
+# parity workbook ("<name> — Enhanced") and applies accepted items one at a
+# time under a parity-unchanged gate. Default = OFF everywhere.
+# See refs/phase-e-enhance.md.
 #
 # Exit codes: 0 = done (parity pass); 10 = decisions needed (OPEN QUESTIONS); 3 = parity fail;
 # 14 = parity PASS + Phase E proposals pending acceptance (re-run with --enhance-accept); other = error.
@@ -2128,13 +2130,41 @@ elsif opts[:enhance]
   if !e_st.success?
     enhance_line = 'scan FAILED (migration itself passed parity; see output above)'
   elsif opts[:enhance_accept].nil?
-    cands = (JSON.parse(File.read(enh_path))['candidates'] rescue [])
+    enh_doc = (JSON.parse(File.read(enh_path)) rescue {})
+    cands = enh_doc['candidates'] || []
+    app_options = enh_doc['app_options'] || []
     puts
     puts '==================== PHASE E PROPOSALS (acceptance required) ===================='
-    puts "#{cands.size} enhancement candidate(s) in #{enh_path}. NOTHING has been applied —"
-    puts 'present each candidate to the human (interactive: one AskUserQuestion checklist),'
-    puts 'then re-run this exact command adding:'
-    puts "  --enhance --enhance-accept <id,id,...>   # or: --enhance-accept all-low-risk"
+    puts "#{cands.size} enhancement candidate(s) in #{enh_path}. NOTHING has been applied."
+    if app_options.empty?
+      puts 'present each candidate to the human (interactive: one AskUserQuestion checklist),'
+      puts 'then re-run this exact command adding:'
+      puts '  --enhance --enhance-accept <id,id,...>   # or: --enhance-accept all-low-risk'
+    else
+      puts
+      puts 'RUN THE DESIGN INTERVIEW FIRST — ask what the app should BE, not which'
+      puts 'patches to apply. Options below are derived from this source\'s own data'
+      puts '(see refs/phase-e-enhance.md -> "The design interview"):'
+      app_options.each do |o|
+        detail = o['archetype'] ?
+          "#{o['archetype']} score=#{o['score']} confidence=#{o['confidence']}" :
+          o['risk'].to_s
+        puts format('  %-1s %-34s %s [%s]',
+                    o['recommended'] ? '*' : ' ', o['id'], o['label'], detail)
+        puts format('      why: %s', o['evidence'].to_s.gsub(/\s+/, ' ')[0, 96])
+      end
+      puts
+      puts 'Present these with ONE AskUserQuestion (include the parity-only choice),'
+      puts 'confirm any medium-risk item by name, then record the answer:'
+      puts "  ruby scripts/enhance-select.rb --enhancements #{enh_path} \\"
+      puts '    --option <option-id> [--confirm-medium <ids>]'
+      puts 'For an app archetype, ask editable/approval/scenario/agent choices'
+      puts 'and write app-plan.json before authoring:'
+      puts "  ruby scripts/enhance-app-plan.rb --enhancements #{enh_path} \\"
+      puts '    --option <option-id> --out <workdir>/app-plan.json'
+      puts 'then re-run this exact command adding:'
+      puts '  --enhance --enhance-accept <accepted_candidate_ids from enhance-selection.json>'
+    end
     puts '================================================================================='
     exit 14
   else
