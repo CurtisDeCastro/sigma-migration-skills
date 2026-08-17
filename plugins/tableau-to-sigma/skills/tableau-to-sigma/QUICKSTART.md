@@ -395,12 +395,13 @@ Exit 0 means the gates passed — the verdict on the final line is what you repo
 **Phase E (opt-in) — Enhance.** Once everything is GREEN you can opt into the
 enhancement pass: add `--enhance` to the `migrate-tableau.rb --finalize` command to
 scan for trial-validated upgrades (period-comparison KPIs, selection controls, grain
-and drill switchers, null-label/title/freshness polish). The scan stops with exit
-`14` and a proposal list; nothing is applied until you re-run with
-`--enhance-accept all-low-risk` (or an explicit id list). Accepted items land on a
-**clone** named "<name> — Enhanced" — the parity-verified workbook is never touched —
-and every applied item is gated by an untouched-element spot-check that auto-reverts
-on any shift. See the skill's `refs/phase-e-enhance.md` (Phase E row in the SKILL.md phase table).
+and drill switchers, null-label/title/freshness polish) **plus** `app_options[]` for
+the design interview. The scan stops with exit `14` and proposals; run the interview
+(`enhance-select.rb` / `enhance-app-plan.rb` — see `refs/phase-e-enhance.md`), then
+re-run with `--enhance-accept` using the accepted candidate ids (or
+`all-low-risk`). Accepted items land on a **clone** named "<name> — Enhanced" — the
+parity-verified workbook is never touched — and every applied item is gated by an
+untouched-element spot-check that auto-reverts on any shift.
 
 ![Footer](assets/sigma_footer.png)
 <!-- END OF SECTION -->
