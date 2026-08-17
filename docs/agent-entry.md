@@ -68,9 +68,16 @@ Every converter should eventually expose the same seams (see
 2. one orchestrator entrypoint
 3. hard completion gate (`assert-phase6` / `verify-complete`)
 4. telemetry on finalize
+5. **opt-in Phase E (C10)** — after parity green, `--enhance` runs the shared
+   scan → design interview (`enhance-select` / `enhance-app-plan`) →
+   accept-only clone apply. Scripts are vendored into every converter; only
+   tableau/powerbi wire the flags today. See
+   [`phase-schema.md`](phase-schema.md) §Phase E adoption checklist and
+   each skill's `refs/phase-e-enhance.md`.
 
-Until a skill has all four, follow its local `SKILL.md` phases exactly — do not
-improvise a lighter path.
+Until a skill has the first four, follow its local `SKILL.md` phases exactly —
+do not improvise a lighter path. Phase E stays opt-in even when the other
+bookends exist.
 
 ## Maturity labels
 

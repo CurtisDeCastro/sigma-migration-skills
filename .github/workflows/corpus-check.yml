@@ -342,6 +342,9 @@ jobs:
             shared/lib/test_coverage_catalog.rb
             shared/lib/test_kpi_card.rb
             shared/lib/test_richness.rb
+            shared/lib/test_enhance_options.rb
+            shared/scripts/test-enhance-select.rb
+            shared/scripts/test-enhance-app-plan.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-comparison-wiring.rb
             plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/test-kpi-comparison-emit.rb
             plugins/domo-to-sigma/skills/domo-to-sigma/test/test-build-dm.rb

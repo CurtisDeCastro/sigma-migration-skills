@@ -170,8 +170,23 @@ end
 # If the cloned parity workbook PREDATES container layouts (no <Container>
 # in its layout), the clone's layout is REGENERATED as a banded layout first,
 # using the builder's shared container machinery (lib/layout.rb).
+#
+# layout.rb is skill-local (not every converter vendors it yet). Lazy-load so
+# spec-only patches (formula/rename/prop) still run where layout.rb is absent;
+# banding/placement aborts with an explicit message when layout is required.
 # ---------------------------------------------------------------------------
-require 'layout' # scripts/lib/layout.rb — SigmaLayout container machinery
+def ensure_layout!
+  return if defined?(SigmaLayout)
+  begin
+    require 'layout'
+  rescue LoadError => e
+    abort 'enhance-apply: scripts/lib/layout.rb is required for Phase E layout ' \
+          "banding/placement (#{e.message}). Add layout.rb (or vendor it) before " \
+          'applying patches that touch layout; formula/rename/prop patches do not need it.'
+  end
+  return if defined?(SigmaLayout)
+  abort 'enhance-apply: layout.rb loaded but SigmaLayout is undefined'
+end
 
 CTRL_BAND_PREFIX = 'phasee-ctrl-band'
 KPI_BAND_PREFIX  = 'phasee-kpi-band'
@@ -223,6 +238,7 @@ end
 # Place a flat document element at the end of a page's required layout. Used
 # for hidden helper tables added during control-extension repair.
 def place_at_page_end!(spec, page_id, element_id, rows: 10)
+  ensure_layout!
   m = page_block(spec, page_id) or raise "no layout block for page #{page_id}"
   last_row = scan_top(m[2]).map { |entry| entry[:r1] }.max || 1
   entry = SigmaLayout.le(element_id, 1, 25, last_row, last_row + rows)
@@ -248,6 +264,7 @@ end
 # builder's shared SigmaLayout machinery). No-op when containers exist.
 def ensure_banded!(spec)
   return false if spec['layout'].to_s.match?(%r{<(?:Container|GridContainer)\b})
+  ensure_layout!
   changed = false
   all_elements = Sigma::CodeRep.workbook_elements(spec)
   (spec['pages'] || []).each do |pg|
@@ -313,6 +330,7 @@ def ensure_band!(spec, page, prefix)
   ents = scan_top(m[2])
   existing = ents.find { |t| t[:eid].to_s.start_with?(prefix) }
   return existing[:eid] if existing
+  ensure_layout!
   rows = BAND_ROWS[prefix]
   cid = "#{prefix}-#{page['id']}"[0, 60]
   anchor = band_anchor_row(ents, prefix)
@@ -327,6 +345,7 @@ end
 # Place an element INTO a band container, flowing left-to-right then wrapping
 # to a new row (growing the band + shifting the bands below it).
 def band_add!(spec, page_id, band_cid, element_id, grid_column, height)
+  ensure_layout!
   m = page_block(spec, page_id) or raise "no layout block for page #{page_id}"
   ents = scan_top(m[2])
   band = ents.find { |t| t[:eid] == band_cid } or raise "band #{band_cid} not found"
@@ -385,6 +404,7 @@ def add_into_chart_container!(spec, page_id, chart_eid, ctrl_eid, grid_column)
   ents = scan_top(m[2])
   host = ents.find { |t| t[:tag] == 'Container' && t[:inner].to_s.include?(%(elementId="#{chart_eid}")) }
   return nil unless host
+  ensure_layout!
   c0, c1 = grid_column.to_s.scan(/\d+/).map(&:to_i)
   c0, c1 = 17, 25 if c0.nil? || c1.nil? || c1 <= c0
   kids_shifted = shift_top_rows(host[:inner].to_s, 1, CHART_CTRL_ROWS)
