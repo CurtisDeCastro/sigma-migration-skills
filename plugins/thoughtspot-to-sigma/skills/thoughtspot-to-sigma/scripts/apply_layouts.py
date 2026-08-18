@@ -20,7 +20,9 @@ Env: SIGMA_BASE_URL, SIGMA_API_TOKEN, TS_WORKDIR (default for --workdir), TS_ROW
 import argparse, json, os, re, ssl, sys, urllib.request, urllib.error
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import code_rep  # workbook code-rep document-wrapper adapter (nested GET/PUT shape)
-_SSL = ssl._create_unverified_context()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ts_lib
+_SSL = ts_lib.ssl_context()
 
 TS_GRID_COLS = 12                                   # ThoughtSpot Liveboard grid
 COL_SCALE = 24 // TS_GRID_COLS                      # → Sigma's 24-col grid
