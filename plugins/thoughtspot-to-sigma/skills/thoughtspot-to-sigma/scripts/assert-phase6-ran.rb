@@ -139,10 +139,6 @@
 #      dashboard PNG, then re-run. Escape hatch: --skip-visual-gate "<reason>".
 #  11  Build-from-signals tile(s) not image-verified (gate 9). Escape hatch:
 #      --skip-visual-tiles "<reason>".
-#  12  Telemetry consent decision missing — the anonymous usage ping was never
-#      sent or declined (no telemetry-sent.json marker; gate 10, delegated to
-#      assert-telemetry-ran.rb). Ask the user, then run report-telemetry.py
-#      (--declined if they decline). Escape hatch: --skip-telemetry-gate "<reason>".
 #  13  Visual comparison not recorded OR not executable (gate 8b) — ENFORCED BY
 #      DEFAULT. Three variants, same exit code:
 #      (a) a valid render exists but parity-final.json carries no
@@ -239,8 +235,7 @@
 #      escapes — the highest achievable result is YELLOW. Every run stamps
 #      `waivers` + `waiver_count` (the full census) into parity-final.json so
 #      the report (and any reviewer) sees the count. There is NO escape flag
-#      for this cap. Two POLICY exclusions never consume the budget:
-#        - --skip-telemetry-gate (consent policy, not workbook quality);
+#      for this cap. One POLICY exclusion never consumes the budget:
 #        - --skip-visual-comparison ONLY under the sanctioned builder→verifier
 #          split (its reason references the verifier, matched /verifier/i —
 #          the verifier session records the verdict); any other reason counts.
@@ -560,7 +555,6 @@ OptionParser.new do |p|
   p.on('--skip-visual-tiles REASON', 'waive gate 9 (build-from-signals tile image-verification) — REQUIRED reason string. The reason MUST be named in your migration report.') { |v| opts[:skip_visual_tiles] = v }
   p.on('--min-grid-fill F', Float, 'gate 8c: minimum per-page grid_fill_pct (0..1, default 0.45) — pages below fail as mostly-empty') { |v| opts[:min_grid_fill] = v }
   p.on('--skip-layout-fill REASON', 'waive gate 8c (layout fill / grid coverage) — REQUIRED reason string. Use ONLY when a sparse/partial page is intentional. The reason MUST be named in your migration report.') { |v| opts[:skip_layout_fill] = v }
-  p.on('--skip-telemetry-gate REASON', 'waive gate 10 (telemetry consent decision) — REQUIRED reason string. Use ONLY when the run genuinely cannot prompt (e.g. unattended CI). The reason MUST be named in your migration report.') { |v| opts[:skip_telemetry] = v }
   p.on('--skip-postpublish-guide REASON', 'waive gate 11 (post-publish interactivity guide) — REQUIRED reason string. Use ONLY when the source dashboard actions are genuinely not worth a handoff guide. The reason MUST be named in your migration report.') { |v| opts[:skip_postpublish] = v }
   p.on('--accept-deferred-elements REASON', 'waive gate 12 (deferred/quarantined DM elements) — REQUIRED reason string. Use ONLY when knowingly shipping a PARTIAL data model; the reason AND the dropped elements MUST be named in your migration report.') { |v| opts[:accept_deferred] = v }
   p.on('--require-fidelity-ledger', 'gate 8d: require an RCF fidelity-ledger.json (Phase 5g) with zero UNRESOLVED spec-fixable deltas. DEFAULT-ON (PR-11) for workdirs whose migrate-state.json staged the loop (rcf_passes > 0 — tableau-to-sigma); this flag forces it for everyone else.') { opts[:require_fidelity] = true }
@@ -598,7 +592,7 @@ abort('--workdir (or --tableau) required') unless opts[:tab]
 # ---------------------------------------------------------------------------
 EXIT_GATE_MAP = {
   1 => '1', 2 => '1', 3 => '1', 4 => '2', 5 => '3', 6 => '4', 7 => '5', 8 => '6',
-  9 => '7', 10 => '8', 11 => '9', 12 => '10', 13 => '8b', 14 => '8c', 15 => '8d',
+  9 => '7', 10 => '8', 11 => '9', 13 => '8b', 14 => '8c', 15 => '8d',
   16 => '11', 17 => '12', 18 => '13', 19 => 'waiver-budget', 20 => '14', 21 => '7b',
   22 => '15', 23 => '16', 24 => '17', 25 => '18', 26 => '19', 27 => '20', 28 => '21',
   29 => '8e', 30 => '4b', 31 => '7c'
@@ -611,7 +605,7 @@ GATE_EVIDENCE_PATHS = {
   '7c' => nil, '8' => 'sigma-render.png', '8b' => 'blind-grade.json',
   '8c' => 'layout-census.json', '8d' => 'fidelity-ledger.json',
   '8e' => 'layout-arrangement.json', '9' => 'visual-verify-tiles.json',
-  '10' => 'telemetry-sent.json', '11' => 'POSTPUBLISH_GUIDE.md',
+  '11' => 'POSTPUBLISH_GUIDE.md',
   '12' => 'deferred-elements.json', '13' => 'anchors-verdict.json',
   '14' => 'visual-similarity.json', '15' => 'manual-residues.json',
   '16' => 'join-plan.json', '17' => 'lod-audit.json', '18' => 'ground-truth-plan.json',
@@ -886,7 +880,6 @@ WAIVER_HIDES = {
   '--skip-fidelity-gate'       => 'gate 8d: the RCF fidelity loop was never required — compositional deltas (palette, chart kind, KPI format) were never iterated (--rcf-passes 0 records this waiver)',
   'layout-phase-skip'          => 'gate 4b: the layout phase was deliberately skipped (run-state stamp status:"skip") — the dashboard grid was never built this run',
   '--skip-visual-tiles'        => 'gate 9: build-from-signals tiles never image-verified',
-  '--skip-telemetry-gate'      => 'gate 10: telemetry consent never decided',
   '--skip-postpublish-guide'   => 'gate 11: interactivity handoff guide not required',
   '--accept-deferred-elements' => 'gate 12: a PARTIAL data model was accepted',
   '--skip-anchors-gate'        => 'gate 13: source-anchor values never verified (the measured value bar)',
@@ -924,7 +917,6 @@ waiver_flags << '--skip-fidelity-gate'       if opts[:skip_fidelity]
 # budget exactly like a gate flag (gate 4b prints the record).
 waiver_flags << 'layout-phase-skip'          if layout_phase_stamp.is_a?(Hash) && layout_phase_stamp['status'] == 'skip'
 waiver_flags << '--skip-visual-tiles'        if opts[:skip_visual_tiles]
-waiver_flags << '--skip-telemetry-gate'      if opts[:skip_telemetry]
 waiver_flags << '--skip-postpublish-guide'   if opts[:skip_postpublish]
 waiver_flags << '--accept-deferred-elements' if opts[:accept_deferred]
 waiver_flags << '--skip-anchors-gate'        if opts[:skip_anchors]
@@ -976,14 +968,12 @@ rescue StandardError
   nil
 end
 
-# QUALITY waivers consume the budget; POLICY waivers never do:
-#   - --skip-telemetry-gate is a consent-policy decision, not workbook quality;
+# QUALITY waivers consume the budget; the POLICY waiver never does:
 #   - --skip-visual-comparison under the sanctioned builder→verifier split
 #     (reason references the verifier, /verifier/i) hands the verdict to the
 #     verifier session instead of waiving it — any OTHER reason counts.
 budget_flags = waiver_flags.reject do |f|
-  (f == '--skip-telemetry-gate') ||
-    (f == '--skip-visual-comparison' && opts[:skip_visual_cmp].to_s =~ /verifier/i)
+  f == '--skip-visual-comparison' && opts[:skip_visual_cmp].to_s =~ /verifier/i
 end
 
 # Reasons census (PR-14): the flag → recorded-reason map rides into
@@ -1003,7 +993,6 @@ _reason_srcs = {
   '--skip-layout-fill'         => opts[:skip_layout_fill],
   '--skip-fidelity-gate'       => opts[:skip_fidelity],
   '--skip-visual-tiles'        => opts[:skip_visual_tiles],
-  '--skip-telemetry-gate'      => opts[:skip_telemetry],
   '--skip-postpublish-guide'   => opts[:skip_postpublish],
   '--accept-deferred-elements' => opts[:accept_deferred],
   '--skip-anchors-gate'        => opts[:skip_anchors],
@@ -2939,27 +2928,6 @@ if File.exist?(vv_sidecar)
     end
     puts "[OK] gate 9: #{man.size} build-from-signals tile(s) image-verified (values + shape identity)"
   end
-end
-
-# ---------------------------------------------------------------------------
-# Gate 10 — Telemetry consent decision. The anonymous usage ping (and the
-# consent prompt that precedes it) lived as prose in each SKILL.md, so an agent
-# could wrap up without ever asking — telemetry silently never fired. This gate
-# delegates to the standalone assert-telemetry-ran.rb (single source of truth)
-# which checks for the telemetry-sent.json marker written by report-telemetry.py
-# on send OR decline. Never touches the network. The 3 converters that don't run
-# THIS script (qlik/cognos/gooddata) call assert-telemetry-ran.rb directly.
-# ---------------------------------------------------------------------------
-tele_gate = File.join(__dir__, 'assert-telemetry-ran.rb')
-if File.exist?(tele_gate)
-  cmd = [RbConfig.ruby, tele_gate, '--workdir', opts[:tab]]
-  cmd += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]
-  unless system(*cmd)
-    # assert-telemetry-ran.rb already printed the actionable failure message.
-    exit 12
-  end
-else
-  warn '[WARN] gate 10: assert-telemetry-ran.rb not found alongside this script — telemetry not enforced.'
 end
 
 # ---------------------------------------------------------------------------
