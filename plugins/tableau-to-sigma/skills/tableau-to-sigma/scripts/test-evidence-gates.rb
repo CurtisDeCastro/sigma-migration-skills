@@ -51,7 +51,6 @@ def base_workdir(dir, per_tile: BlindFixture::DEFAULT_TILES)
              'agent_vision' => true }
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
-  File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
   BlindFixture.install(dir, per_tile: per_tile)
 end
 

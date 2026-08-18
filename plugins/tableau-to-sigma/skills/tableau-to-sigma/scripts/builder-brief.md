@@ -147,14 +147,13 @@ When you believe the render matches the source:
    "comparison not recorded") — **that is your designed DONE state**. Ignore
    its printed instruction to record `--verdict pass`; that path is for solo
    self-attested runs.
-2. Prove everything else is green with the self-check gate (the ONLY two
-   waivers the split grants you):
+2. Prove everything else is green with the self-check gate (the ONLY waiver
+   the split grants you):
 
    ```bash
    ruby scripts/assert-phase6-ran.rb --tableau {{WORKDIR}} --workbook-id <sigma-wb-id> \
      --require-fidelity-ledger \
-     --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier" \
-     --skip-telemetry-gate "telemetry deferred to the driving session"
+     --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier"
    ```
 
 3. Request verification: your final message asks the driving session to spawn
@@ -194,8 +193,7 @@ DELIVERABLES (all in `{{WORKDIR}}`)
 
 HOUSEKEEPING
 
-- Telemetry: do NOT run `report-telemetry.py` — the driving session handles
-  the consent prompt + ping once at the end. Record your `duration_s` only.
+- Record your `duration_s` in the result line.
 - Public-repo hygiene: no credentials, tokens, or customer-identifying data
   in reports, notes, or result files.
 - Do NOT push any code changes.

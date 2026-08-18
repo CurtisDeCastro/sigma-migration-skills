@@ -58,22 +58,19 @@ PROCEDURE (from `{{SKILL_DIR}}`)
 
    ```bash
    ruby scripts/assert-phase6-ran.rb --tableau {{WORKDIR}} --workbook-id {{SIGMA_WORKBOOK_ID}} \
-     --require-fidelity-ledger [builder's documented waiver flags verbatim] \
-     --skip-telemetry-gate "telemetry deferred to the driving session"
+     --require-fidelity-ledger [builder's documented waiver flags verbatim]
    ```
 
    Pass EXACTLY the waiver flags the builder documented in
-   `MIGRATION_REPORT.md` (each must have a reason AND evidence there) — plus
-   the telemetry deferral above when the driving session owns telemetry. Do
+   `MIGRATION_REPORT.md` (each must have a reason AND evidence there). Do
    NOT pass `--skip-visual-comparison`: expect exit 13 (verdict unrecorded) —
    that is the correct pre-countersign state. Any OTHER failure exit means a
    gate the builder claimed green is not. **If the gate can only pass with a
    waiver the builder did not document with evidence → VETO (RED)** — an
    undocumented waiver is a hidden failure, not a technicality. The gate also
    enforces a waiver budget (stacked waivers cap the run at YELLOW,
-   exit 19): if the builder's documented waivers plus the telemetry deferral
-   exceed it, GREEN is unavailable — verdict at most YELLOW regardless of how
-   the pixels look.
+   exit 19): if the builder's documented waivers exceed it, GREEN is
+   unavailable — verdict at most YELLOW regardless of how the pixels look.
 
 4. **Anchor check — run it yourself.**
 
@@ -170,7 +167,6 @@ builder's `self_assessed_tier` is superseded.
 
 HOUSEKEEPING
 
-- Telemetry: do NOT run `report-telemetry.py` — the driving session handles it.
 - Public-repo hygiene: no credentials, tokens, or customer-identifying data in
   notes or results.
 - Do NOT push any code changes. Do NOT modify the workbook — you verify;

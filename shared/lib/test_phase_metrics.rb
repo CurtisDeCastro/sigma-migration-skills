@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
-# Unit test for phase_metrics.rb (reconciled ADD-6 — local capture, consent
-# untouched). Run: ruby shared/lib/test_phase_metrics.rb
+# Unit test for phase_metrics.rb (reconciled ADD-6 — local capture, never
+# sends). Run: ruby shared/lib/test_phase_metrics.rb
 #
 # Proves: require-safe standalone (stdlib only); record appends one JSON line
 # per call and never raises (bad workdir → false, run unbroken); entries skips
@@ -23,8 +23,8 @@ def check(desc)
 end
 
 check('require-safe standalone: no repo siblings loaded') do
-  # stdlib only — a stray require of sigma_rest/telemetry would show up here.
-  $LOADED_FEATURES.none? { |f| f =~ /sigma_rest|sigma_telemetry|report-telemetry/ }
+  # stdlib only — a stray require of a repo sibling (e.g. sigma_rest) would show up here.
+  $LOADED_FEATURES.none? { |f| f =~ /sigma_rest/ }
 end
 
 Dir.mktmpdir do |wd|

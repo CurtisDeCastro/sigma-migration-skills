@@ -16,9 +16,9 @@
 #              agent ASKS THE USER, then re-runs with --connection <id>.
 #              (We never guess among multiple, and never free-search per phase.)
 #
-#  2. RECORD RUN METADATA to <workdir>/intake.json: run_start (feeds telemetry
-#     duration), input_mode (live|file|both — feeds telemetry --mode), and the
-#     source tool/identifier. Prints an expectations banner for the mode.
+#  2. RECORD RUN METADATA to <workdir>/intake.json: run_start (run-duration /
+#     wall-clock audit), input_mode (live|file|both), and the source
+#     tool/identifier. Prints an expectations banner for the mode.
 #
 #  3. FRONT-DOOR TRIAGE (speed-review #6a): when an assessment's
 #     migration-plan.json is present (--plan PATH, or <workdir>/migration-plan.json),
@@ -369,7 +369,7 @@ resolved['at'] = Time.now.utc.iso8601
 write_json(conn_path, resolved)
 File.delete(cand_path) if File.exist?(cand_path)   # resolved now; clear stale candidates
 
-# Run metadata for telemetry + audit.
+# Run metadata for run-duration + audit.
 mode = %w[live file both].include?(opts[:mode]) ? opts[:mode] : 'unknown'
 intake_rec = {
   'run_start'  => Time.now.utc.iso8601,
@@ -399,6 +399,6 @@ when 'file'
 when 'both', 'live'
   puts "     INPUT MODE = #{mode}. Live source available — full source-side parity verification applies."
 else
-  puts '     INPUT MODE = unknown. Pass --mode live|file|both so telemetry + the raw-mode banner are accurate.'
+  puts '     INPUT MODE = unknown. Pass --mode live|file|both so the raw-mode banner is accurate.'
 end
 exit 0

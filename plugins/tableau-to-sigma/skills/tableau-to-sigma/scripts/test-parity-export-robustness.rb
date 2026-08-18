@@ -20,8 +20,7 @@
 #      Advisory, never a gate.
 #
 #   3. Finalize-flag ergonomics — migrate-tableau.rb --finalize now forwards
-#      --regen-plan (→ phase6-parity.rb) and --skip-telemetry-gate (→
-#      assert-phase6-ran.rb), which the children already accept.
+#      --regen-plan (→ phase6-parity.rb), which phase6-parity already accepts.
 #
 # The Sigma REST layer is stubbed per element+format; no network. Every export
 # POST (element id + format + rowLimit) is logged so we can prove the CSV
@@ -273,22 +272,17 @@ err, _st = drift_run({ 'PARITY_DRIFT_WARN_MINUTES' => '5' }) { (Time.now - 10 * 
 check(err.match?(DRIFT_RE), '$PARITY_DRIFT_WARN_MINUTES lowers the default threshold (10 > 5 → warn)', fails)
 
 # ============================================================================
-# Part 3 — finalize-flag ergonomics: migrate-tableau forwards both flags
+# Part 3 — finalize-flag ergonomics: migrate-tableau forwards --regen-plan
 # ============================================================================
 puts '-- Part 3: finalize-flag forwarding --'
 migrate_src = File.read(File.join(SCRIPTS, 'migrate-tableau.rb'))
 phase6_src  = File.read(File.join(SCRIPTS, 'phase6-parity.rb'))
-gate_src    = File.read(File.join(SCRIPTS, 'assert-phase6-ran.rb'))
 
 check(migrate_src.include?("o.on('--regen-plan'"), 'migrate-tableau ACCEPTS --regen-plan', fails)
-check(migrate_src.include?("o.on('--skip-telemetry-gate REASON'"), 'migrate-tableau ACCEPTS --skip-telemetry-gate', fails)
 check(migrate_src.scan(/p6 \+= \['--regen-plan'\] if opts\[:regen_plan\]/).length >= 2,
       '--regen-plan forwarded to phase6-parity on BOTH the pass-1 and finalize invocations', fails)
-check(migrate_src.include?("gate += ['--skip-telemetry-gate', opts[:skip_telemetry]] if opts[:skip_telemetry]"),
-      '--skip-telemetry-gate forwarded to the assert-phase6-ran gate', fails)
-# Receivers already accept them (regression guard against a silent rename).
+# Receiver already accepts it (regression guard against a silent rename).
 check(phase6_src.include?("p.on('--regen-plan'"), 'phase6-parity still accepts --regen-plan', fails)
-check(gate_src.include?("p.on('--skip-telemetry-gate REASON'"), 'assert-phase6-ran still accepts --skip-telemetry-gate', fails)
 
 puts
 if fails.empty?

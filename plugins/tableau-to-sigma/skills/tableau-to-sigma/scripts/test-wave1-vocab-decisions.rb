@@ -85,10 +85,10 @@ vias.each do |v|
   check(Offramp::AUTHORIZATION_VIA.include?(v),
         "call-site via #{v.inspect} is in Offramp::AUTHORIZATION_VIA", fails)
 end
-# Every decided_by literal in the orchestrator (ledger writers AND the two
-# consent-marker writers) must come from DECIDED_BY — hyphenated lowercase
-# quoted words on any line mentioning decided_by, comments included, so a
-# drifted token in either code or contract prose fails loudly.
+# Every decided_by literal in the orchestrator's ledger writers must come from
+# DECIDED_BY — hyphenated lowercase quoted words on any line mentioning
+# decided_by, comments included, so a drifted token in either code or contract
+# prose fails loudly.
 dby_tokens = src.lines.select { |l| l.include?('decided_by') }
                  .flat_map { |l| l.scan(/'([a-z][a-z-]*)'/) }.flatten.uniq
 check(dby_tokens.any?, "found #{dby_tokens.size} decided_by-adjacent literal token(s)", fails)
@@ -96,8 +96,6 @@ dby_tokens.each do |t|
   check(Offramp::DECIDED_BY.include?(t),
         "decided_by literal #{t.inspect} is in Offramp::DECIDED_BY", fails)
 end
-check(dby_tokens.include?('relayed-absent'),
-      "the consent chokepoint's 'relayed-absent' writer is present and scanned", fails)
 check(src.include?('Offramp::MANUAL_SPEC_REASON_STOP') &&
       src.include?('Offramp::MANUAL_SPEC_REASON_REUSE') &&
       src.include?('Offramp::MANUAL_SPEC_REASON_WAIVER'),
@@ -109,7 +107,7 @@ puts 'decisions.jsonl append-only ledger'
 Dir.mktmpdir do |dir|
   Offramp.decision(dir, kind: 'extract_drift', question: 'drift ok?', answer: 'proceed',
                    decided_by: 'unattended-flag')
-  Offramp.decision(dir, kind: 'telemetry_consent', question: 'send telemetry?', answer: 'declined',
+  Offramp.decision(dir, kind: 'empty_view_csv', question: 'empty tile ok?', answer: 'proceed',
                    decided_by: 'relayed')
   recs = Offramp.decisions(dir)
   check(recs.size == 2, "two decisions round-trip (got #{recs.size})", fails)

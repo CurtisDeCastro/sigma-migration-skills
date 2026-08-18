@@ -65,7 +65,7 @@ changing any gate's semantics:
   is set aside as `png-read.stale.json` and must be re-verified against the
   fresh PNG.
 - **ONE consolidated pre-build checkpoint.** Gap-scan review (exit 11),
-  decisions (exit 10), telemetry consent, and the E9.4 cost **advisory**
+  decisions (exit 10), and the E9.4 cost **advisory**
   (WARN-only, ratified) batch into a single stop writing ONE artifact —
   `<WORK>/open-questions.json` — with a single re-entry
   (`--answers '<json>' [--force] | --yes`). Targeted answers
@@ -140,9 +140,8 @@ Poll pattern: `tail -5` the stdout log for the latest `ev` lines; on an
 ## Local phase metrics (`<WORK>/phase-metrics.jsonl`)
 
 Every `mark()` boundary appends `{phase, wall_s, at}` via
-`lib/phase_metrics.rb` (shared). Capture is LOCAL and decoupled from
-telemetry consent — the file is gitignored run state, never sent; consent
-gates only the SEND path. Absent lib = silent no-op. Summarize with
+`lib/phase_metrics.rb` (shared). Capture is LOCAL — the file is gitignored
+run state, never sent off-box. Absent lib = silent no-op. Summarize with
 `PhaseMetrics.summarize(<WORK>)`. This is the calibration source for
 `estimate-cost.rb`'s coefficients (ratified: measure before optimizing).
 

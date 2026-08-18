@@ -239,7 +239,6 @@ phase by hand or need to understand why it stopped.
 | 5g | **RCF fidelity loop** | `fidelity-loop.rb` render → compare → fix until clean | 🚧 (default-on) `fidelity-ledger.json` no unresolved spec-fixable deltas (gate 8d) | `refs/phase-5g-rcf.md`, `refs/fidelity-rubric.md`, `refs/fidelity-recipes.md`, `refs/layout-visual-qa.md` |
 | E | Enhance (opt-in) | `enhance-scan.rb` → `enhance-apply.rb` | cloned "— Enhanced" workbook | `refs/phase-e-enhance.md`, `refs/postpublish-interactivity.md` |
 | — | Security RLS/CLS | detect always; apply opt-in | `apply_sigma_rls.py` | `refs/security-rls.md` |
-| — | Telemetry (final) | `report-telemetry.py` | `telemetry-sent.json` | *(spine ↓)* |
 
 On ANY nonzero exit or waiver: `refs/gates.md`. On a STOP naming a script:
 `refs/script-map.md`. On a failure loop: `refs/troubleshooting.md`.
@@ -281,27 +280,3 @@ AFTER the model is posted (non-empty → `security.json`; ask **Port**
 (recommended) / Customize / Skip via `apply_sigma_rls.py`; **Skip is loud** —
 all rows visible to everyone). Full flow + the
 `USERNAME()`/`ISMEMBEROF`/`USERATTRIBUTE` mapping: `refs/security-rls.md`.
-
----
-
-## Telemetry (after the final gate passes)
-
-**First read `<run-dir>/consent-answer.json`** (the checkpoint's recorded
-consent — one stop, never a second ask; schema/provenance/every-path
-guarantee: `refs/gates.md` §Telemetry consent): `consented` → run
-`report-telemetry.py` below **without asking again**; `declined`/`no-response`
-→ run it with `--declined`; absent (interactive only) → ask, then add
-`--consent-interactive`; reader FAILS CLOSED — absent or unreadable without
-the flag sends nothing:
-
-**Tell the user this before running anything:**
-
-> "Migration complete. Before I wrap up, I'd like to send an anonymous usage ping so we can track which migration skills are being used. It records: tool name, your Sigma region, an anonymized org fingerprint (a hash of your client ID — not the credential itself), migration duration, and success. No workbook names, SQL, column names, or any customer data is included. See [TELEMETRY.md](https://github.com/twells89/sigma-migration-telemetry/blob/main/TELEMETRY.md) for the exact payload. Just say 'skip' if you'd prefer not to send it."
-
-If the user does not object, run:
-
-```bash
-python3 scripts/report-telemetry.py --tool tableau-to-sigma --duration <elapsed_seconds> --workdir <run-dir> [--mode live|file|both] --consent-interactive
-# --failed on failure · --declined on decline · checkpoint 'consented': no flag needed
-# --workdir writes telemetry-sent.json — required by the GREEN telemetry gate (assert-telemetry-ran.rb)
-```

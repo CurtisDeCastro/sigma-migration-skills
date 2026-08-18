@@ -171,7 +171,7 @@ Why each entry (and why nothing broader):
   tests). Scoped to the skill's `scripts/` directory, **not** `ruby` in
   general.
 - `Bash(python3 scripts/*)` — the Python twins (`get_token.py`,
-  `land-extracts.py`, `visual-similarity.py`, telemetry).
+  `land-extracts.py`, `visual-similarity.py`).
 - `Bash(bash scripts/bootstrap.sh*)` — the mandatory Step-0 environment
   bootstrap (idempotent, user-scoped, never admin).
 - `Bash(bash scripts/doctor.sh*)` — the environment doctor (read-only probe;

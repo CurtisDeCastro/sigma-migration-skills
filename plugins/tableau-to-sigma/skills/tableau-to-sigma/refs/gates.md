@@ -121,9 +121,9 @@ MUST call this gate as their final step.
 > `--skip-*` / `--allow-*` / `--accept-*` / `--min-pass-rate <1` flag attests a
 > verification could NOT run — not a lever to turn a red gate green. The gate
 > stamps `waivers` + `waiver_count` into `parity-final.json`; **more than 2
-> quality waivers caps the migration at YELLOW** (exit 19; `--skip-telemetry-gate`
-> and the sanctioned builder→verifier `--skip-visual-comparison` are policy
-> exclusions), and **data-class fidelity residuals can never be waived**.
+> quality waivers caps the migration at YELLOW** (exit 19; the sanctioned
+> builder→verifier `--skip-visual-comparison` is a policy exclusion), and
+> **data-class fidelity residuals can never be waived**.
 > Reaching for a third waiver means: stop and fix.
 
 ## Verdict model (PR-14) — GREEN / YELLOW / PARTIAL (relocated from SKILL.md — E9 diet)
@@ -141,30 +141,3 @@ MUST call this gate as their final step.
 > **`GREEN (factory, self-attested)`** — never bare; `verify-complete.rb`
 > fails a claim that strips (or fabricates) the label. Tier-scaled budget
 > (W2.1): Tier-S caps quality waivers at **1** (M/full keep 2).
-
-## Telemetry consent (gate 10) — consent-answer.json schema + fail-closed reader (PR #509 R3/R9)
-
-> **`<run-dir>/consent-answer.json`** — the pre-build checkpoint's recorded
-> consent; consent rides that ONE stop, never a second ask. Schema:
-> `{answer, decided_by, asked_at_checkpoint, at}`.
-> `answer` ∈ `consented | declined | no-response`. `decided_by` comes from the
-> closed `Offramp::DECIDED_BY` vocabulary: `relayed` (an agent relayed
-> `--answers` operator text — not first-hand consent), `relayed-absent` (an
-> `--answers` set omitted the consent key; the chokepoint recorded the honest
-> default), `unattended-flag` (`--yes`/`--force` defaults), reserved `user`.
-> `asked_at_checkpoint` is `true` ONLY when a checkpoint stop actually
-> surfaced the question — a never-stopped `--answers` relay records `false`.
-> **Every-path guarantee** (`ensure_unattended_consent_marker!`): every
-> UNATTENDED run (`--yes`/`--force`/`--answers`) gets a marker on every
-> terminal route — zero-question runs, question lists that never surfaced
-> consent, the FASTPATH span, and the `--finalize` spine. The unattended
-> `no-response` marker is deliberately the ONE consent artifact with **no
-> `decisions.jsonl` companion line**: nothing was decided at a stop; the
-> marker itself is the record. An interactive run that never stopped leaves
-> NO marker — a human is present, the SKILL.md wrap-up ask governs.
-> **Fail-closed reader** (`report-telemetry.py`): sending requires consent
-> EVIDENCE — a readable record saying `consented`, or the explicit
-> `--consent-interactive` attestation after a real wrap-up ask. Record absent
-> or unreadable without that flag → nothing is sent; a distinct suppression
-> marker (`status: declined`, `consent_source: fail-closed`) still satisfies
-> gate 10 (telemetry never blocks a migration).

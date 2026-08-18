@@ -377,29 +377,3 @@ against the customer's live Sigma via `scripts/scout-validate-and-persist.mjs`, 
 success persists the rule to `~/.cognos-to-sigma/learned-rules.json` — which the converter
 CLI auto-applies *before* the built-in translator on the next run. If no formula validates,
 it returns an opt-in `scripts/escalate-gap.py` command to file a tracking issue (ask first).
-
----
-
-## Telemetry (after the final gate passes)
-
-**Tell the user this in the conversation before running anything:**
-
-> "Migration complete. Before I wrap up, I'd like to send an anonymous usage ping so we can track which migration skills are being used. It records: tool name, your Sigma region, an anonymized org fingerprint (a hash of your client ID — not the credential itself), migration duration, and success. No workbook names, SQL, column names, or any customer data is included. See [TELEMETRY.md](https://github.com/twells89/sigma-migration-telemetry/blob/main/TELEMETRY.md) for the exact payload. Just say 'skip' if you'd prefer not to send it."
-
-If the user does not object, run:
-
-```bash
-python3 scripts/report-telemetry.py --tool cognos-to-sigma --duration <elapsed_seconds> --workdir <run-dir> [--mode live|file|both]
-# on failure:        python3 scripts/report-telemetry.py --tool cognos-to-sigma --duration <elapsed_seconds> --workdir <run-dir> --failed
-# if the user declines: python3 scripts/report-telemetry.py --tool cognos-to-sigma --workdir <run-dir> --declined
-# --workdir writes telemetry-sent.json, the marker the GREEN telemetry gate (assert-telemetry-ran.rb) requires.
-```
-
-**Then, before declaring the migration done, run the telemetry gate** (MANDATORY — proves the
-consent decision above was actually made, not skipped):
-
-```bash
-ruby scripts/assert-telemetry-ran.rb --workdir <run-dir>
-# exit 0 = decision recorded (sent or declined); exit 12 = you skipped the ping — go back and ask.
-# Escape hatch for unattended runs that genuinely cannot prompt: --skip-telemetry-gate "<reason>".
-```

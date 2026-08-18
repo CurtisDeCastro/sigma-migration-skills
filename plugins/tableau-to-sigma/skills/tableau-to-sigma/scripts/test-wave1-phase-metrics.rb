@@ -5,8 +5,8 @@
 # boundary appends {phase, wall_s, at} to <WORK>/phase-metrics.jsonl via the
 # SHARED phase-metrics lib (shared/lib/phase_metrics.rb), guarded on every
 # axis so an absent or raising lib is a silent no-op (a metrics write must
-# never touch the conversion). Capture is LOCAL and decoupled from telemetry
-# consent (ratified decision: files local; consent gates only SEND).
+# never touch the conversion). Capture is LOCAL — files stay in the workdir and
+# are never sent off-box (ratified decision: measure before optimizing).
 #
 #   T1: a real fixture run appends well-formed per-phase records
 #   T2: the guards are wired (lib-absent no-op; raising lib swallowed)
@@ -58,8 +58,7 @@ check(src =~ /PhaseMetrics\.record\(workdir: WORK, phase: key, wall_s: seg, at: 
 puts 'T3 — machine-local contract'
 gitignore = File.read(File.expand_path('../../../../../.gitignore', __dir__))
 check(gitignore.include?('phase-metrics.jsonl'), 'phase-metrics.jsonl is gitignored (never committed)', fails)
-check(gitignore.include?('decisions.jsonl') && gitignore.include?('consent-answer.json') &&
-      gitignore.include?('migrate-full.log'),
+check(gitignore.include?('decisions.jsonl') && gitignore.include?('migrate-full.log'),
       'the other wave-1 local-state artifacts are gitignored too', fails)
 
 puts

@@ -21,8 +21,8 @@
 #   :forwards  the orchestrator forwards the flag to a script that records it
 #              (ref-check → assert-wb-refs-resolve.rb --workdir)
 #   :gate      the orchestrator forwards it to assert-phase6-ran.rb (census)
-#   :policy    consent policy, never quality (telemetry) — census-visible at
-#              gate 10, excluded from the budget by doctrine
+#   :policy    a policy exclusion, never quality — census-visible but
+#              excluded from the waiver budget by doctrine
 #   :mode      NOT an escape: a discovery/build mode that does not turn off a
 #              verification (--skip-reuse-scan builds a FRESH DM — more work,
 #              not less; --skip-images/--skip-content scope the discovery
@@ -44,7 +44,6 @@ end
 # ---- layer 1: static classification ------------------------------------------
 CLASSIFICATION = {
   'assert-phase6-ran.rb'         => :budget, # every gate skip flag → waiver census
-  'assert-telemetry-ran.rb'      => { '--skip-telemetry-gate' => :policy },
   'migrate-tableau.rb'           => {
     '--skip-reuse-scan'          => :mode,
     '--skip-dashboard-read'      => :offramp,
@@ -53,7 +52,6 @@ CLASSIFICATION = {
     '--skip-extract-landing'     => :offramp,
     '--skip-postpublish-guide'   => :gate,     # → assert-phase6-ran census AND → assert-action-gates.rb (Task 6; guide-residue check ONLY, never G1)
     '--skip-flip-test'           => :gate,     # → --skip-control-flip census
-    '--skip-telemetry-gate'      => :gate,     # #422: → assert-phase6-ran (gate 10 consent, policy exclusion)
     '--skip-datasource-filters'  => :forwards, # → assert-datasource-filters.rb --workdir
     '--skip-anchors-gate'        => :gate,     # W2.10: → assert-phase6-ran gate 13 (waiver budget, REASON required)
     '--skip-sql-ident-gate'      => :offramp   # W2-OM: orchestrator logs kind skip-flag-waived before waiving check-sql-idents
