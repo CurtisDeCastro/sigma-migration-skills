@@ -57,8 +57,8 @@ ruby scripts/intake.rb --workdir <WORK> --tool quicksight-to-sigma --mode live \
 ```
 
 Caches `<WORK>/connection.json` (the orchestrator reads it when `--connection` is omitted —
-point `--out` at the same `<WORK>`) and writes `intake.json` (run-start + mode feed the
-telemetry ping). Multiple connections + no id/name → it lists them and asks you to pick;
+point `--out` at the same `<WORK>`) and writes `intake.json` (run-start + mode for
+run-duration / audit). Multiple connections + no id/name → it lists them and asks you to pick;
 never guesses.
 
 ## One command (preferred): `scripts/migrate-quicksight.rb`
@@ -336,21 +336,3 @@ Row/column security is **never silently dropped and never silently ported** — 
 4. **Assign membership.** Assign per-user attribute values / team membership from the source tool's group/role membership (the converter reports the attribute/team names; the values come from the source's user mapping).
 
 **Skip is loud:** opting out leaves the migrated model with NO RLS — all rows visible to everyone. Confirm before skipping.
-
-
----
-
-## Telemetry (after the final gate passes)
-
-**Tell the user this in the conversation before running anything:**
-
-> "Migration complete. Before I wrap up, I'd like to send an anonymous usage ping so we can track which migration skills are being used. It records: tool name, your Sigma region, an anonymized org fingerprint (a hash of your client ID — not the credential itself), migration duration, and success. No workbook names, SQL, column names, or any customer data is included. See [TELEMETRY.md](https://github.com/twells89/sigma-migration-telemetry/blob/main/TELEMETRY.md) for the exact payload. Just say 'skip' if you'd prefer not to send it."
-
-If the user does not object, run:
-
-```bash
-python3 scripts/report-telemetry.py --tool quicksight-to-sigma --duration <elapsed_seconds> --workdir <run-dir> [--mode live|file|both]
-# on failure:        python3 scripts/report-telemetry.py --tool quicksight-to-sigma --duration <elapsed_seconds> --workdir <run-dir> --failed
-# if the user declines: python3 scripts/report-telemetry.py --tool quicksight-to-sigma --workdir <run-dir> --declined
-# --workdir writes telemetry-sent.json, the marker the GREEN telemetry gate (assert-telemetry-ran.rb) requires.
-```

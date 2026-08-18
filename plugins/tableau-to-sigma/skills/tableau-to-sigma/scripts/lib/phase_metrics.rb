@@ -2,7 +2,7 @@
 #
 # phase_metrics.rb — LOCAL per-phase wall-clock/token capture (reconciled
 # program ADD-6; ratified 2026-07-27 Q7: "local per-phase token/timing capture
-# lands decoupled from consent — files local; consent gates send only").
+# lands as LOCAL files only — nothing here ever sends them off-box").
 #
 # WHY: every sizing decision in the program currently steers by an n=3 ±30%
 # priors-not-fits estimator (estimate-cost.rb's own header). This lib is the
@@ -10,14 +10,12 @@
 # boundary, and the accumulated <WORK>/phase-metrics.jsonl becomes the
 # calibration source those coefficients have never had.
 #
-# CAPTURE ≠ SEND — the consent contract, stated once and load-bearing:
+# CAPTURE, NEVER SEND — the local-only contract, stated once and load-bearing:
 #   - record() only ever APPENDS to a file inside the caller's workdir.
-#     Nothing here talks to the network, reads credentials, or touches the
-#     telemetry consent train (report-telemetry / sigma_telemetry are not
-#     required, imported, or modified by this lib).
+#     Nothing here talks to the network, reads credentials, or imports any
+#     off-box send path.
 #   - phase-metrics.jsonl is machine-local run state, gitignored, never
-#     committed (CONTRIBUTING.md "Run state stays local"). Sending any part
-#     of it remains gated on the explicit --consented telemetry path.
+#     committed (CONTRIBUTING.md "Run state stays local").
 #   - Keys are coarse internal phase names + numbers only. Callers must not
 #     put workbook/customer identifiers in `phase`.
 #

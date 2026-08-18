@@ -263,9 +263,9 @@ $modelHint = if ($env:SIGMA_MODEL_HINT) { $env:SIGMA_MODEL_HINT } else { "" }
 
 # --- machine-readable fingerprint (doctor.json) ----------------------------
 # Same contract as doctor.sh: lets the preflight GATE refuse to proceed on a
-# broken environment, and lets telemetry group failures by environment class.
-# Human output above is unchanged. Always ~/.sigma-migration/doctor.json; also
-# -WorkDir if given.
+# broken environment, and records an environment-class fingerprint for grouping
+# failures. Human output above is unchanged. Always ~/.sigma-migration/doctor.json;
+# also -WorkDir if given.
 $rubyOk = [bool](Get-Command ruby -ErrorAction SilentlyContinue)
 $rubyV  = if ($rubyOk) { (& ruby -e 'print RUBY_VERSION' 2>$null) } else { "" }
 $nodeOk = [bool](Get-Command node -ErrorAction SilentlyContinue)

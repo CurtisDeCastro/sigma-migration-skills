@@ -46,9 +46,9 @@
 #                       deferred-elements.json (quarantined DM elements).
 #   quality-waiver    — parity-final.json `waivers` census (stamped by
 #                       assert-phase6-ran on every run), minus the POLICY
-#                       exclusions (--skip-telemetry-gate; --skip-visual-
-#                       comparison under the sanctioned /verifier/i split) and
-#                       minus flags reclassified below; plus column-scan.json
+#                       exclusion (--skip-visual-comparison under the
+#                       sanctioned /verifier/i split) and minus flags
+#                       reclassified below; plus column-scan.json
 #                       skipped-* statuses (gate 3/7's runtime auto-skips —
 #                       ruzs: an unaudited workbook must never keep GREEN).
 #   recorded-escape   — offramps.jsonl escape kinds (cred/doctor/tableau gate
@@ -79,10 +79,10 @@ module DegradationLedger
   CLASSES = %w[scope-cut quality-waiver recorded-escape fidelity-residual
                resolution-waived].freeze
 
-  # Census flags that are POLICY, never quality (assert-phase6-ran budget
-  # doctrine): telemetry consent; the visual-comparison hand-off to a verifier
-  # session is excluded only when its recorded reason matches /verifier/i.
-  POLICY_FLAGS = ['--skip-telemetry-gate'].freeze
+  # Census policy exclusion (assert-phase6-ran budget doctrine): the
+  # visual-comparison hand-off to a verifier session is excluded from the
+  # quality-waiver census only when its recorded reason matches /verifier/i
+  # (handled inline in quality_waivers).
   # Census flags that are run OFF-RAMPS, not gate-quality waivers — classed
   # recorded-escape (they were honored by a script mid-run, mirrored into the
   # census by the budget code).
@@ -245,7 +245,6 @@ module DegradationLedger
     end
     out = []
     pf['waivers'].map(&:to_s).uniq.each do |flag|
-      next if POLICY_FLAGS.include?(flag)
       next if CENSUS_DERIVED_FLAGS.include?(flag)
       next if CENSUS_ESCAPE_FLAGS.include?(flag) # classed recorded-escape below
       next if flag == '--skip-visual-comparison' && reasons[flag].to_s =~ /verifier/i
