@@ -74,7 +74,7 @@ Sigma SEs, technical CSMs, and migration partners running 1:1 Tableau-to-Sigma c
   <li>How to invoke the <code>tableau-to-sigma</code> skill from Claude Code with a single dashboard URL.</li>
   <li>What each conversion phase does — discovery, gap scan, DM reuse check, spec build, parity verification.</li>
   <li>How to read the gap report and accept / override the proposed Sigma translations.</li>
-  <li>How the finalize hard gate (<code>assert-phase6-ran.rb</code> — a stack of ~15 independent checks: parity ran, no orphans, no runtime errors, layout applied + filled, controls wired, visual verdict recorded, fidelity ledger clean, telemetry, …) prevents silent regressions, and why a clean PASS 1 is <em>not</em> "done".</li>
+  <li>How the finalize hard gate (<code>assert-phase6-ran.rb</code> — a stack of ~15 independent checks: parity ran, no orphans, no runtime errors, layout applied + filled, controls wired, visual verdict recorded, fidelity ledger clean, …) prevents silent regressions, and why a clean PASS 1 is <em>not</em> "done".</li>
   <li>Why you drive the whole conversion through the <strong>one orchestrator command</strong> (<code>migrate-tableau.rb</code>) rather than running the per-phase scripts by hand.</li>
 </ul>
 

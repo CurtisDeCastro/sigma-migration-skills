@@ -439,10 +439,9 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
        SELF-CHECK gate:**
        `ruby scripts/assert-phase6-ran.rb --tableau /tmp/<wb-dir> \\
           --workbook-id <sigma-wb-id> --require-fidelity-ledger \\
-          --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier" \\
-          --skip-telemetry-gate "telemetry deferred to the batch orchestrator"`
-       Those two --skip flags are the ONLY waivers the split grants you
-       (they also consume the gate's waiver budget — stacking any further
+          --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier"`
+       That --skip flag is the ONLY waiver the split grants you
+       (it also consumes the gate's waiver budget — stacking any further
        waiver caps the run at YELLOW, exit 19); any OTHER waiver needs a
        reason AND evidence documented in your MIGRATION_REPORT.md or the
        verifier will VETO the workbook.
@@ -485,7 +484,7 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
     workbook is the VERIFIER's result line, not yours)
     - GREEN: column_errors==0 AND verify=="clean" AND charts_total > 0 AND
              charts_pass==charts_total AND phase6_assert_exit==0 on the
-             SELF-CHECK gate run (split + telemetry waivers only) AND
+             SELF-CHECK gate run (split waiver only) AND
              screenshot_path != null AND you Read-back the Sigma PNG and
              confirmed visual parity with the source dashboard PNG(s).
              (charts_total==0 is NOT GREEN — that's the historic loophole;
@@ -507,12 +506,6 @@ def agent_brief(sub, cluster, batch_results_path, leader_dm_id_path, out_dir, ov
     CONTINUE-ON-FAILURE — if you hit a hard blocker (POST rejects, column-type
     error you can't resolve in 2 retry attempts, etc.), file a beads ticket
     via `bd create` and write a RED result line. Do not block other workbooks.
-
-    TELEMETRY — do NOT run report-telemetry.py yourself. The batch
-    orchestrator asks the user once and sends (or skips) telemetry for the
-    whole batch after all waves complete; a per-subagent ping would
-    double-count and re-prompt the user. Just record your duration_s in the
-    result line.
 
     Do NOT push any code changes.
   BRIEF
@@ -568,8 +561,6 @@ def verifier_brief(sub, batch_results_path)
     (copy sigma_workbook_url from the builder's line). Your line is the
     workbook's FINAL batch verdict.
 
-    TELEMETRY — do NOT run report-telemetry.py; the batch orchestrator
-    handles it once for the whole batch.
     Public-repo hygiene: no credentials/tokens in notes or reports.
     Do NOT push any code changes. Do NOT modify the workbook — you verify;
     fixes belong to a builder.

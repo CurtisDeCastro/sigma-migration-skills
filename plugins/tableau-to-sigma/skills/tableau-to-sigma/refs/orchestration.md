@@ -97,8 +97,7 @@ The rules:
   ```bash
   ruby scripts/assert-phase6-ran.rb --tableau <workdir> --workbook-id <wb> \
     --require-fidelity-ledger \
-    --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier" \
-    --skip-telemetry-gate "telemetry deferred to the driving session"
+    --skip-visual-comparison "builder/verifier split: final visual verdict reserved for the verifier"
   ```
 
   Exit 0 there means "everything except the countersignature is green."
@@ -183,8 +182,8 @@ agent context works:
 
 Non-negotiables regardless of mechanism: the verifier gets a **fresh context**
 (no builder transcript), and each builder gets **one workbook**. The driving
-session's job is orchestration only — spawn, collect results, spawn verifiers,
-handle telemetry consent once at the end — not conversion work of its own.
+session's job is orchestration only — spawn, collect results, spawn verifiers —
+not conversion work of its own.
 
 ---
 
@@ -233,7 +232,7 @@ pattern per run:
    refs/performance.md). Phase 1 is interleaved: the Tableau-side and
    Sigma-side lanes join before anything consumes discovery output.
 2. **ONE pre-build checkpoint** consolidates gap review (exit 11), decisions
-   (exit 10), telemetry consent, and the WARN-only cost advisory into a single
+   (exit 10), and the WARN-only cost advisory into a single
    stop + a single artifact (`<WORK>/open-questions.json`) + a single re-entry
    (`--answers '<json>' [--force]` or `--yes`). Tagged entries embed their
    computed `targeted_key` — copy it verbatim into `--answers` (targeted wins

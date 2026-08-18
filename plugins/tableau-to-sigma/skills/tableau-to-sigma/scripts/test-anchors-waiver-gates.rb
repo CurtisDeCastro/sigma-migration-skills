@@ -17,9 +17,9 @@
 #
 #   waiver budget (exit 19): >2 QUALITY waiver/escape flags → GREEN unavailable
 #     (YELLOW cap); waivers + waiver_count stamped into parity-final.json on
-#     every run. Policy exclusions never consume the budget:
-#     --skip-telemetry-gate (always), and --skip-visual-comparison only under
-#     the sanctioned builder→verifier handoff (reason matches /verifier/i).
+#     every run. The policy exclusion never consumes the budget:
+#     --skip-visual-comparison only under the sanctioned builder→verifier
+#     handoff (reason matches /verifier/i).
 #
 #   gate 14 visual-similarity floor (exit 20): behind File.exist? on
 #     scripts/visual-similarity.py (VISUAL_SIMILARITY_SCRIPT env override for
@@ -59,7 +59,6 @@ def base_workdir(dir, parity_extra: {})
              'agent_vision' => true }.merge(parity_extra)
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
-  File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
   BlindFixture.install(dir) # PR-9: gate 8b refuses a self-attested visual pass
 end
 
@@ -290,18 +289,6 @@ Dir.mktmpdir do |dir|
 end
 
 # ---- POLICY exclusions never consume the budget --------------------------------
-Dir.mktmpdir do |dir|
-  # --skip-telemetry-gate is policy, not quality: 2 quality + telemetry → exit 0
-  base_workdir(dir)
-  out, _err, st = run_gate(dir, '--skip-orphan-check', 'r1', '--skip-layout-lint', 'r2', '--skip-telemetry-gate', 'unattended CI')
-  check(st.success?, "2 quality waivers + --skip-telemetry-gate → exit 0, telemetry never counts (got #{st.exitstatus})")
-  check(out.include?('policy exclusions') && out.include?('--skip-telemetry-gate'),
-        'telemetry exclusion is stated on the WAIVERS line')
-  pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
-  check(pf['waiver_count'] == 3 && pf['waivers'].include?('--skip-telemetry-gate'),
-        'the full census (incl. policy waivers) is still stamped')
-end
-
 Dir.mktmpdir do |dir|
   # --skip-visual-comparison under the sanctioned builder→verifier split
   # (reason references the verifier) does not count...

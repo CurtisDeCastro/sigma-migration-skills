@@ -14,7 +14,7 @@ import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # sigma_rest.py lives in scripts/lib/ once fanned out; fall back to shared/lib
-# for local dev before sync. (Mirrors report-telemetry.py's dual-path import.)
+# for local dev before sync. (Mirrors the shared libs' dual-path import.)
 for _cand in (
     os.path.join(_HERE, "lib"),
     os.path.abspath(os.path.join(_HERE, "..", "..", "..", "..", "..", "shared", "lib")),

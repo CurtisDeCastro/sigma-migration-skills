@@ -34,8 +34,8 @@ def check(cond, msg, fails)
 end
 
 # A workdir that satisfies every default gate: passing parity, a valid render
-# PNG, a recorded vision-capable visual verdict backed by a hash-bound blind
-# grade (PR-9), and a telemetry marker.
+# PNG, and a recorded vision-capable visual verdict backed by a hash-bound
+# blind grade (PR-9).
 def base_workdir(dir, parity_extra: {}, blind: true)
   parity = { 'workbook_id' => 'wb-test', 'mode' => 'strict', 'status' => 'PASS',
              'charts_total' => 2, 'charts_pass' => 2, 'charts_fail' => 0,
@@ -45,7 +45,6 @@ def base_workdir(dir, parity_extra: {}, blind: true)
   File.write(File.join(dir, 'parity-final.json'), JSON.pretty_generate(parity))
   # Valid render: PNG magic + >5000 bytes (gate 8 checks magic + size only).
   File.binwrite(File.join(dir, 'sigma-render.png'), "\x89PNG\r\n\x1a\n".b + ("\x00".b * 6000))
-  File.write(File.join(dir, 'telemetry-sent.json'), JSON.generate('status' => 'sent', 'tool' => 'test'))
   BlindFixture.install(dir) if blind
 end
 
