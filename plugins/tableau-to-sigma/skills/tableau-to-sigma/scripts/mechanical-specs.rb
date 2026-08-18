@@ -878,6 +878,99 @@ module MechanicalSpecs
     pruned.map { |e| e['name'].to_s }
   end
 
+  # Converter parameter output is workbook metadata, not data-model content.
+  # Keep the raw converter artifact unchanged for diagnostics, but normalize the
+  # result consumed by the orchestrator before it writes conv-meta.json / posts
+  # the DM:
+  #   * simple CASE-on-parameter field/measure switches become param-switch
+  #     workbookPatterns (the converter parser currently accepts quoted WHEN
+  #     values only, while Tableau commonly serializes integer members bare);
+  #   * parameter controls not referenced by any DM formula are removed. A
+  #     genuinely DM-bound control such as parameterized Top-N is preserved.
+  PARAM_CASE_VALUE_RE = /(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[-+]?(?:\d+(?:\.\d*)?|\.\d+)|true|false)/i
+
+  def parameter_case_value(raw)
+    s = raw.to_s.strip
+    return s unless (s.start_with?('"') && s.end_with?('"')) || (s.start_with?("'") && s.end_with?("'"))
+    s[1...-1].gsub(/\\(.)/, '\\1')
+  end
+
+  def parameter_switch_pattern(pattern)
+    return nil unless pattern.is_a?(Hash) && pattern['kind'] == 'param-filter'
+    source = pattern['source'].to_s.gsub(%r{//[^\r\n]*}, '').gsub(/\s+/, ' ').strip
+    match = source.match(/\ACASE\s+\[Parameters?\]\s*\.\s*\[([^\]]+)\]\s+(.+)\s+END\z/i)
+    return nil unless match
+
+    param_name, body = match[1], match[2].strip
+    # Nested CASE/IF branches need a real expression parser; never partially
+    # promote them with this deliberately narrow mechanical recovery.
+    return nil if body.match?(/\b(?:CASE|IF|ELSEIF)\b/i)
+
+    pair_re = /\bWHEN\s+(#{PARAM_CASE_VALUE_RE})\s+THEN\s+(.+?)(?=\s+\bWHEN\b|\s+\bELSE\b|\z)/i
+    cases = body.scan(pair_re).map do |when_value, then_expr|
+      { 'when' => parameter_case_value(when_value), 'then' => then_expr.strip }
+    end
+    return nil if cases.empty?
+
+    consumed = body.gsub(pair_re, '').sub(/\bELSE\s+.+\z/i, '').strip
+    return nil unless consumed.empty?
+    else_expr = body[/\bELSE\s+(.+)\z/i, 1]&.strip
+
+    pattern.merge(
+      'kind' => 'param-switch',
+      'paramName' => pattern['paramName'] || param_name,
+      'cases' => cases,
+      'elseExpr' => else_expr,
+      'requires' => 'WORKBOOK element: a single-select control + a Switch formula on the chart/grouping column; not a data-model control or calculated column.',
+      'note' => "Tableau parameter field switch -> Sigma workbook control-driven Switch (#{cases.size} case(s))."
+    )
+  end
+
+  def normalize_converter_parameters!(result)
+    return result unless result.is_a?(Hash) && result['model'].is_a?(Hash)
+
+    promoted = 0
+    result['workbookPatterns'] = Array(result['workbookPatterns']).map do |pattern|
+      replacement = parameter_switch_pattern(pattern)
+      promoted += 1 if replacement
+      replacement || pattern
+    end
+
+    controls = []
+    data_elements = []
+    (result['model']['pages'] || []).each do |page|
+      Array(page['elements']).each do |element|
+        if element['kind'] == 'control'
+          controls << [page, element]
+        else
+          data_elements << element
+        end
+      end
+    end
+
+    dm_text = JSON.generate(data_elements)
+    preserved = controls.select do |_page, control|
+      id = control['controlId'].to_s
+      !id.empty? && dm_text.include?("[#{id}]")
+    end
+    preserved_ids = preserved.map { |_page, control| control.object_id }.to_set
+    (result['model']['pages'] || []).each do |page|
+      page['elements'] = Array(page['elements']).reject do |element|
+        element['kind'] == 'control' && !preserved_ids.include?(element.object_id)
+      end
+    end
+    removed = controls.size - preserved.size
+
+    stats = result['stats'] ||= {}
+    stats['controls'] = preserved.size
+    warnings = result['warnings'] ||= []
+    warnings << "ℹ Promoted #{promoted} bare-value Tableau parameter CASE calc(s) to workbook param-switch patterns; none were emitted as DM fields." if promoted.positive?
+    if removed.positive?
+      warnings << "ℹ Moved #{removed} unreferenced Tableau parameter control(s) out of the data model; the workbook builder materializes them from parameter metadata."
+    end
+    result
+  end
+
   # Run the Tableau→Sigma converter. Two backends, same output contract
   # ({ model, warnings, stats, security }):
   #   - mcp_build present → node shim importing a LOCAL build/tableau.(m)js
@@ -953,7 +1046,9 @@ module MechanicalSpecs
     JS
     o, e, st = Open3.capture3('node', shim)
     raise "converter failed: #{e}#{o}" unless st.success?
-    JSON.parse(File.read(meta_out))
+    result = normalize_converter_parameters!(JSON.parse(File.read(meta_out)))
+    File.write(meta_out, JSON.pretty_generate(result))
+    result
   end
 
   # Hosted backend: POST the .twb to the convert_tableau_to_sigma tool on the
@@ -991,6 +1086,7 @@ module MechanicalSpecs
                'stats' => out['stats'] || {}, 'security' => out['security'] || [],
                'workbookPatterns' => out['workbookPatterns'] || [], 'parameters' => out['parameters'] || [],
                'relationshipCoverage' => out['relationshipCoverage'] || nil }
+    normalize_converter_parameters!(result)
     File.write(meta_out, JSON.pretty_generate(result))
     result
   end
