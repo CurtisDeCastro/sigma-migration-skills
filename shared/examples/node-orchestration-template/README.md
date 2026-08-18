@@ -32,7 +32,7 @@ Requires Node >= 18 (for global `fetch`). The zip helper additionally needs a re
 | **HTTP** | global `fetch` (`lib/sigma-rest.mjs`) | `curl` | `wb-rep.rb:409`, `verify_parity.py:26` |
 | **JSON** | native `JSON.parse` | `jq` | `wb-rep.rb:413-417` |
 | **Unzip** | `lib/extract-zip.mjs` → Python stdlib `zipfile` (or `fflate`) | `unzip` binary | `tableau-discover.rb:196` |
-| **Python interp** | `lib/py_resolve.mjs` (rejects the Windows Store stub) | bare `python3` | `test-telemetry-gate.rb:24` |
+| **Python interp** | `lib/py_resolve.mjs` (rejects the Windows Store stub) | bare `python3` | various `test-*.rb` |
 
 ### On zip specifically
 

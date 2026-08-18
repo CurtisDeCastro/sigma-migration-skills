@@ -135,16 +135,16 @@ end
 # ---- quality-waiver: the stamped census, minus policy + derived flags --------
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'parity-final.json'), JSON.pretty_generate(
-    'waivers' => ['--skip-anchors-gate', '--skip-telemetry-gate',
+    'waivers' => ['--skip-anchors-gate',
                   '--skip-visual-comparison', 'visual-divergent', '--force-new-workbook'],
-    'waiver_count' => 5,
+    'waiver_count' => 4,
     'waiver_reasons' => { '--skip-anchors-gate' => 'source PNG untranscribable',
                           '--skip-visual-comparison' => 'verifier session records the verdict' },
     'visual_verdict' => 'divergent'))
   entries = DegradationLedger.derive(wd)
   qw = entries.select { |e| e['class'] == 'quality-waiver' }
   check(qw.length == 1 && qw[0]['item'] == '--skip-anchors-gate',
-        'census → quality-waiver entries; telemetry (policy) + verifier-split comparison excluded', fails)
+        'census → quality-waiver entries; verifier-split comparison excluded', fails)
   check(qw[0]['reason'].include?('untranscribable'), 'quality waiver carries its recorded reason', fails)
   fr = entries.select { |e| e['class'] == 'fidelity-residual' }
   check(fr.length == 1 && fr[0]['item'].include?('divergent'),

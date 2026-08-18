@@ -278,8 +278,8 @@ In short:
    `--verdict divergent` while iterating, then STOPS with gate 8b unrecorded
    (`migrate-tableau.rb --finalize` ending at exit 13 is the designed handoff
    state). It proves everything else green via the self-check gate run with the
-   two split-granted waivers (`--skip-visual-comparison` + `--skip-telemetry-gate`,
-   reasons as in `scripts/builder-brief.md`) and requests verification.
+   split-granted waiver (`--skip-visual-comparison`,
+   reason as in `scripts/builder-brief.md`) and requests verification.
 2. The driving session (or human) spawns a **fresh verifier agent** — no builder
    history, given only the workdir + Sigma workbook id — which executes
    `scripts/verifier-brief.md`: re-runs this gate with no new waivers, checks

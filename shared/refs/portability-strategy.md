@@ -150,7 +150,7 @@ This is the "P1" already scoped in PR #299. Tracked as beads under the portabili
 - Sweep the ~48 `/tmp` literals → `Dir.tmpdir` / `tempfile.gettempdir()` / `os.tmpdir()`.
 - Replace `jq` (native JSON), `curl` (`net/http` / `urllib` / `fetch`); replace `unzip` with
   Python `zipfile` (or `fflate`); make `sips` mac-only-optional or drop it.
-- Apply `PyResolve` uniformly (e.g. `test-telemetry-gate.rb:24` still hardcodes `python3`).
+- Apply `PyResolve` uniformly (e.g. some legacy test scripts still hardcode `python3`).
 - Fix the POSIX venv assumption (`bin/` → `Scripts\` fallback) in the PowerBI path.
 
 **Exit criterion:** the doctor's REQUIRED runtime list is Ruby + Python + Node — **not bash** —
