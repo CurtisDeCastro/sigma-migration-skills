@@ -15,7 +15,8 @@ try:
     truststore.inject_into_ssl()
     _CTX = None
 except ImportError:
-    _CTX = ssl._create_unverified_context()
+    # No truststore: fall back to a VERIFIED context, never unverified.
+    _CTX = ssl.create_default_context()
 
 URL = "https://sigma-data-model-mcp.onrender.com/mcp"
 

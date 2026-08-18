@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import yaml, ts_lib
 import code_rep  # workbook code-rep document-wrapper adapter (nested GET shape)
 yaml.SafeLoader.add_constructor("tag:yaml.org,2002:value", lambda l, n: l.construct_scalar(n))
-SBASE = os.environ["SIGMA_BASE_URL"]; STOK = os.environ["SIGMA_API_TOKEN"]; _SSL = ssl._create_unverified_context()
+SBASE = os.environ["SIGMA_BASE_URL"]; STOK = os.environ["SIGMA_API_TOKEN"]; _SSL = ts_lib.ssl_context()
 
 # TS chart type -> the Sigma element kind the migration produces (for the structural check)
 EXPECTED = {"KPI": "kpi-chart", "COLUMN": "bar-chart", "BAR": "bar-chart", "LINE": "line-chart",
