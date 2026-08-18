@@ -118,212 +118,76 @@ fi
 echo "[4/6] bespoke structural fixes"
 
 # --- 4a. hygiene.yml + test-converter-provenance.sh: drop the freshness/
-#     online CI gate and its self-test (references a private repo public
-#     contributors cannot reach; see commit message embedded below).
+#     online CI gate and its self-test. That gate references a private repo
+#     public contributors cannot reach, is unsatisfiable in public CI (no way
+#     to re-vendor there), and turns red on the calendar (>14d) on its own —
+#     it is a maintenance reminder for the private dev repo, not a
+#     public-repo gate. Marker-based (not a git-apply patch): <dest> was
+#     populated by rsync in step 1, so its git index doesn't reflect the
+#     working tree yet and a blob-based 3-way patch has nothing to merge
+#     against.
 echo "  4a. drop converter-freshness CI gate (hygiene.yml, test-converter-provenance.sh)"
-git apply --3way <<'DERIVE_PUBLIC_PATCH_EOF'
-commit 4ac13913a273031acad570ddcfaf850f883a36cb
-Author: Sigma Computing <tj@sigmacomputing.com>
-Date:   Mon Aug 17 11:00:27 2026 -0400
 
-    chore(ci): drop build-time MCP-freshness coupling; make vendored converters self-contained
+python3 - <<'DERIVE_PY_EOF'
+import re
 
-    The converter bundles already run 100% locally at runtime (bundled .mjs or
-    native scripts; the hosted converter is opt-in with no default). The only
-    remaining tie to the private converter-source repo was build-time: a CI gate
-    that graded bundle "freshness" by the age of a recorded upstream commit, plus
-    private-repo lineage in each PROVENANCE.json.
+# hygiene.yml: remove the whole "Converter-freshness guard" step (from its
+# "- name:" line up to, but not including, the next "- name:" line), and
+# trim the now-stale Part-E/F callout from the self-test step's comment.
+path = ".github/workflows/hygiene.yml"
+t = open(path, encoding="utf-8").read()
+t = re.sub(
+    r'[ \t]*- name: Converter-freshness guard.*?\n(?=[ \t]*- name:)',
+    '',
+    t,
+    count=1,
+    flags=re.DOTALL,
+)
+old_comment = (
+    "        # names only). Also proves the --freshness staleness-by-age gate\n"
+    "        # (Part E) fails a 40d-stale fixture and passes the same fixture\n"
+    "        # dated today, reports an in-skill/cognos-shaped entry explicitly\n"
+    "        # rather than silently, and surfaces the local_patches\n"
+    "        # don't-re-vendor-blind note; plus --online's soft-pass when no local\n"
+    "        # checkout is present (Part F).\n"
+)
+t = t.replace(old_comment, "        # names only).\n")
+open(path, "w", encoding="utf-8").write(t)
 
-    That freshness-by-age gate references a private repo public contributors cannot
-    access, is unsatisfiable in public CI (no way to re-vendor there), and turns red
-    on the calendar (>14d) on its own — blocking every PR. It is a maintenance
-    reminder for the private dev repo, not a public-repo gate.
-
-    - hygiene.yml: remove the converter-freshness (staleness-by-age) step; keep the
-      local diff-pairing guard (a bundle change must pair with its PROVENANCE.json).
-    - test-converter-provenance.sh: drop Part E/F (the --freshness/--online tests).
-
-    Runtime behavior unchanged. No user-facing plugin change.
-
-    Skip-Version-Bump: build-time provenance/CI cleanup; no user-facing plugin behavior change
-
-diff --git a/.github/workflows/hygiene.yml b/.github/workflows/hygiene.yml
-index fc2fdaa2..a462995a 100644
---- a/.github/workflows/hygiene.yml
-+++ b/.github/workflows/hygiene.yml
-@@ -165,23 +165,6 @@ jobs:
-         run: |
-           if [ -z "${RANGE_BASE:-}" ]; then echo "no diff range to check — skipping"; exit 0; fi
-           bash tools/check-converter-provenance.sh "$RANGE_BASE" "$RANGE_HEAD"
--      - name: Converter-freshness guard (vendored-bundle staleness by age)
--        # Standing gate, NOT diff-scoped (unlike the pairing guard above, this
--        # runs every time regardless of RANGE_BASE): a merge to
--        # sigma-data-model-mcp changes nothing for any operator until someone
--        # runs tools/vendor-converters.sh and commits the regenerated bundle,
--        # and pre-existing drift nobody re-vendored in a long time has no diff
--        # to catch it on. CI cannot assume network access to that private repo,
--        # so this grades staleness by the AGE of each PROVENANCE.json's own
--        # source_commit_date (default threshold 14d, CONVERTER_STALENESS_DAYS)
--        # rather than asking upstream what's new — see the header comment in
--        # tools/check-converter-provenance.sh for the full trade-off. cognos-to-sigma
--        # vendors its own converter/*.ts in-skill (no source_repo/source_commit
--        # by design) and is reported explicitly as not-applicable, not flagged
--        # stale; its own freshness gate is tools/check-cognos-bundle.rb below.
--        # A STALE verdict that carries local_patches gets a note pointing at
--        # porting those patches upstream first, never "just re-vendor blind".
--        run: bash tools/check-converter-provenance.sh --freshness "$RANGE_HEAD"
-       - name: Plugin-version-bump guard (release-hygiene diff gate)
-         # #486: a change under plugins/<name>/** must move that plugin's
-         # plugin.json "version" (strict semver) so `claude plugin update` sees a
-@@ -211,12 +194,7 @@ jobs:
-         # Proves the diff-pairing guard fails unpaired bundle changes, passes
-         # paired ones, and schema-pins local_patches entries — plus the
-         # string-pin on the real tableau PROVENANCE.json (synthetic fixture
--        # names only). Also proves the --freshness staleness-by-age gate
--        # (Part E) fails a 40d-stale fixture and passes the same fixture
--        # dated today, reports an in-skill/cognos-shaped entry explicitly
--        # rather than silently, and surfaces the local_patches
--        # don't-re-vendor-blind note; plus --online's soft-pass when no local
--        # checkout is present (Part F).
-+        # names only).
-         run: bash tools/test-converter-provenance.sh
-       - name: Plugin-version-bump guard self-test (fixture repos, creds-free)
-         # Proves the version-bump gate fails an unbumped plugin change, passes a
-diff --git a/tools/test-converter-provenance.sh b/tools/test-converter-provenance.sh
-index 468fc3fc..25c26457 100755
---- a/tools/test-converter-provenance.sh
-+++ b/tools/test-converter-provenance.sh
-@@ -16,18 +16,6 @@
- #   Part D — string-pin: the real tableau converter PROVENANCE.json records
- #            the d8a049a in-place patch with the commit/summary/upstream_pr
- #            entry schema and carries the upstream-and-re-vendor task block
--#   Part E — --freshness (staleness-by-age gate, 2026-07-31): a vendored
--#            PROVENANCE.json whose source_commit_date is older than
--#            CONVERTER_STALENESS_DAYS fails naming the module + re-vendor
--#            command; the same fixture with today's date passes; a
--#            source_repo entry missing source_commit/source_commit_date
--#            fails; a stale entry carrying local_patches gets the
--#            do-not-re-vendor-blind note; an in-skill (cognos-shaped, no
--#            source_repo) entry is reported explicitly as not-applicable,
--#            never silently dropped or miscounted as stale
--#   Part F — --online soft-pass: with no local sigma-data-model-mcp checkout
--#            present, --online exits 0 with a warning rather than failing —
--#            it is a human-driven convenience, never a hard CI requirement
- #
- # All fixture names are synthetic (toolx) — no field-derived identifiers.
- # Runs standalone:  bash tools/test-converter-provenance.sh
-@@ -174,110 +162,6 @@ done
- grep -q "scripts/dev/vendor-converter.sh" "$REAL"
- check $? "TASK 3 names the second (skill-local) regenerator"
-
--echo "Part E — --freshness: staleness-by-age, in-skill shape, missing keys, local_patches note"
--new_repo "$TMP/freshness"
--TOOLX="plugins/toolx-to-sigma/skills/toolx-to-sigma/converter"
--TOOLY="plugins/tooly-to-sigma/skills/tooly-to-sigma/converter"
--mkdir -p "$TOOLX" "$TOOLY"
--OLD_DATE="$(python3 -c 'import datetime; print((datetime.date.today()-datetime.timedelta(days=40)).isoformat())')"
--TODAY_DATE="$(python3 -c 'import datetime; print(datetime.date.today().isoformat())')"
--
--cat > "$TOOLX/PROVENANCE.json" <<EOF
--{
--  "source_repo": "example/fixture-converters",
--  "source_commit": "aaaaaaa",
--  "source_commit_date": "$OLD_DATE",
--  "vendored_modules": "toolx.mjs"
--}
--EOF
--# tooly stands in for the cognos shape: in-skill converter, no source_repo,
--# so it has no source_commit at all by design — must be reported explicitly,
--# not silently skipped and not counted as stale.
--cat > "$TOOLY/PROVENANCE.json" <<'EOF'
--{
--  "source": "in-skill converter/cli.ts",
--  "vendored_modules": "cli.mjs",
--  "source_sha256": "deadbeef"
--}
--EOF
--E0="$(commit_all base)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E0" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 1 ]; check $? "40d-old source_commit_date fails freshness (got $RC)"
--grep -q "STALE" "$TMP/out"; check $? "failure says STALE"
--grep -q "vendor-converters.sh <sigma-data-model-mcp checkout> toolx" "$TMP/out"
--check $? "failure names the re-vendor command with the correct module"
--grep -q "in-skill converter, not vendored from sigma-data-model-mcp" "$TMP/out"
--check $? "cognos-shaped (no source_repo) entry reported explicitly as not-applicable"
--! grep -q "tooly-to-sigma.*STALE\|STALE.*tooly-to-sigma" "$TMP/out"
--check $? "cognos-shaped entry is never counted as stale"
--
--sed -i.bak "s/$OLD_DATE/$TODAY_DATE/" "$TOOLX/PROVENANCE.json" && rm -f "$TOOLX/PROVENANCE.json.bak"
--E1="$(commit_all fresh)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E1" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 0 ]; check $? "today's source_commit_date passes freshness (got $RC)"
--grep -q "guard OK" "$TMP/out"; check $? "passing state reports guard OK"
--
--cat > "$TOOLX/PROVENANCE.json" <<'EOF'
--{
--  "source_repo": "example/fixture-converters",
--  "vendored_modules": "toolx.mjs"
--}
--EOF
--E2="$(commit_all missing-commit)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E2" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 1 ]; check $? "vendored entry missing source_commit/source_commit_date fails (got $RC)"
--grep -q "missing source_commit/source_commit_date" "$TMP/out"; check $? "failure names the missing keys"
--
--cat > "$TOOLX/PROVENANCE.json" <<EOF
--{
--  "source_repo": "example/fixture-converters",
--  "source_commit": "bbbbbbb",
--  "source_commit_date": "$OLD_DATE",
--  "vendored_modules": "toolx.mjs",
--  "local_patches": [
--    { "commit": "1111111", "summary": "fixture patch", "upstream_pr": null }
--  ]
--}
--EOF
--E3="$(commit_all stale-with-patches)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E3" >"$TMP/out" 2>&1; RC=$?
--# CONTRACT CHANGED (2026-07-31): a bundle held back by an OPEN local_patches entry is
--# pinned deliberately, so it WARNS rather than blocking. The old assertion here demanded
--# a hard failure while the guard's own message said "do not re-vendor blind" — it failed
--# you for not taking the action it warned against. Found the hard way: re-vendoring
--# quicksight-to-sigma destroyed an undocumented native window-fn lowering and broke
--# scripts/test-window-native.rb.
--[ "$RC" -eq 0 ]; check $? "stale entry with an OPEN local_patches entry WARNS, not fails (got $RC)"
--grep -q "STALE BUT PINNED" "$TMP/out"; check $? "warning is labelled as a deliberate pin"
--grep -q "1 OPEN local_patches entry" "$TMP/out"; check $? "warning surfaces the open-entry count"
--grep -q "Port each open entry upstream" "$TMP/out"; check $? "warning names the real remedy (port upstream, then re-vendor)"
--grep -q "^::warning" "$TMP/out"; check $? "emitted as ::warning, not ::error"
--
--# Teeth: a patch marked SUPERSEDED has landed upstream and no longer pins anything, so
--# the same staleness MUST still hard-fail. Without this, marking every entry superseded
--# would silently disarm the gate.
--python3 - "$TOOLX/PROVENANCE.json" <<'PYEOF'
--import json, sys
--p = sys.argv[1]
--d = json.load(open(p))
--d['local_patches'] = [{"commit": "1111111", "summary": "SUPERSEDED — folded upstream", "upstream_pr": "#1"}]
--json.dump(d, open(p, 'w'), indent=2)
--PYEOF
--E3b="$(commit_all stale-with-superseded-patches)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E3b" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 1 ]; check $? "stale entry whose local_patches are ALL superseded still FAILS (got $RC)"
--grep -q "all SUPERSEDED" "$TMP/out"; check $? "failure explains a re-vendor is safe here and should retire them"
--
--echo '{ not json' > "$TOOLX/PROVENANCE.json"
--E4="$(commit_all bad-json)"
--CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E4" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 1 ]; check $? "malformed JSON fails freshness (got $RC)"
--grep -q "not valid JSON" "$TMP/out"; check $? "failure says the file no longer parses"
--
--echo "Part F — --online soft-pass with no local checkout"
--bash "$GUARD" --online "$TMP/no-such-checkout-dir" >"$TMP/out" 2>&1; RC=$?
--[ "$RC" -eq 0 ]; check $? "--online soft-passes when the checkout path doesn't exist (got $RC)"
--grep -q "soft-passing" "$TMP/out"; check $? "soft-pass explains why (no checkout to compare against)"
-
- echo
- if [ "$fails" -gt 0 ]; then
-DERIVE_PUBLIC_PATCH_EOF
+# test-converter-provenance.sh: drop the Part E/F header callouts and the
+# Part E/F test bodies themselves.
+path = "tools/test-converter-provenance.sh"
+t = open(path, encoding="utf-8").read()
+old_header = (
+    "#   Part E — --freshness (staleness-by-age gate, 2026-07-31): a vendored\n"
+    "#            PROVENANCE.json whose source_commit_date is older than\n"
+    "#            CONVERTER_STALENESS_DAYS fails naming the module + re-vendor\n"
+    "#            command; the same fixture with today's date passes; a\n"
+    "#            source_repo entry missing source_commit/source_commit_date\n"
+    "#            fails; a stale entry carrying local_patches gets the\n"
+    "#            do-not-re-vendor-blind note; an in-skill (cognos-shaped, no\n"
+    "#            source_repo) entry is reported explicitly as not-applicable,\n"
+    "#            never silently dropped or miscounted as stale\n"
+    "#   Part F — --online soft-pass: with no local sigma-data-model-mcp checkout\n"
+    "#            present, --online exits 0 with a warning rather than failing —\n"
+    "#            it is a human-driven convenience, never a hard CI requirement\n"
+)
+t = t.replace(old_header, "")
+start = t.index('echo "Part E — --freshness')
+end = t.index('\necho\n', start) + 1  # keep the blank "echo" line that follows
+t = t[:start] + t[end:]
+# The Part A/B/C fixtures used a "source_repo" field only to *represent* the
+# vendored (non-in-skill) shape for the guard's discriminator; the guard now
+# discriminates solely on the presence of a "source" key (see
+# check-converter-provenance.sh's prov_kind()), so the field is unused by the
+# test and safe to drop everywhere it's stamped into a fixture.
+t = t.replace('  "source_repo": "example/fixture-converters",\n', "")
+t = t.replace(
+    '#   Part C — in-skill converters ("source" key, no "source_repo": the static',
+    '#   Part C — in-skill converters ("source" key: the static',
+)
+open(path, "w", encoding="utf-8").write(t)
+DERIVE_PY_EOF
 
 echo "  4a done"
 
@@ -346,9 +210,9 @@ cat > tools/check-converter-provenance.sh <<'DERIVE_EOF'
 #   1) changes a vendored converter bundle (plugins/**/converter/*.mjs) without
 #      its sibling PROVENANCE.json changing in the same range — a regeneration
 #      records itself there; an in-place patch records itself in local_patches.
-#      In-skill converters (PROVENANCE has "source", no "source_repo" — a
-#      static body their rebuild rewrites byte-identical, so it can never
-#      diff) may pair the bundle with a changed converter/*.ts source instead.
+#      In-skill converters (PROVENANCE has a "source" key — a static body
+#      their rebuild rewrites byte-identical, so it can never diff) may pair
+#      the bundle with a changed converter/*.ts source instead.
 #   2) changes a converter PROVENANCE.json that no longer parses as JSON, or
 #      whose local_patches entries drop the commit/summary/upstream_pr schema.
 #   3) deletes a converter PROVENANCE.json while its bundle remains at HEAD.
@@ -390,7 +254,7 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-print("in-skill" if ("source" in d and "source_repo" not in d) else "vendored")
+print("in-skill" if "source" in d else "vendored")
 '
 }
 
@@ -742,7 +606,8 @@ chmod +x "$VENDOR_CONVERTER"
 #     tooling with zero value to a public contributor and no `bd` on their
 #     machine anyway.
 echo "  4c. rewrite escalate-gap.py (all vendored copies) — generic routing, no beads"
-mapfile -d '' ESCALATE_COPIES < <(find . -name "escalate-gap.py" -not -path "./.git/*" -print0)
+ESCALATE_COPIES=()
+while IFS= read -r -d '' f; do ESCALATE_COPIES+=("$f"); done < <(find . -name "escalate-gap.py" -not -path "./.git/*" -print0)
 for f in "${ESCALATE_COPIES[@]}"; do
 cat > "$f" <<'DERIVE_EOF'
 #!/usr/bin/env python3
@@ -965,7 +830,8 @@ echo "    rewrote ${#ESCALATE_COPIES[@]} escalate-gap.py copies"
 #     the hosted-converter URL is opt-in-only and env-driven with NO baked-in
 #     default — no private domain ships in the public repo.
 echo "  4d. rewrite mcp_convert.py (all vendored copies) — env-driven hosted URL, no default"
-mapfile -d '' MCP_CONVERT_COPIES < <(find . -name "mcp_convert.py" -not -path "./.git/*" -print0)
+MCP_CONVERT_COPIES=()
+while IFS= read -r -d '' f; do MCP_CONVERT_COPIES+=("$f"); done < <(find . -name "mcp_convert.py" -not -path "./.git/*" -print0)
 for f in "${MCP_CONVERT_COPIES[@]}"; do
 cat > "$f" <<'DERIVE_EOF'
 #!/usr/bin/env python3
@@ -1155,7 +1021,7 @@ t = t.replace("wave-3 R3-1", "a later wave R3-1")
 
 # Internal tracker id — the pinned entry schema/commit stays untouched; only
 # the bead citation clause goes.
-t = re.sub(r',?\s*bead\s+beads-sigma-[a-z0-9]+', '', t)
+t = re.sub(r',?\s*bead\s+beads-sigma-[A-Za-z0-9_<>*]+', '', t)
 
 open(path, "w", encoding="utf-8").write(t)
 DERIVE_PY_EOF
@@ -1242,11 +1108,21 @@ DERIVE_PY_EOF
 # migrate-*.{rb,py}, corpus/*, etc).
 echo "[5/6] fleet-wide identity + internal-identifier scrub"
 
-mapfile -d '' SCRUB_FILES < <(rg -l -0 --hidden --glob '!.git' \
-  -e 'sigma-data-model-mcp' -e 'onrender\.com' -e 'beads-sigma-' \
-  -e '\bbd ready\b' -e '\.beads-sigma\b' -e 'wave/2-' -e 'wave-3 R3-1' \
-  -e 'twells89' -e 'Thomas Wells' -e '@ycp\.edu' -e '/Users/tjwells' \
-  . 2>/dev/null || true)
+# Plain `grep` (portable, always present) — not `rg`: this script must run
+# as a bare subprocess (a real user's shell, CI), where a bundled/wrapped rg
+# is not guaranteed to be resolvable, only POSIX grep is. Scoped to the
+# already-materialized <dest> tree (not the .git object store), so it is
+# fast regardless.
+SCRUB_FILES=()
+while IFS= read -r -d '' f; do SCRUB_FILES+=("$f"); done < <(
+  find . -path ./.git -prune -o -type f -print0 2>/dev/null \
+    | xargs -0 grep -lE \
+        -e 'sigma-data-model-mcp' -e 'onrender\.com' -e 'beads-sigma-' \
+        -e '\bbd ready\b' -e '\.beads-sigma\b' -e 'wave/2-' -e 'wave-3 R3-1' \
+        -e 'twells89' -e 'Thomas Wells' -e '@ycp\.edu' -e '/Users/tjwells' \
+        2>/dev/null \
+    | tr '\n' '\0'
+)
 
 echo "  ${#SCRUB_FILES[@]} file(s) still match a prohibited pattern after bespoke fixes"
 
@@ -1274,8 +1150,8 @@ RULES = [
      'converter-source'),
     (re.compile(r'[A-Za-z0-9_.-]*\.onrender\.com'),
      'the hosted-converter endpoint'),
-    (re.compile(r',?\s*\bbead\s+beads-sigma-[a-z0-9]+\b'), ''),
-    (re.compile(r'\bbeads-sigma-[a-z0-9]+\b'), '[bead]'),
+    (re.compile(r',?\s*\bbead\s+beads-sigma-[A-Za-z0-9_<>*]+'), ''),
+    (re.compile(r'beads-sigma-[A-Za-z0-9_<>*]*'), '[bead]'),
     (re.compile(r'\bbd ready\b'), 'the shared tracker'),
     (re.compile(r'\.beads-sigma\b'), '.internal-tracker'),
     (re.compile(re.escape(
@@ -1308,6 +1184,17 @@ for path in sys.argv[1:]:
         n += 1
 print(f"  scrubbed {n} file(s)")
 DERIVE_PY_EOF
+fi
+
+# The fleet-wide scrub above edits comments inside cognos's in-skill
+# converter/*.ts sources too (that's where its beads-sigma- citations live).
+# cognos's OWN freshness gate (tools/check-cognos-bundle.rb) pins those
+# sources' sha256 into PROVENANCE.json; refresh the pin so it matches the
+# now-scrubbed sources instead of tripping its own staleness gate.
+if [ -f tools/check-cognos-bundle.rb ] && \
+   [ -f plugins/cognos-to-sigma/skills/cognos-to-sigma/converter/cli.ts ]; then
+  echo "  refresh cognos converter/*.ts source_sha256 pin (post-scrub)"
+  ruby tools/check-cognos-bundle.rb --write || echo "  WARN: could not refresh cognos source_sha256 — review before shipping"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
