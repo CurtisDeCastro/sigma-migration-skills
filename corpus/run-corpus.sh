@@ -32,6 +32,18 @@ cases() {
 }
 
 if [ "$MODE" = "--check" ]; then
+  # json >= 2.8 pretty-prints empty containers as `[]` / `{}` where earlier
+  # versions emitted `[\n\n]` / `{\n\n}`. Every byte-compared golden here was
+  # generated with the older form, so a newer json turns each `cmp` into an
+  # opaque "differ: byte N" with no hint at the cause. Warn up front instead.
+  if command -v ruby >/dev/null 2>&1 &&
+     [ "$(ruby -rjson -e 'print JSON.pretty_generate([]) == "[]"' 2>/dev/null)" = "true" ]; then
+    echo "WARNING: ruby json $(ruby -rjson -e 'print JSON::VERSION') pretty-prints empty containers"
+    echo "         compactly ([] not [<newline><newline>]); goldens were generated with the older"
+    echo "         form, so JSON cmp checks will report byte-level differences. CI pins ruby 3.3"
+    echo "         (.github/workflows/corpus-check.yml) — use the same locally to reproduce."
+  fi
+
   fail=0; total=0
   for c in $(cases); do
     total=$((total + 1))
