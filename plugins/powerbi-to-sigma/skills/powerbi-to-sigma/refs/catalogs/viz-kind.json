@@ -265,7 +265,7 @@
         "status": "n"
       },
       "on_unmapped": "n/a",
-      "notes": "Resolved to a Sigma region-map or point-map by resolve_map_kind using the model.bim geo dataCategory.",
+      "notes": "Azure Maps X/Y roles become longitude/latitude and resolve directly to a Sigma point-map, with optional Size and Series roles. Other maps resolve from explicit coordinates or model.bim geo dataCategory; only unresolvable geocoded locations degrade to a bar.",
       "role_class": "chart"
     },
     {
