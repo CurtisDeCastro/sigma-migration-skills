@@ -1122,7 +1122,21 @@ $sort_by_column ||= {}
 # Resolve a 'map' visual to region-map / point-map / bar-chart fallback.
 # Mutates rec['bindings'] for the fallback (legend becomes the bar category,
 # matching the old downgrade behavior).
+def normalize_azure_map_bindings!(rec)
+  return unless rec['visual_type'].to_s.casecmp('azureMap').zero?
+
+  bindings = rec['bindings'] ||= {}
+  { 'X' => 'Longitude', 'Y' => 'Latitude' }.each do |source, target|
+    raw = Array(bindings.delete(source)).compact
+    next if raw.empty?
+    bindings[target] = (Array(bindings[target]) + raw).compact.uniq
+  end
+end
+
 def resolve_map_kind(rec, name)
+  # Extraction now emits canonical roles, but runs can resume from a signals.json
+  # written by an older plugin. Normalize here too before kind/master resolution.
+  normalize_azure_map_bindings!(rec)
   b = rec['bindings'] || {}
   lat = (b['Latitude'] || []).first
   lng = (b['Longitude'] || []).first
@@ -1941,13 +1955,28 @@ def build_element(rec, fields, masters, extra_data = [], forced_master = nil)
     cols << { 'id' => gcid, 'formula' => gfs['ref'], 'name' => qr_leaf(lngq, 'Longitude') }
     el['latitude'] = { 'id' => lcid }
     el['longitude'] = { 'id' => gcid }
-    if (szq = (b['Size'] || b['Y'] || b['Values'] || []).first)
+    # Azure Maps Y is latitude, never bubble size. The normalization above
+    # removes it, and this visual-type guard keeps the invariant explicit.
+    size_bindings = if rec['visual_type'].to_s.casecmp('azureMap').zero?
+                      b['Size'] || b['Values'] || []
+                    else
+                      b['Size'] || b['Y'] || b['Values'] || []
+                    end
+    if (szq = size_bindings.first)
       fs = field_spec(szq, fields, master)
       scid = "#{eid}-sz"
       col = { 'id' => scid, 'formula' => measure_formula(fs), 'name' => qr_leaf(szq, 'Size') }
       apply_fmt(col, szq, fields, vfmts)
       cols << col
       el['size'] = { 'id' => scid }
+    end
+    if (srs = (b['Series'] || b['Legend'] || []).first)
+      fs = field_spec(srs, fields, master)
+      ccid = "#{eid}-color"
+      cols << { 'id' => ccid, 'formula' => fs['ref'], 'name' => qr_leaf(srs, 'Category') }
+      qr_cids[srs] = ccid
+      el['color'] = { 'by' => 'category', 'column' => ccid }
+      el['legend'] = { 'visibility' => rec['legend'] == false ? 'hidden' : 'shown' }
     end
   when 'bar-chart', 'line-chart', 'area-chart', 'waterfall-chart'
     # b['Group'] is the treemap/funnel category role (1zh9) — alias it to the dim
