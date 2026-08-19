@@ -16,6 +16,7 @@ ruby "$SKILL/scripts/build-workbook-from-pbir.rb" \
   --name "Power BI Workbook Code Release" \
   --out "$TMP/workbook.json"
 
-cmp "$CASE_DIR/golden/workbook.json" "$TMP/workbook.json"
+python3 "$REPO_ROOT/corpus/lib/corpus_check.py" diff \
+  "$CASE_DIR/golden/workbook.json" "$TMP/workbook.json"
 ruby "$SKILL/scripts/validate-spec.rb" --type workbook "$TMP/workbook.json"
 python3 "$CASE_DIR/check_workbook.py" "$TMP/workbook.json"
