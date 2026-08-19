@@ -29,7 +29,7 @@
 #                       in a workbook spec's pages[].elements[]
 #
 # Per chart zone, the script reads the matching view CSV's first two headers
-# (dim + measure). It then:
+# (dim + measure); flat tables retain every header. It then:
 #   - Maps each header to a master column using the regex map.
 #   - Picks the Sigma element `kind` from chart_kind (with `automatic` → bar
 #     fallback + a warning to verify against the PNG). A VERIFIED per-tile kind
@@ -5714,11 +5714,78 @@ layout.each do |dash|
       # roll-up). And on a grouped table the sort MUST nest inside the grouping
       # entry — element-level sort 400s with "Sort column not found" (verified
       # shape, see qlik-to-sigma refs/sigma-build-gotchas.md; bead f972).
+      #
+      # Unlike charts, a flat detail table is not a dim+measure pair. Tableau's
+      # CSV contains every displayed field, often all discrete dimensions. Keep
+      # the first two columns built above (they carry the mature calc/format
+      # translation), then add every remaining header in source order.
+      aggregation_for = lambda do |header, column|
+        found = (z['aggregations'] || {}).find do |col_ref, _deriv|
+          token = strip_brackets(col_ref).to_s.strip
+          caption = (meta['columns_by_guid'] || {}).dig(token, 'caption').to_s.strip
+          names = [token, caption].reject(&:empty?)
+          names.any? do |name|
+            name.casecmp?(column['name'].to_s.strip) || name.casecmp?(header_base(header.to_s))
+          end
+        end
+        found&.last || infer_csv_agg(header)
+      end
+      if headers.length > 2 && chart_source_eid == opts[:master_id]
+        headers.drop(2).each_with_index do |header, offset|
+          header = header.to_s.strip
+          mapped = map_column(header, mmap) ||
+                   { 'id' => "m-#{header.downcase.gsub(/\W+/, '-')}", 'name' => header }
+          aliases = (meta['column_aliases'] || {})[mapped['name']] ||
+                    (meta['column_aliases'] || {})[header]
+          formula = if mapped['formula']
+                      mapped['formula']
+                    elsif aliases && !aliases.empty?
+                      parts = ["[Master/#{mapped['name']}]"]
+                      aliases.each { |a| parts << a['key'].inspect << a['value'].inspect }
+                      parts << "[Master/#{mapped['name']}]"
+                      "Switch(#{parts.join(', ')})"
+                    else
+                      "[Master/#{mapped['name']}]"
+                    end
+          agg = aggregation_for.call(header, mapped)
+          if DATE_TRUNC.key?(agg)
+            formula = %(DateTrunc("#{DATE_TRUNC[agg]}", #{formula}))
+          elsif agg && agg != 'None' && agg != 'User'
+            formula = render_agg(SIGMA_AGG[agg], formula)
+          end
+          column = {
+            'id' => "t#{offset + 2}-#{el_id}",
+            'name' => mapped['name'],
+            'formula' => formula
+          }
+          fmt = pick_tableau_format(z['formats'], header) ||
+                pick_column_default_format(mapped['name']) ||
+                (mapped['format'].is_a?(Hash) ? mapped['format'] : nil)
+          column['format'] = fmt if fmt
+          element['columns'] << column
+        end
+        warnings << "'#{cap}' flat table retained all #{headers.length} Tableau CSV columns (the chart-oriented path previously kept only two)"
+      elsif headers.length > 2
+        warnings << "'#{cap}' flat table has #{headers.length} Tableau CSV columns but sources a helper element; " \
+                    'only the first two were emitted because the remaining master refs are not reachable from that helper — rebuild the helper with every displayed column'
+      end
+
+      group_by = []
+      calculations = []
+      element['columns'].each_with_index do |column, index|
+        agg = aggregation_for.call(headers[index], column)
+        if agg.nil? || agg == 'None' || DATE_TRUNC.key?(agg)
+          column.delete('format') unless column['format'].is_a?(Hash) && column['format']['kind'] == 'datetime'
+          group_by << column['id']
+        else
+          calculations << column['id']
+        end
+      end
       grouping = {
         'id'           => "g-#{el_id}",
-        'groupBy'      => [dim_col_obj['id']],
-        'calculations' => [meas_col_obj['id']]
+        'groupBy'      => group_by
       }
+      grouping['calculations'] = calculations unless calculations.empty?
       if z['sort']
         dir = z.dig('sort', 'direction').to_s
         grouping['sort'] = [{
