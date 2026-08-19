@@ -5,15 +5,18 @@
 # fallback), and the syntax job only parses files. No secrets are used or
 # needed anywhere in this workflow — keep it that way.
 #
-# Runner deps (verified): ubuntu-24.04 ships python3 (3.12) and bash
+# Runner deps (verified): ubuntu-24.04 ships python3 (3.12), ruby and bash
 # preinstalled. Pinned to ubuntu-24.04 (not -latest) so a runner-image
 # rollover can't silently change the interpreters — but note that pinning the
 # IMAGE does not pin the image's Ruby: ubuntu-24.04 image 20260816.277.1
 # shipped a Ruby whose bundled json gem is >= 2.8, which pretty-prints empty
 # containers as `[]` instead of the historical `[\n\n]`. Every byte-compared
-# corpus golden was generated with the older form, so the jobs that RUN Ruby
-# generators pin Ruby explicitly via setup-ruby. Whole workflow budget:
-# < 2 minutes (locally ~1 s + ~5 s).
+# corpus golden was generated with the older form, so the `corpus` job pins
+# Ruby explicitly via setup-ruby. The pin is deliberately NOT applied to the
+# test-*.rb jobs: those run fine on whatever Ruby the image ships, and
+# setup-ruby's Ruby lacks gems the distro build bundles (webrick, which
+# test-put-layout-prune.rb requires). Whole workflow budget: < 2 minutes
+# (locally ~1 s + ~5 s).
 name: corpus-check
 
 on:
@@ -228,11 +231,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        # Same json-gem pin as the corpus job — several of these suites compare
-        # generated JSON against committed fixtures.
-        with:
-          ruby-version: '3.3'
       - name: Run offline test-*.rb suites
         # EXPLICIT allow-list — only tests that need NO Tableau/Sigma creds or
         # network. Do NOT add test-calc-discovery.rb (needs a Tableau token);
@@ -497,11 +495,6 @@ jobs:
       LC_ALL: en_US.UTF-8
     steps:
       - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        # Same json-gem pin as the corpus job — this glob includes suites that
-        # compare generated JSON against committed fixtures.
-        with:
-          ruby-version: '3.3'
       - name: Run EVERY offline test-*.rb (glob, per-file timeout)
         run: |
           set -uo pipefail
