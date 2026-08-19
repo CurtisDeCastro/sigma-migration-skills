@@ -5,10 +5,15 @@
 # fallback), and the syntax job only parses files. No secrets are used or
 # needed anywhere in this workflow — keep it that way.
 #
-# Runner deps (verified): ubuntu-24.04 ships python3 (3.12), ruby (3.x) and
-# bash preinstalled — no setup-* actions required. Pinned to ubuntu-24.04
-# (not -latest) so a runner-image rollover can't silently change the
-# interpreters. Whole workflow budget: < 2 minutes (locally ~1 s + ~5 s).
+# Runner deps (verified): ubuntu-24.04 ships python3 (3.12) and bash
+# preinstalled. Pinned to ubuntu-24.04 (not -latest) so a runner-image
+# rollover can't silently change the interpreters — but note that pinning the
+# IMAGE does not pin the image's Ruby: ubuntu-24.04 image 20260816.277.1
+# shipped a Ruby whose bundled json gem is >= 2.8, which pretty-prints empty
+# containers as `[]` instead of the historical `[\n\n]`. Every byte-compared
+# corpus golden was generated with the older form, so the jobs that RUN Ruby
+# generators pin Ruby explicitly via setup-ruby. Whole workflow budget:
+# < 2 minutes (locally ~1 s + ~5 s).
 name: corpus-check
 
 on:
@@ -23,6 +28,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        # Pin Ruby (same version the windows-smoke job already pins) so the
+        # bundled json gem keeps the empty-container pretty-print form the
+        # goldens were generated with. Without this, a runner-image Ruby bump
+        # fails every `cmp` golden as an opaque byte offset.
+        with:
+          ruby-version: '3.3'
       - name: Validate every corpus case against its golden
         run: ./corpus/run-corpus.sh --check
       - name: Converter-default regression (issue #227 — vendored default, no silent dev-checkout)
@@ -216,6 +228,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        # Same json-gem pin as the corpus job — several of these suites compare
+        # generated JSON against committed fixtures.
+        with:
+          ruby-version: '3.3'
       - name: Run offline test-*.rb suites
         # EXPLICIT allow-list — only tests that need NO Tableau/Sigma creds or
         # network. Do NOT add test-calc-discovery.rb (needs a Tableau token);
@@ -480,6 +497,11 @@ jobs:
       LC_ALL: en_US.UTF-8
     steps:
       - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        # Same json-gem pin as the corpus job — this glob includes suites that
+        # compare generated JSON against committed fixtures.
+        with:
+          ruby-version: '3.3'
       - name: Run EVERY offline test-*.rb (glob, per-file timeout)
         run: |
           set -uo pipefail
