@@ -7,7 +7,7 @@ hard dependency on `sigma-workbooks` (the canonical Sigma spec reference) ships
 in the **same marketplace** — installing any converter, install this too.
 
 - **Source of truth:** https://github.com/twells89/sigma-skills (edit there)
-- **Vendored at:** sigma-skills `main` @ `2a466004da72cd6c5c6537225541e5b8c4231ae6` (2026-08-08)
+- **Vendored at:** sigma-skills `main` @ `2a466004da72cd6c5c6537225541e5b8c4231ae6` (2026-08-08); plus selective port of element-filters docs from `0c2c5a6` (`tables.md`/`charts.md`/`controls.md` + SKILL index line). Metrics guidance already present downstream (#705) and now also upstream on that commit — full re-vendor after upstream PR merges is safe for SKILL.md.
 
 ## Refresh
 
