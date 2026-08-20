@@ -28,7 +28,7 @@ def run_case(expected:, actual:, freshness: nil)
     File.write(plan_path, JSON.generate(plan))
     File.write(actuals_path, JSON.generate('Chart A' => actual))
     args = ['ruby', SCRIPT, '--finalize', '--plan', plan_path,
-            '--actuals', actuals_path, '--out-dir', dir]
+            '--actuals', actuals_path, '--out-dir', dir, '--parity-only']
     if freshness
       freshness_path = File.join(dir, 'freshness.json')
       File.write(freshness_path, JSON.generate(freshness))

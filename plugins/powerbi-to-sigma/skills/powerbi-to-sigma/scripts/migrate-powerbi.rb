@@ -1408,152 +1408,11 @@ conv_elements.each do |vcel|
   end
 end
 
-# Bug C: time-intel forwarding. The converter turns DAX SAMEPERIODLASTYEAR /
-# TOTALYTD measures into NEW DM elements (source.kind=='table' sourcing another
-# element, carrying DateLookback / CumulativeSum columns). Those elements get a
-# master built above, but the ORIGINAL PBI queryRef ("ORDER_FACT.Net Revenue PY"
-# / "ORDER_FACT.YoY %") still points at the fact table, where the measure no
-# longer exists -> the workbook chart resolves no master -> emits source:{} and
-# the POST fails with "Invalid value: undefined". Add synthetic field_map entries
-# routing "<OrigTable>.<MeasureName>" -> the new element's computed column.
-#   measure name -> original TMSL table (from Phase 1's all_measures).
-ti_orig_table = {}
-all_measures.each { |tbl, mname, _expr| ti_orig_table[mname] = tbl }
-# converter element id -> name, so a synthesized time-intel element can report the
-# FACT it was built from (its source View's table) — used to stop the fallback
-# router from cross-wiring a measure to an unrelated fact's time-intel element.
-conv_name_by_id = conv_elements.each_with_object({}) { |e, h| h[e['id']] = e['name'] }
-# collect the emitted time-intel elements (element-sourced, DateLookback/CumulativeSum).
-ti_elements = []
-conv_elements.each do |cel|
-  src = cel['source'] || {}
-  next unless src['kind'] == 'table' && src['elementId'] # element sourced from another element
-  cols = cel['columns'] || []
-  is_time_intel = cols.any? { |c| c['formula'].to_s =~ /\b(DateLookback|CumulativeSum)\s*\(/ }
-  next unless is_time_intel
-  mname = cel['name'].to_s            # converter names the element after the measure
-  mkey  = mname
-  next unless masters[mkey]           # its master was built in the loop above
-  mid   = masters[mkey]['id']
-  # pick the headline computed column: prior-year / YTD / YoY %, falling back to
-  # the last column (the converter appends the derived measure last).
-  pick = cols.find { |c| c['formula'].to_s =~ /\bDateLookback\s*\(/ } ||
-         cols.find { |c| c['formula'].to_s =~ /\bCumulativeSum\s*\(/ } ||
-         cols.find { |c| c['name'].to_s =~ /YoY/i } || cols.last
-  next unless pick
-  # bead 525l: a SINGLE-VALUE KPI bound to this measure must NOT receive a bare
-  # row-level ref (agg:nil) into the GROUPED element — Sigma evaluates an
-  # unaggregated ref over a multi-row (one-per-period) element nondeterministically
-  # (null / arbitrary row). Emit an explicit deterministic "latest period" headline
-  # formula via the builder's verbatim-formula hook (measure_formula):
-  #   Sum(If([mid/<dateCol>] = Max([mid/<dateCol>]), [mid/<col>], Null))
-  # In a chart grouped BY that date column the same formula still evaluates to the
-  # per-period value (within each group Max(date)=date), so it is safe for both
-  # the KPI and the date-grouped chart paths. The date col = the element's groupBy.
-  group_ids = (cel['groupings'] || []).flat_map { |g| g['groupBy'] || [] }
-  date_col  = cols.find { |c| group_ids.include?(c['id']) } ||
-              cols.find { |c| c['formula'].to_s =~ /\bDateTrunc\s*\(/ } ||
-              cols.find { |c| c['name'].to_s =~ /\A(Year|Quarter|Month|Week|Date|Day)\z/i }
-  headline = lambda do |colname|
-    next nil unless date_col
-    "Sum(If([#{mid}/#{date_col['name']}] = Max([#{mid}/#{date_col['name']}]), [#{mid}/#{colname}], Null))"
-  end
-  ti_fact = PbiTimeIntelRoute.fact_of(conv_name_by_id[src['elementId']])
-  ti_elements << { 'name' => mname, 'mid' => mid, 'cols' => cols,
-                   'date' => (date_col && date_col['name']), 'fact' => ti_fact }
-  ref = { 'master' => mkey, 'ref' => "[#{mid}/#{pick['name']}]", 'agg' => nil }
-  hf = headline.call(pick['name'])
-  ref['formula'] = hf if hf
-  orig = ti_orig_table[mname]
-  route_table = PbiTimeIntelRoute.routing_table(orig, ti_fact)
-  # route both the original-table queryRef and a self-named queryRef so whichever
-  # form the PBIR binding used resolves to this element.
-  field_map["#{orig}.#{mname}"] = ref if orig
-  field_map["#{mname}.#{mname}"] ||= ref
-  # also map any YoY % / Prior Year / YTD sibling column by its own name on the orig table.
-  cols.each do |c|
-    next unless c['name'].to_s =~ /YoY|Prior Year|YTD/i
-    sub = { 'master' => mkey, 'ref' => "[#{mid}/#{c['name']}]", 'agg' => nil }
-    shf = headline.call(c['name'])
-    sub['formula'] = shf if shf
-    field_map["#{orig}.#{c['name']}"] ||= sub if orig
-  end
-  # A chart that puts a PY/YoY column next to the BASE value and the period
-  # dimension (e.g. Year × Net Revenue × Net Revenue PY) must source from THIS
-  # grouped element — the View lacks the PY column. Register ALTS so those
-  # sibling fields can ALSO resolve here: the grouped value is already aggregated,
-  # so it is referenced as a PLAIN column (no extra Sum). visual_master then
-  # majority-picks this element and field_spec swaps in the alt ref.
-  base_val  = cols.find { |c| c['formula'].to_s =~ /\b(Sum|Avg|Count|CountDistinct|Min|Max)\s*\(/ }
-  period_cols = cols.select { |c| c['name'].to_s =~ /\b(Year|Month|Quarter|Day|Date|Week)\b/i }
-  reg_alt = lambda do |qr, colname|
-    next unless field_map[qr] && colname
-    (field_map[qr]['alts'] ||= []) << { 'master' => mkey, 'ref' => "[#{mid}/#{colname}]", 'agg' => nil }
-  end
-  if base_val
-    # the base value measure under the orig table (any measure whose formula is an
-    # aggregation of the same value column the PY/YTD element sums). Compare with
-    # whitespace stripped from BOTH sides so "Net Revenue" matches "[Net Revenue]".
-    valleaf  = base_val['name']
-    valnorm  = valleaf.gsub(/\s+/, '').downcase
-    all_measures.each do |t2, m2, e2|
-      next unless t2 == route_table
-      enorm = e2.to_s.gsub(/\s+/, '').downcase
-      agg_of_val = enorm =~ /(sum|average|avg|min|max|count|distinctcount)\([^)]*#{Regexp.escape(valnorm)}/
-      reg_alt.call("#{route_table}.#{m2}", valleaf) if agg_of_val || m2 == valleaf
-    end
-  end
-  # The grouped element carries period dimension column(s) (Year and/or Month).
-  # A chart that plots the time-intel measure BY one of those periods must source
-  # from this element, so register each period column as an alt under the common
-  # date-dim queryRef forms (the calc-table date dim is the usual binding source).
-  period_cols.each do |pc|
-    %w[DATE_DIM DimDate DimMonth Date].each { |dt| reg_alt.call("#{dt}.#{pc['name']}", pc['name']) }
-    reg_alt.call("#{route_table}.#{pc['name']}", pc['name'])
-  end
-end
-
-# Bug C (continued): OTHER time-intel measures (e.g. a standalone "YoY %" using a
-# hand-rolled MAX/ALL prior-year pattern) may NOT get their own element — the
-# converter folds the YoY computation into the prior-year element's "... YoY %"
-# column. Any such measure still has a live PBI queryRef ("ORDER_FACT.YoY %")
-# the chart binds, but no field_map entry -> source:{} -> POST fails. Route every
-# remaining time-intel-shaped measure to the best-matching time-intel column.
-if ti_elements.any?
-  all_measures.each do |tbl, mname, expr|
-    next if field_map.key?("#{tbl}.#{mname}")
-    # time-intel-shaped: a DAX time-intel function, OR a YoY/growth name, OR a
-    # hand-rolled MAX(...)/ALL(...) prior-year ratio.
-    shape = PbiTimeIntelRoute.measure_shape(mname, expr)
-    next unless shape
-    # choose a target column across the emitted time-intel elements — but ONLY
-    # those built from THIS measure's own fact. Cross-fact borrowing produced
-    # garbage (live run-2: SAFETY "PY Incident Count" -> ABSENCE "Hours YTD").
-    # If no same-fact element exists, leave the measure unresolved so it degrades
-    # into coverage.json rather than binding to an unrelated table's column.
-    target = nil; tmid = nil; tname = nil; tdate = nil
-    ti_elements.each do |te|
-      next unless PbiTimeIntelRoute.same_fact?(tbl, te['fact'])
-      cand =
-        case shape
-        when :yoy   then te['cols'].find { |c| c['name'].to_s =~ /YoY/i }
-        when :ytd   then te['cols'].find { |c| c['formula'].to_s =~ /\bCumulativeSum\s*\(/ }
-        when :prior then te['cols'].find { |c| c['formula'].to_s =~ /\bDateLookback\s*\(/ }
-        else te['cols'].find { |c| c['formula'].to_s =~ /\b(DateLookback|CumulativeSum)\s*\(/ }
-        end
-      if cand then target = cand; tmid = te['mid']; tname = te['name']; tdate = te['date']; break end
-    end
-    next unless target
-    entry = { 'master' => tname, 'ref' => "[#{tmid}/#{target['name']}]", 'agg' => nil }
-    # bead 525l: same headline-KPI determinism as above — a bare row-level ref on
-    # the grouped element is nondeterministic when consumed by a single-value KPI.
-    if tdate
-      entry['formula'] = "Sum(If([#{tmid}/#{tdate}] = Max([#{tmid}/#{tdate}]), " \
-                         "[#{tmid}/#{target['name']}], Null))"
-    end
-    field_map["#{tbl}.#{mname}"] = entry
-  end
-end
+# Time-intelligence routing is deliberately NOT implemented here. The dedicated
+# route-pbi-time-intelligence.rb helper below owns shape classification,
+# same-fact/date checks, synthesized-column selection, and latest-period
+# headline formulas. Keeping one router prevents the two paths from disagreeing
+# on a high-risk measure.
 
 # bead anlb (continued) — CLASSIC-report queryRef normalization. The legacy
 # report.json binds measures as "Sum(Entity.Col)" / "Count(Entity.Col)" and
@@ -1612,6 +1471,21 @@ master_map = { 'masters' => masters, 'fields' => field_map }
 mmap_path = File.join(WORK, 'master-map.json')
 File.write(mmap_path, JSON.pretty_generate(master_map))
 puts "   master-map: #{masters.size} master(s), #{field_map.size} field/measure ref(s) -> #{mmap_path}"
+
+# Canonical pre-workbook time-intelligence router. Needs-review records are
+# explicit accounting, not an unconditional build blocker; they remain unmapped
+# and will prevent final GREEN until a later strict parity run proves resolution.
+ti_routing = File.join(WORK, 'time-intelligence-routing.json')
+run!(['ruby', File.join(HERE, 'route-pbi-time-intelligence.rb'),
+      '--model', normalized_tmsl_path, '--dm-spec', dm_spec,
+      '--dm-readback', File.join(WORK, 'dm-readback.json'),
+      '--master-map', mmap_path, '--out', ti_routing,
+      '--patched-master-map', mmap_path])
+master_map = JSON.parse(File.read(mmap_path))
+field_map = master_map['fields'] || {}
+ti_doc = JSON.parse(File.read(ti_routing))
+puts "   time-intelligence: #{ti_doc.dig('summary', 'routed').to_i} routed, " \
+     "#{ti_doc.dig('summary', 'needs_review').to_i} needs-review (carried to final accounting/parity)"
 
 wb_spec = File.join(WORK, 'workbook-spec.json')
 layout = File.join(WORK, 'layout.xml')
@@ -1687,6 +1561,12 @@ end
 wb_rb = JSON.parse(File.read(wb_readback))
 wb_id = wb_rb['workbookId']
 puts "   workbookId = #{wb_id}"
+
+# Preliminary whole-source accounting is written immediately after the workbook
+# exists. It is intentionally complete before strict parity: unresolved routed
+# measures and data visuals remain needs-review until Phase 6 proves their
+# present chart PASS, but no source object is omitted from the census.
+run!(['ruby', File.join(HERE, 'build-powerbi-accounting.rb'), '--workdir', WORK])
 
 # Gate-state stamp (after a live post): control_flip_required=true auto-enables
 # the shared assert-phase6-ran.rb gate 7b on a STANDALONE run too, matching the
@@ -2109,6 +1989,13 @@ else
     puts "   [WARN] Phase 6b: #{flip_line}"
   end
 end
+
+# Refresh PNG health and the complete accounting surface at the end of the
+# one-shot resolution pass. Strict value parity is normally a later command, so
+# preliminary mode leaves the census complete and emits MIGRATION_REPORT only
+# when an existing parity-final.json makes a diagnostic report meaningful.
+run!(['ruby', File.join(HERE, 'finalize-powerbi-report.rb'),
+      '--workdir', WORK, '--preliminary'])
 
 # ---------------------------------------------------------------------------
 # Phase E (OPT-IN) — Enhance. Runs ONLY with --enhance AND a parity PASS:

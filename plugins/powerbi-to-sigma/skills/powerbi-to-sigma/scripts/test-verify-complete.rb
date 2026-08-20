@@ -37,14 +37,15 @@ Dir.mktmpdir do |wd|
   check(code == 5, "success marker without value parity => exit 5 (got #{code})", fails)
   check(out.include?('value parity was not run'), 'missing parity message names the required gate', fails)
 
-  # 3) strict parity for every chart → DONE (0)
+  # 3) strict parity alone no longer proves completion: whole-source accounting
+  # and the generated migration report are part of the final contract.
   File.write(File.join(wd, 'parity-final.json'),
-             JSON.generate('status' => 'PASS', 'charts_total' => 9,
+             JSON.generate('status' => 'PASS', 'mode' => 'strict', 'charts_total' => 9,
                            'charts_pass' => 9, 'charts_fail' => 0))
   code, out = run_vc(VC, wd)
-  check(code == 0, "success + charts => exit 0 (got #{code})", fails)
-  check(out.include?('DONE') && out.include?('wb-1') && out.include?('9/9 strict matches'),
-        'done message names workbook + strict parity evidence', fails)
+  check(code == 6, "success + strict charts without accounting => exit 6 (got #{code})", fails)
+  check(out.include?('source accounting'),
+        'missing final accounting is reported distinctly from parity', fails)
 
   # 4) stale-only parity never claims DONE, even if its writer says PASS.
   File.write(File.join(wd, 'parity-final.json'),

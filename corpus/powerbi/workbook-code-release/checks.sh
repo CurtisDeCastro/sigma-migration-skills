@@ -19,3 +19,8 @@ ruby "$SKILL/scripts/build-workbook-from-pbir.rb" \
 cmp "$CASE_DIR/golden/workbook.json" "$TMP/workbook.json"
 ruby "$SKILL/scripts/validate-spec.rb" --type workbook "$TMP/workbook.json"
 python3 "$CASE_DIR/check_workbook.py" "$TMP/workbook.json"
+
+# Full source-accounting/report contract (fixture_02 time intelligence +
+# this case's source signals): routing parity, controls, PNG health, report
+# contradiction, and verify-complete success/failure exits.
+ruby "$SKILL/scripts/test-powerbi-accounting.rb"
