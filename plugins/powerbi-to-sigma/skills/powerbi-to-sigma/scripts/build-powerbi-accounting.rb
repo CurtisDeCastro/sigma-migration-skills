@@ -576,7 +576,10 @@ begin
   else
     outputs.each do |path, bytes|
       temporary = "#{path}.tmp.#{$$}"
-      File.write(temporary, bytes)
+      # Binary mode keeps the deterministic LF JSON bytes unchanged on Windows;
+      # text-mode File.write expands them to CRLF and makes --check report every
+      # freshly written artifact as stale.
+      File.binwrite(temporary, bytes)
       File.rename(temporary, path)
     ensure
       File.delete(temporary) if defined?(temporary) && File.exist?(temporary)

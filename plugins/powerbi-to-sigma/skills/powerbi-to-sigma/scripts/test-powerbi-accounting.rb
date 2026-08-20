@@ -200,6 +200,8 @@ def fold_for_test(value)
 end
 
 puts 'successful full accounting/report'
+check(File.read(ACCOUNTING).include?('File.binwrite(temporary, bytes)'),
+      'accounting outputs use binary writes for Windows-stable --check')
 Dir.mktmpdir('pbi-accounting-success') do |dir|
   seed_workdir(dir)
   code, output = command(RbConfig.ruby, FINALIZER, '--workdir', dir)
