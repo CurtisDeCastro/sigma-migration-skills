@@ -2,8 +2,19 @@
 """Offline regressions for report -> semantic-model workspace resolution."""
 
 import copy
+import sys
+import types
 import unittest
 from unittest import mock
+
+# This suite exercises pure estate-resolution logic. CI intentionally does not
+# install the live auth stack, so provide inert import shims before loading the
+# module; no test calls authentication or HTTP.
+truststore = types.ModuleType("truststore")
+truststore.inject_into_ssl = lambda: None
+sys.modules.setdefault("truststore", truststore)
+sys.modules.setdefault("msal", types.ModuleType("msal"))
+sys.modules.setdefault("requests", types.ModuleType("requests"))
 
 import pbi_fabric as fab
 
