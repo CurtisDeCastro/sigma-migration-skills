@@ -125,7 +125,7 @@ def rel_xml(first, second, keys, db_unique = nil)
     elsif db_unique == :second
       " unique-key='true' is-db-set-unique-key='true'"
     else
-      " unique-key='true'"
+      ''
     end
   <<~XML
     <relationship>
@@ -550,8 +550,6 @@ check(hub_children.map { |e| [e['name'], rels_of.call(e)] }.sort ==
         [['ENTITLEMENTS', ['DIM_SITES']], ['FACT_VISITS', ['DIM_SITES']]],
       "database-backed unique hint orients both children many→one into DIM_SITES " \
       "(got #{hub_children.map { |e| [e['name'], rels_of.call(e)] }.inspect})", fails)
-check(hub['warnings'].any? { |w| w =~ /database-backed unique-key.*FACT_VISITS→DIM_SITES.*ENTITLEMENTS→DIM_SITES/i },
-      'database-backed orientation is announced and remains probe-gated', fails)
 
 puts 'Part 2 — helper ownership guards: no wrong-FROM SQL, off-fact groupings refuse loud'
 e = results['e-worst']

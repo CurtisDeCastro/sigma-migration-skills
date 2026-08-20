@@ -5550,7 +5550,6 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
           const hintContradicted = [];
-          const hintOriented = [];
           for (const e of relEdges) {
             const da = dist.get(e.a) ?? 0;
             const db = dist.get(e.b) ?? 0;
@@ -5574,8 +5573,6 @@ function convertTableauToSigma(xmlContent, options = {}) {
               targetUnique = e.uniqueA;
               keys = e.keys.map((k) => ({ sourceColumnId: k.bColId, targetColumnId: k.aColId }));
             }
-            if (uniqueHintDecisive)
-              hintOriented.push(`${carrier.cleanName}\u2192${target.cleanName}`);
             if (carrierUnique && !targetUnique)
               hintContradicted.push(`${carrier.cleanName}\u2192${target.cleanName}`);
             if (!carrier.element.relationships)
@@ -5596,9 +5593,6 @@ function convertTableauToSigma(xmlContent, options = {}) {
           }
           if (hintContradicted.length > 0) {
             warnings.push(`\u26A0 Tableau performance-option hints (unique-key) mark the SOURCE side unique on ${hintContradicted.length} oriented edge(s): ${hintContradicted.join(", ")}. As oriented these would be one-to-many, which a Sigma relationship cannot express (many-to-one left join into a unique target) \u2014 the hints are often db-derived or stale, so VERIFY each edge's direction and target uniqueness; model a genuinely one-to-many edge as a join element instead.`);
-          }
-          if (hintOriented.length > 0) {
-            warnings.push(`\u2139 Tableau database-backed unique-key endpoint hints oriented ${hintOriented.length} relationship(s) many\u2192one for Sigma Lookup semantics: ${hintOriented.join(", ")}. The join-cardinality probe still verifies target uniqueness before GREEN.`);
           }
         }
         electedFactEl = electedEntry ? electedEntry.element : null;
