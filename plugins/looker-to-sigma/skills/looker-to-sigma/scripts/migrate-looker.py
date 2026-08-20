@@ -67,10 +67,11 @@ Env: SIGMA_BASE_URL + SIGMA_API_TOKEN (or SIGMA_CLIENT_ID/SECRET via
 optional CONVERTER_SRC (src/lookml.ts, run via tsx) or CONVERTER_PATH
 (build/lookml.js) — both auto-located.
 
-Exit codes: 0 = done, all gates GREEN; 3 = MCP convert request emitted (resume
-with --converted); 10 = RLS found, decision needed (nothing posted);
-12 = LookML readiness blocked (nothing posted); 2 = built but a parity,
-accounting, report, or hard gate FAILED; other = error.
+Exit codes: 0 = complete GREEN or YELLOW handoff; 3 = MCP convert request
+emitted (resume with --converted); 10 = a security or waiver-budget decision
+is required; 12 = LookML readiness blocked (nothing posted); 2 = built but a
+parity, render, accounting, report, security, reconciliation, or hard gate
+FAILED; other = error.
 """
 import argparse, csv, glob, io, json, os, re, statistics, subprocess, sys, time
 import urllib.request, urllib.error
@@ -87,6 +88,7 @@ MCP_TOOL = "mcp__sigma-data-model__convert_lookml_to_sigma"
 VENDORED_CONVERTER = os.path.join(HERE, "..", "converter", "lookml.mjs")
 READINESS_BLOCKED_EXIT = 12
 SIGMA_POSTS_ALLOWED = False
+COMPLETE_VERDICTS = {"GREEN", "YELLOW"}
 
 
 def resolve_converter():
@@ -275,6 +277,28 @@ def refresh_degradation_ledger(workdir):
         "-rdegradation_ledger", "-e", ruby, workdir,
     ], check=False)
     return rc
+
+
+def resolve_terminal_outcome(*, gates_pass, report_verdict, completion_status,
+                             budget_decision_required=False):
+    """Return the public GREEN/YELLOW/RED verdict and process exit.
+
+    The migration report owns fidelity classification through the shared
+    TerminalOutcome policy.  This adapter only combines that report verdict
+    with independently evaluated hard gates and the completion reconciliation;
+    it deliberately does not re-derive object-status policy in Python.
+    """
+    verdict = str(report_verdict or "").upper()
+    complete = str(completion_status or "").lower() == "complete"
+    if budget_decision_required and complete and verdict in COMPLETE_VERDICTS:
+        return "YELLOW", 10
+    if not gates_pass or not complete or verdict not in COMPLETE_VERDICTS:
+        return "RED", 2
+    return verdict, 0
+
+
+def terminal_banner(verdict):
+    return f"PARITY/VERDICT: {verdict}"
 
 
 def ensure_sigma_env(workdir=None):
@@ -614,6 +638,17 @@ def main():
                          "Default OFF: candidates are printed and the safe default is "
                          "build-new (reuse only via explicit --reuse-dm).")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument(
+        "--skip-visual-comparison", metavar="REASON",
+        help="named source-visual waiver passed to the hard gate when a Looker "
+             "source image is genuinely unavailable; the Sigma render must "
+             "still be healthy and the terminal verdict is at most YELLOW",
+    )
+    ap.add_argument(
+        "--accept-waiver-budget-exceeded", metavar="REASON",
+        help="explicitly accept hard-gate waiver-budget overflow after every "
+             "other gate passes; records REASON and permits a YELLOW exit-0 handoff",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--materialize-derived", choices=["off", "auto", "all"], default="off",
                     help="Phase 2b always SCANS for expensive derived tables (informational). "
@@ -1428,8 +1463,11 @@ console.error('stats:', JSON.stringify(res.stats));
           f"{workers}-wide in {time.time() - t_par:.1f}s")
     json.dump(expected, open(os.path.join(wd, "parity-expected.json"), "w"), indent=2)
     json.dump(actuals, open(os.path.join(wd, "parity-actuals.json"), "w"), indent=2)
-    rc, _ = run(["ruby", os.path.join(HERE, "phase6-parity-looker.rb"),
-                 "--workdir", wd, "--finalize"], check=False)
+    parity_finalize_rc, _ = run(
+        ["ruby", os.path.join(HERE, "phase6-parity-looker.rb"),
+         "--workdir", wd, "--finalize"],
+        check=False,
+    )
     # Refresh canonical accounting after parity has supplied terminal evidence
     # and before the hard gate derives/stamps its degradation verdict.
     pre_gate_accounting_rc = run_looker_accounting(
@@ -1451,6 +1489,13 @@ console.error('stats:', JSON.stringify(res.stats));
     # every migration fails gate 8 despite a clean render.
     if render_png and os.path.exists(render_png):
         gate_cmd += ["--sigma-render", render_png]
+    if a.skip_visual_comparison:
+        gate_cmd += ["--skip-visual-comparison", a.skip_visual_comparison]
+    if a.accept_waiver_budget_exceeded:
+        gate_cmd += [
+            "--accept-waiver-budget-exceeded",
+            a.accept_waiver_budget_exceeded,
+        ]
     grc, _ = run(gate_cmd, check=False)
     summary = json.load(open(os.path.join(wd, "parity-final.json")))
 
@@ -1519,15 +1564,49 @@ console.error('stats:', JSON.stringify(res.stats));
     except Exception:
         pass
     report_verdict = str(report.get("verdict") or "MISSING").upper()
+    completion_status = str(report.get("completion_status") or "missing").lower()
     print(f"   migration report: {report_verdict} "
           f"({report.get('summary', {}).get('accounted', 0)}/"
-          f"{report.get('summary', {}).get('total', 0)} accounted)")
+          f"{report.get('summary', {}).get('total', 0)} accounted; "
+          f"completion_status={completion_status})")
+
+    # Always run the final offline reconciliation, including RED and
+    # decision-required paths.  It proves the workbook, report, census,
+    # degradation ledger, waiver census, and phase-6 sentinel agree.  An
+    # unaccepted waiver-budget overflow intentionally has no success sentinel,
+    # so verify-complete remains nonzero until the named decision is accepted.
+    completion_rc, _ = run(
+        ["ruby", os.path.join(HERE, "verify-complete.rb"),
+         "--workdir", wd, "--workbook-id", wb],
+        check=False,
+    )
 
     # ── Summary ────────────────────────────────────────────────────────────────
-    green = (grc == 0 and not errs and pre_gate_accounting_rc == 0 and
-             final_accounting_rc == 0 and ledger_rc == 0 and
-             report_rc == 0 and report_verdict != "RED" and
-             str(render_health.get("status") or "").upper() == "PASS")
+    # Keep gate execution independent from the report's fidelity verdict.
+    # Approximations/waivers can therefore be a complete YELLOW handoff, while
+    # divergence, broken renders, incomplete accounting, contradictions,
+    # ERROR-typed columns, and deliberately unported RLS remain RED/nonzero.
+    non_assert_checks_pass = (
+        parity_finalize_rc == 0 and not errs and
+        pre_gate_accounting_rc == 0 and final_accounting_rc == 0 and
+        ledger_rc == 0 and report_rc == 0 and
+        completion_status == "complete" and
+        str(render_health.get("status") or "").upper() == "PASS" and
+        not findings
+    )
+    budget_decision_required = (
+        grc == 19 and not a.accept_waiver_budget_exceeded and
+        non_assert_checks_pass and report_verdict in COMPLETE_VERDICTS
+    )
+    gates_pass = (
+        grc == 0 and non_assert_checks_pass and completion_rc == 0
+    )
+    terminal_verdict, terminal_exit = resolve_terminal_outcome(
+        gates_pass=gates_pass,
+        report_verdict=report_verdict,
+        completion_status=completion_status,
+        budget_decision_required=budget_decision_required,
+    )
     print("\n================ RESULT ================")
     print(f"dataModelId : {dm}{'  (REUSED)' if a.reuse_dm else ''}")
     print(f"workbookId  : {wb}  '{wspec['name']}'")
@@ -1537,11 +1616,17 @@ console.error('stats:', JSON.stringify(res.stats));
     print(f"ledger      : {'PASS' if ledger_rc == 0 else f'FAIL (exit {ledger_rc})'}")
     print(f"report      : {report_verdict}"
           + ("" if report_rc == 0 else f" · FAIL (exit {report_rc})"))
+    print(f"completion  : {'PASS' if completion_rc == 0 else f'FAIL (exit {completion_rc})'}")
     if findings:
-        print(f"RLS         : {len(findings)} finding(s) NOT ported (recorded in rls-findings.json)")
-    print(f"PARITY      : {'GREEN' if green else 'RED'}  ·  wall-clock {time.time() - T0:.1f}s")
+        print(f"RLS         : RED · {len(findings)} finding(s) NOT ported "
+              "(recorded in rls-findings.json)")
+    print(f"{terminal_banner(terminal_verdict)}  ·  wall-clock {time.time() - T0:.1f}s")
+    if budget_decision_required:
+        print("DECISION REQUIRED: waiver budget exceeded after all other gates passed.")
+        print("Re-run with --accept-waiver-budget-exceeded REASON to record the "
+              "decision and complete a YELLOW handoff.")
     print("========================================")
-    return 0 if green else 2
+    return terminal_exit
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ end
 
 def write_contract(wd, status: 'migrated', verdict: 'GREEN', complete: true,
                    report_status: nil, report_id: 'dash-1', census_id: 'dash-1',
-                   degradations: [])
+                   degradations: [], waivers: [])
   census_row = { 'type' => 'dashboard', 'id' => census_id, 'name' => 'Sales',
                  'status' => status }
   report_row = { 'type' => 'dashboard', 'id' => report_id, 'name' => 'Sales',
@@ -39,12 +39,16 @@ def write_contract(wd, status: 'migrated', verdict: 'GREEN', complete: true,
              'objects' => [census_row])
   write_json(File.join(wd, 'migration-result.json'),
              'verdict' => verdict,
+             'completion_status' => verdict == 'RED' ? 'blocked' : 'complete',
              'summary' => { 'complete' => complete, 'total' => 1,
                             'accounted' => (complete ? 1 : 0) },
              'source_objects' => [report_row], 'degradations' => degradations,
-             'waivers' => [])
+             'waivers' => waivers)
   write_json(File.join(wd, 'parity-final.json'),
-             'status' => 'PASS', 'verdict' => 'GREEN', 'waivers' => [], 'waiver_count' => 0)
+             'status' => 'PASS', 'verdict' => verdict,
+             'waivers' => waivers.map { |entry| entry['flag'] },
+             'waiver_reasons' => waivers.to_h { |entry| [entry['flag'], entry['reason']] },
+             'waiver_count' => waivers.length)
   write_json(File.join(wd, 'degradation-ledger.json'),
              'version' => 1, 'counts' => {}, 'entries' => degradations)
 end
@@ -112,11 +116,58 @@ end
 
 # An honestly-accounted approximation is complete but caps the report at YELLOW.
 Dir.mktmpdir do |wd|
-  success_marker(wd)
-  write_contract(wd, status: 'approximated', verdict: 'YELLOW')
+  waiver = {
+    'flag' => '--skip-visual-comparison',
+    'gate' => 'gate 8b',
+    'reason' => 'source visual unavailable'
+  }
+  degradation = {
+    'class' => 'quality-waiver',
+    'item' => '--skip-visual-comparison',
+    'reason' => 'source visual unavailable',
+    'source_artifact' => 'parity-final.json waivers'
+  }
+  success_marker(wd, 'verdict' => 'YELLOW', 'waivers' => [waiver['flag']])
+  write_contract(wd, status: 'approximated', verdict: 'YELLOW',
+                 degradations: [degradation], waivers: [waiver])
   code, out = run_vc(VC, wd)
-  check(code == 0, "complete approximated accounting => exit 0 (got #{code})", fails)
-  check(out.include?('VERDICT: YELLOW'), 'accounting-derived YELLOW is surfaced', fails)
+  check(code == 0, "accounted approximation + source-visual waiver => exit 0 (got #{code})", fails)
+  check(out.include?('VERDICT: YELLOW'), 'waived approximation surfaces YELLOW, never GREEN', fails)
+end
+
+# A shared-ledger PARTIAL scope-cut spelling reconciles to plugin-local YELLOW.
+Dir.mktmpdir do |wd|
+  degradation = {
+    'class' => 'scope-cut',
+    'item' => 'dropped visual: Unsupported Map',
+    'reason' => 'unsupported source visual',
+    'source_artifact' => 'coverage.json'
+  }
+  success_marker(wd, 'verdict' => 'PARTIAL')
+  write_contract(wd, status: 'skipped', verdict: 'YELLOW',
+                 degradations: [degradation])
+  parity = JSON.parse(File.read(File.join(wd, 'parity-final.json')))
+  parity['verdict'] = 'PARTIAL'
+  write_json(File.join(wd, 'parity-final.json'), parity)
+  write_json(File.join(wd, 'coverage.json'),
+             'unresolved' => [{ 'visual' => 'Unsupported Map',
+                                'severity' => 'dropped',
+                                'detail' => 'unsupported source visual' }])
+  code, out = run_vc(VC, wd)
+  check(code == 0, "fully accounted skipped visual => YELLOW exit 0 (got #{code})", fails)
+  check(out.include?('VERDICT: YELLOW'), 'legacy PARTIAL claim is surfaced as plugin-local YELLOW', fails)
+end
+
+# completion_status is part of the report contract, not inferred from verdict.
+Dir.mktmpdir do |wd|
+  success_marker(wd)
+  write_contract(wd)
+  report = JSON.parse(File.read(File.join(wd, 'migration-result.json')))
+  report.delete('completion_status')
+  write_json(File.join(wd, 'migration-result.json'), report)
+  code, out = run_vc(VC, wd)
+  check(code == 6, "missing completion_status => exit 6 (got #{code})", fails)
+  check(out.include?('completion_status'), 'missing completion_status is named', fails)
 end
 
 # Re-derivation catches a report and stored ledger that hide a scope cut.
@@ -150,6 +201,7 @@ mt = File.read(File.join(DIR, 'migrate-looker.py'))
 check(mt.include?('assert-phase6-ran.rb'), 'orchestrator invokes the assert-phase6-ran hard gate', fails)
 check(mt.include?('build-migration-report.rb'), 'orchestrator invokes the final migration report', fails)
 check(mt.include?('build-looker-accounting.py'), 'orchestrator invokes Looker source accounting', fails)
+check(mt.include?('verify-complete.rb'), 'orchestrator invokes final completion reconciliation', fails)
 asrt = File.read(File.join(DIR, 'assert-phase6-ran.rb'))
 check(asrt.include?('phase6-success.json') && asrt.include?("'chartCount'"),
       'shared gate stamps phase6-success.json with chartCount', fails)

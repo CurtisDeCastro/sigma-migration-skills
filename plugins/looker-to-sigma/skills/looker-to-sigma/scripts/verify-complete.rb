@@ -26,8 +26,9 @@
 require 'json'
 require 'optparse'
 require_relative 'lib/degradation_ledger'
+require_relative 'lib/terminal_outcome'
 
-TERMINAL_STATUSES = %w[migrated approximated needs-review skipped not-applicable].freeze
+TERMINAL_STATUSES = TerminalOutcome::TERMINAL_STATUSES
 
 opts = {}
 OptionParser.new do |p|
@@ -134,7 +135,8 @@ end
 
 report_rows = object_rows(report)
 census_rows = object_rows(census)
-report_complete = report.dig('summary', 'complete') == true &&
+report_complete = report['completion_status'].to_s == 'complete' &&
+                  report.dig('summary', 'complete') == true &&
                   report.dig('summary', 'accounted').to_i == report.dig('summary', 'total').to_i
 census_complete = census.dig('summary', 'complete') != false &&
                   !census_rows.empty? &&
@@ -143,7 +145,8 @@ if report['verdict'].to_s.upcase == 'RED' || census['verdict'].to_s.upcase == 'R
    !report_complete || !census_complete ||
    report_rows.any? { |row| !TERMINAL_STATUSES.include?(object_status(row)) }
   warn '⛔ NOT DONE — migration report/source census is RED or incomplete.'
-  warn "   report: verdict=#{report['verdict'].inspect} complete=#{report.dig('summary', 'complete').inspect} " \
+  warn "   report: verdict=#{report['verdict'].inspect} completion_status=#{report['completion_status'].inspect} " \
+       "complete=#{report.dig('summary', 'complete').inspect} " \
        "accounted=#{report.dig('summary', 'accounted').inspect}/#{report.dig('summary', 'total').inspect}"
   warn "   census: objects=#{census_rows.length} complete=#{census.dig('summary', 'complete').inspect}"
   exit 6
@@ -170,7 +173,16 @@ contradictions = []
 run_state = load_json(File.join(wd, 'migrate-state.json')) || {}
 factory_labeled = derived_verdict == 'GREEN' && run_state['tier'].to_s == 'S' &&
                   parity['verdict_by'].to_s == 'builder-self-attested'
-expected_phase6_verdict = factory_labeled ? 'GREEN (factory, self-attested)' : derived_verdict
+expected_phase6_verdict =
+  if factory_labeled
+    'GREEN (factory, self-attested)'
+  else
+    # The shared degradation ledger predates the canonical three-state terminal
+    # policy and may spell a scope-cut handoff PARTIAL/PARTIAL+YELLOW.  For this
+    # plugin's reconciliation those are YELLOW: complete-but-degraded, never
+    # GREEN.  Keep phase-6 compatibility below while comparing canonical claims.
+    TerminalOutcome.expected_report_verdict(['migrated'], derived)
+  end
 
 if stored_ledger.is_a?(Hash) && stored_ledger['entries'].is_a?(Array) &&
    stored_ledger['entries'] != derived
@@ -180,17 +192,20 @@ if report['degradations'].is_a?(Array) && report['degradations'] != derived
   contradictions << "migration-result.json degradation ledger has #{report['degradations'].length} entries but fresh derivation has #{derived.length}"
 end
 
-accounting_yellow = report_rows.any? do |row|
-  %w[approximated needs-review skipped].include?(object_status(row))
-end
-expected_report_verdict = derived.empty? && !accounting_yellow ? 'GREEN' : 'YELLOW'
+expected_report_verdict = TerminalOutcome.report_verdict(
+  terminal_rows: report_rows.map { |row| object_status(row) },
+  degradation_entries: derived,
+  waiver_entries: Array(report['waivers']),
+  hard_failure: Array(report['checks']).any? { |check| check.is_a?(Hash) && check['status'] == 'FAIL' }
+)
 if report['verdict'].to_s.upcase != expected_report_verdict
   contradictions << "migration-result.json claims #{report['verdict'].inspect} but the ledger requires #{expected_report_verdict}"
 end
 
 { 'phase6-success.json' => sj, 'parity-final.json' => parity }.each do |name, doc|
   claim = doc['verdict'].to_s
-  next if claim.empty? || claim == expected_phase6_verdict
+  canonical_claim = claim.start_with?('PARTIAL') ? 'YELLOW' : claim
+  next if claim.empty? || canonical_claim == expected_phase6_verdict
   contradictions << "#{name} claims verdict #{claim.inspect} but the artifacts require #{expected_phase6_verdict}"
 end
 
@@ -229,8 +244,7 @@ unless contradictions.empty?
   exit 8
 end
 
-completion_verdict = report['verdict'].to_s.upcase == 'YELLOW' &&
-                     derived_verdict == 'GREEN' ? 'YELLOW' : expected_phase6_verdict
+completion_verdict = report['verdict'].to_s.upcase
 puts "✅ DONE — hard gates and completion accounting reconcile. VERDICT: #{completion_verdict}"
 puts "   workbook : #{sj['workbookId']}"
 puts "   charts   : #{sj['chartCount']}"
