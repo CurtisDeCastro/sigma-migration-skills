@@ -92,7 +92,11 @@ sisense_hard_gate_closure = {
   'shared/scripts/record-visual-check.rb'   => "#{sisense_scripts}/record-visual-check.rb",
   'shared/lib/cli_encoding.rb'              => "#{sisense_scripts}/lib/cli_encoding.rb",
   'shared/lib/blind_grade.rb'               => "#{sisense_scripts}/lib/blind_grade.rb",
-  'shared/scripts/cleanup-orphan-workbooks.rb' => "#{sisense_scripts}/cleanup-orphan-workbooks.rb"
+  'shared/scripts/cleanup-orphan-workbooks.rb' => "#{sisense_scripts}/cleanup-orphan-workbooks.rb",
+  'shared/scripts/probe-controls.rb'         => "#{sisense_scripts}/probe-controls.rb",
+  'shared/scripts/verify-warehouse.rb'       => "#{sisense_scripts}/verify-warehouse.rb",
+  'shared/lib/sigma_rest.rb'                => "#{sisense_scripts}/lib/sigma_rest.rb",
+  'shared/lib/export_pool.rb'               => "#{sisense_scripts}/lib/export_pool.rb"
 }.freeze
 missing_sisense_closure = sisense_hard_gate_closure.reject { |canonical, target| ENTRIES.fetch(canonical, []).include?(target) }
 ok('Sisense assert-phase6 hard gate is manifest-registered with its full shared closure') do

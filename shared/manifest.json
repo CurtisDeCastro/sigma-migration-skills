@@ -443,7 +443,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/verify-warehouse.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-warehouse.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-warehouse.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-warehouse.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-warehouse.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-warehouse.rb"
       ]
     },
     {
@@ -474,7 +475,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/probe-controls.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/probe-controls.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/probe-controls.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/probe-controls.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/probe-controls.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/probe-controls.rb"
       ]
     },
     {
