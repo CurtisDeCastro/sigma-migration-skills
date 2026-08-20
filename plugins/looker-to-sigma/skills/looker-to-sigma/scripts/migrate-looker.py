@@ -68,8 +68,9 @@ optional CONVERTER_SRC (src/lookml.ts, run via tsx) or CONVERTER_PATH
 (build/lookml.js) — both auto-located.
 
 Exit codes: 0 = done, all gates GREEN; 3 = MCP convert request emitted (resume
-with --converted); 10 = RLS found, decision needed (nothing posted); 2 = built
-but a parity/hard gate FAILED; other = error.
+with --converted); 10 = RLS found, decision needed (nothing posted);
+12 = LookML readiness blocked (nothing posted); 2 = built but a parity,
+accounting, report, or hard gate FAILED; other = error.
 """
 import argparse, csv, glob, io, json, os, re, statistics, subprocess, sys, time
 import urllib.request, urllib.error
@@ -84,6 +85,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 T0 = time.time()
 MCP_TOOL = "mcp__sigma-data-model__convert_lookml_to_sigma"
 VENDORED_CONVERTER = os.path.join(HERE, "..", "converter", "lookml.mjs")
+READINESS_BLOCKED_EXIT = 12
+SIGMA_POSTS_ALLOWED = False
 
 
 def resolve_converter():
@@ -166,6 +169,114 @@ def run(cmd, env=None, cwd=None, check=True):
     return p.returncode, out
 
 
+def derive_render_health(workdir, render_png):
+    """Persist the canonical render-health.json consumed by the final report.
+
+    Prefer the measured render_health nested in visual-similarity.json. When
+    visual similarity was not applicable but Phase 4c produced a Sigma PNG,
+    analyze that PNG directly. Absence/error is recorded explicitly so the
+    report fails closed instead of treating missing render evidence as healthy.
+    """
+    out = os.path.join(workdir, "render-health.json")
+    vs_path = os.path.join(workdir, "visual-similarity.json")
+    health = None
+    if os.path.isfile(vs_path):
+        try:
+            similarity = json.load(open(vs_path))
+            candidate = similarity.get("render_health")
+            if isinstance(candidate, dict):
+                health = candidate
+                health = {**health, "source": "visual-similarity.json#render_health"}
+        except Exception as ex:
+            health = {"status": "ERROR", "reasons": [f"invalid visual-similarity.json: {ex}"]}
+    if health is None and render_png and os.path.isfile(render_png):
+        rc, _ = run([sys.executable, os.path.join(HERE, "png_health.py"),
+                     "--image", render_png, "--json-out", out], check=False)
+        try:
+            health = json.load(open(out))
+        except Exception:
+            health = {"status": "ERROR",
+                      "reasons": [f"png_health.py exited {rc} without readable output"],
+                      "path": render_png}
+    if health is None:
+        health = {"status": "ERROR", "reasons": ["no Sigma render PNG was produced"]}
+    with open(out, "w") as handle:
+        json.dump(health, handle, indent=2)
+        handle.write("\n")
+    print(f"   render health: {health.get('status', 'ERROR')} → {out}")
+    return health
+
+
+def run_looker_accounting(workdir, contract_path, workbook_spec_path, stage):
+    """Build/refresh source-object-census.json using the sibling accountant.
+
+    The accountant owns object identity and terminal-status derivation. This
+    adapter supplies the stable CLI contract, allowing the preliminary
+    (post-build) and final (post-gate) passes to share one call without
+    duplicating accounting logic in the orchestrator.
+    """
+    script = os.path.join(HERE, "build-looker-accounting.py")
+    if not os.path.isfile(script):
+        print(f"   FATAL: required accounting script missing: {script}")
+        return 127
+    cmd = [
+        sys.executable, script,
+        "--workdir", workdir,
+        "--readiness", os.path.join(workdir, "lookml-readiness.json"),
+        "--field-census", os.path.join(workdir, "lookml-field-census.json"),
+        "--formula-mapping", os.path.join(workdir, "formula-mapping.json"),
+        "--contract", contract_path,
+        "--wb-spec", workbook_spec_path,
+    ]
+    optional = [
+        ("--dm-spec", os.path.join(workdir, "dm-readback.json")),
+        ("--dm-warnings", os.path.join(workdir, "dm-spec-warnings.json")),
+        ("--control-scope", os.path.join(workdir, "control-scope.json")),
+    ]
+    if stage == "final":
+        optional.append(("--parity-final", os.path.join(workdir, "parity-final.json")))
+    for option, path in optional:
+        if os.path.isfile(path):
+            cmd += [option, path]
+    if stage == "preliminary":
+        cmd += [
+            "--census-out", "preliminary-source-object-census.json",
+            "--coverage-out", "preliminary-coverage.json",
+            "--controls-out", "preliminary-controls.json",
+        ]
+    rc, _ = run(cmd, check=False)
+    census_path = os.path.join(
+        workdir,
+        "preliminary-source-object-census.json"
+        if stage == "preliminary" else "source-object-census.json",
+    )
+    if rc == 0 and os.path.isfile(census_path):
+        try:
+            census = json.load(open(census_path))
+            objects = census.get("objects") or census.get("source_objects") or []
+            count = len(objects) if isinstance(objects, list) else sum(
+                len(v) for v in objects.values() if isinstance(v, list)
+            ) if isinstance(objects, dict) else 0
+            print(f"   {stage} accounting: {count} source object(s) → {census_path}")
+        except Exception:
+            print(f"   {stage} accounting wrote unreadable {census_path}")
+            return 2
+    return rc
+
+
+def refresh_degradation_ledger(workdir):
+    """Re-derive the canonical ledger after final accounting rewrites coverage."""
+    ruby = (
+        "entries = DegradationLedger.derive(ARGV.fetch(0)); "
+        "exit(DegradationLedger.write(ARGV.fetch(0), entries) ? 0 : 1)"
+    )
+    rc, _ = run([
+        "ruby", "-I", os.path.join(HERE, "lib"),
+        "-rdegradation_ledger", "-e", ruby, workdir,
+    ], check=False)
+    return rc
+
+
 def ensure_sigma_env(workdir=None):
     """Load ~/.sigma-migration/env and mint a bearer when SIGMA_API_TOKEN isn't
     already exported.
@@ -198,6 +309,10 @@ def ensure_sigma_env(workdir=None):
 
 
 def sigma(method, path, body=None):
+    if method.upper() == "POST" and not SIGMA_POSTS_ALLOWED:
+        raise RuntimeError(
+            f"Sigma POST {path} refused before the LookML readiness gate passed"
+        )
     base = os.environ["SIGMA_BASE_URL"]; tok = os.environ["SIGMA_API_TOKEN"]
     req = urllib.request.Request(base + path,
         data=(json.dumps(body).encode() if body is not None else None), method=method,
@@ -467,6 +582,7 @@ def expected_live(el, measures=None, want_label=None):
 
 
 def main():
+    global SIGMA_POSTS_ALLOWED
     ap = argparse.ArgumentParser()
     ap.add_argument("--lookml-dir", help="LookML project dir (model + views). "
                     "Omit when using --project (pulled via the Looker API).")
@@ -539,13 +655,6 @@ def main():
         a.lookml_dir = pulled
     lookml_dir = os.path.abspath(os.path.expanduser(a.lookml_dir))
     prefix = (a.name.strip() + " ") if a.name else ""
-    ensure_sigma_env(wd)
-    if not a.dry_run:
-        missing = [v for v in ("SIGMA_BASE_URL", "SIGMA_API_TOKEN") if not os.environ.get(v)]
-        if not a.reuse_dm and not os.environ.get("SIGMA_CONNECTION_ID"):
-            missing.append("SIGMA_CONNECTION_ID (full warehouse-connection UUID — NOT a short prefix)")
-        if missing:
-            sys.exit("FATAL: missing env: " + ", ".join(missing))
     TOTAL = 6
 
     # ── Phase 1 — Parse (the normalized dashboard contract) ──────────────────
@@ -574,6 +683,56 @@ def main():
     measures, _dims, view_pk, _formats, _yesno, _dim_groups, _labels = build_field_index(view_files, _aliases)
     print(f"   '{dash['title']}': {len(dash['elements'])} tile(s), {len(dash['filters'])} filter(s), "
           f"explore '{explore}' · {len(view_files)} view file(s), {len(measures)} measure(s) · workdir {wd}")
+
+    # ── Phase 1b — readiness audit (HARD pre-POST gate) ──────────────────────
+    # This runs immediately after source parsing/LookML discovery and before
+    # credentials are minted, a folder is created, or any Sigma object is
+    # posted. The audit uses the same vendored converter as Phase 3 and always
+    # persists the three source-accounting artifacts. A blocked audit has its
+    # own exit so callers can distinguish unsupported/omitted LookML from RLS,
+    # parity, and infrastructure failures.
+    print("\n── Phase 1b · LookML readiness (pre-POST hard gate) ──")
+    readiness_path = os.path.join(wd, "lookml-readiness.json")
+    field_census_path = os.path.join(wd, "lookml-field-census.json")
+    formula_mapping_path = os.path.join(wd, "formula-mapping.json")
+    readiness_cmd = [
+        "node", os.path.join(HERE, "audit-lookml-readiness.mjs"),
+        "--lookml-dir", lookml_dir,
+        "--out", readiness_path,
+        "--field-census", field_census_path,
+        "--formula-mapping", formula_mapping_path,
+        "--dashboard-contract", contract_path,
+    ]
+    readiness_explores = sorted(set([e for e in explores if e] +
+                                    ([explore] if explore else [])))
+    for target_explore in readiness_explores:
+        readiness_cmd += ["--explore", target_explore]
+    readiness_rc, _ = run(readiness_cmd, check=False)
+    readiness = {}
+    try:
+        readiness = json.load(open(readiness_path))
+    except Exception:
+        pass
+    readiness_status = str(readiness.get("readiness") or "").lower()
+    if readiness_rc == 1 or readiness_status == "blocked":
+        print("   ⛔ readiness BLOCKED — unsupported, unresolved, or omitted LookML was found.")
+        print(f"   Review {readiness_path}, {field_census_path}, and {formula_mapping_path}.")
+        print("   Nothing was posted to Sigma.")
+        return READINESS_BLOCKED_EXIT
+    if readiness_rc != 0 or readiness_status not in ("clean", "caveat"):
+        sys.exit(f"FATAL: LookML readiness audit failed ({readiness_rc}); nothing was posted")
+    print(f"   readiness {readiness_status.upper()} · "
+          f"{readiness.get('summary', {}).get('fields', 0)} field(s), "
+          f"{readiness.get('summary', {}).get('omitted', 0)} omitted")
+    SIGMA_POSTS_ALLOWED = True
+
+    ensure_sigma_env(wd)
+    if not a.dry_run:
+        missing = [v for v in ("SIGMA_BASE_URL", "SIGMA_API_TOKEN") if not os.environ.get(v)]
+        if not a.reuse_dm and not os.environ.get("SIGMA_CONNECTION_ID"):
+            missing.append("SIGMA_CONNECTION_ID (full warehouse-connection UUID — NOT a short prefix)")
+        if missing:
+            sys.exit("FATAL: missing env: " + ", ".join(missing))
 
     # ── --auto-source-swap-to: ask Looker what DB.SCHEMA this explore's connection
     # targets (the FROM) and build the swap to the requested TARGET. Removes the
@@ -867,6 +1026,10 @@ console.error('stats:', JSON.stringify(res.stats));
         dm = m.group(1)
     import yaml
     dmspec = yaml.safe_load(sigma("GET", f"/v2/dataModels/{dm}/spec"))
+    dm_readback_path = os.path.join(wd, "dm-readback.json")
+    with open(dm_readback_path, "w") as handle:
+        json.dump(dmspec, handle, indent=2)
+        handle.write("\n")
     els = [e for pg in dmspec.get("pages", []) for e in (pg.get("elements") or [])]
     denorm = next((e for e in els if (e.get("name") or "").endswith(" View")), None) \
         or max(els, key=lambda e: len(e.get("columns") or []))
@@ -1052,7 +1215,7 @@ console.error('stats:', JSON.stringify(res.stats));
         gid = lambda c: "errcol:%s/%s" % (c.get("elementId"), c.get("label"))
         gap_ids = list(dict.fromkeys(gid(c) for c in errs))
         bk = scout_gate.classify(wd, gap_ids)
-        if bk["unscouted"] and not args.yes:
+        if bk["unscouted"] and not a.yes:
             print("\n==================== GAP-SCOUT REQUIRED ====================")
             print("%d of %d ERROR-typed column(s) have NOT been scouted — the gap-scout must"
                   % (len(bk["unscouted"]), len(gap_ids)))
@@ -1076,6 +1239,17 @@ console.error('stats:', JSON.stringify(res.stats));
                 scout_gate.record(wd, i, "errcol", "accepted")
         else:
             print("   gap-scout: all %d error column(s) accounted for (validated or escalated)" % len(gap_ids))
+
+    # Preliminary object accounting runs as soon as the workbook build/readback
+    # is available. It is refreshed after parity and the hard gate because
+    # terminal dispositions and verification evidence can change there.
+    print("\n── Phase 4d · Preliminary source-object accounting ──")
+    preliminary_accounting_rc = run_looker_accounting(
+        wd, contract_path, wb_spec_path, "preliminary"
+    )
+    if preliminary_accounting_rc != 0:
+        print(f"   ⚠ preliminary accounting failed (exit {preliminary_accounting_rc}); "
+              "the final refresh remains mandatory")
 
     # ── Phase 4c — Visual QA: render each content page to a FULL-PAGE PNG ─────
     # so the layout (applied inline by build_workbook.py and POSTed above) can be
@@ -1256,6 +1430,11 @@ console.error('stats:', JSON.stringify(res.stats));
     json.dump(actuals, open(os.path.join(wd, "parity-actuals.json"), "w"), indent=2)
     rc, _ = run(["ruby", os.path.join(HERE, "phase6-parity-looker.rb"),
                  "--workdir", wd, "--finalize"], check=False)
+    # Refresh canonical accounting after parity has supplied terminal evidence
+    # and before the hard gate derives/stamps its degradation verdict.
+    pre_gate_accounting_rc = run_looker_accounting(
+        wd, contract_path, wb_spec_path, "final"
+    )
     gate_cmd = ["ruby", os.path.join(HERE, "assert-phase6-ran.rb"),
                 "--workdir", wd, "--workbook-id", wb,
                 # Opt into gate 7b (runtime control flip test). Gate 7's static
@@ -1318,13 +1497,46 @@ console.error('stats:', JSON.stringify(res.stats));
                 print("     multiplier, so this is likely a REAL conversion error on the outlier")
                 print("     chart(s), not just a data-volume difference. Investigate those tiles.")
 
+    # ── Final accounting + completion report (all terminal paths) ─────────────
+    # The report is deliberately generated after the parity/assert gate on both
+    # green and non-green runs. A RED report or a failed accounting/report
+    # command is itself migration failure, even when the legacy gate was green.
+    print("\n── Completion accounting + migration report ──")
+    final_accounting_rc = run_looker_accounting(
+        wd, contract_path, wb_spec_path, "final"
+    )
+    ledger_rc = refresh_degradation_ledger(wd)
+    render_health = derive_render_health(wd, render_png)
+    report_rc, _ = run(
+        ["ruby", os.path.join(HERE, "build-migration-report.rb"),
+         "--workdir", wd,
+         "--inventory", os.path.join(wd, "source-object-census.json")],
+        check=False,
+    )
+    report = {}
+    try:
+        report = json.load(open(os.path.join(wd, "migration-result.json")))
+    except Exception:
+        pass
+    report_verdict = str(report.get("verdict") or "MISSING").upper()
+    print(f"   migration report: {report_verdict} "
+          f"({report.get('summary', {}).get('accounted', 0)}/"
+          f"{report.get('summary', {}).get('total', 0)} accounted)")
+
     # ── Summary ────────────────────────────────────────────────────────────────
-    green = grc == 0 and not errs
+    green = (grc == 0 and not errs and pre_gate_accounting_rc == 0 and
+             final_accounting_rc == 0 and ledger_rc == 0 and
+             report_rc == 0 and report_verdict != "RED" and
+             str(render_health.get("status") or "").upper() == "PASS")
     print("\n================ RESULT ================")
     print(f"dataModelId : {dm}{'  (REUSED)' if a.reuse_dm else ''}")
     print(f"workbookId  : {wb}  '{wspec['name']}'")
     print(f"parity      : {summary['charts_pass']}/{summary['charts_total']} {summary['status']} · "
           f"hard gate {'PASS' if grc == 0 else f'FAIL (exit {grc})'}")
+    print(f"accounting  : {'PASS' if final_accounting_rc == 0 else f'FAIL (exit {final_accounting_rc})'}")
+    print(f"ledger      : {'PASS' if ledger_rc == 0 else f'FAIL (exit {ledger_rc})'}")
+    print(f"report      : {report_verdict}"
+          + ("" if report_rc == 0 else f" · FAIL (exit {report_rc})"))
     if findings:
         print(f"RLS         : {len(findings)} finding(s) NOT ported (recorded in rls-findings.json)")
     print(f"PARITY      : {'GREEN' if green else 'RED'}  ·  wall-clock {time.time() - T0:.1f}s")
