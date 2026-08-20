@@ -64,6 +64,9 @@ OptionParser.new do |p|
   p.on('--out-dir DIR')         { |v| opts[:outdir] = v }
   p.on('--extract-mode')        { opts[:extract] = true }
   p.on('--extract-tol F', Float){ |v| opts[:tol] = v }
+  p.on('--parity-only', 'Unit/debug isolation: write parity-final.json without running the completion report finalizer') do
+    opts[:parity_only] = true
+  end
   # bead fmte — freshness.json from pbi-freshness.py. When present, the
   # SOURCE-FRESHNESS banner leads both passes, and finalize classifies each
   # chart MATCH / STALE-EXPLAINED / DIVERGENT. STALE is reported honestly but
@@ -312,7 +315,19 @@ if opts[:finalize]
   File.write(File.join(opts[:outdir], 'parity-final.json'), JSON.pretty_generate(summary))
   warn "[phase6-pbi] wrote parity-final.json (status=#{status} " \
        "#{passed.size} match / #{stale_expl} stale-explained / #{divergent} divergent of #{total})"
-  exit(status == 'PASS' ? 0 : 2)
+  report_ok = true
+  unless opts[:parity_only]
+    finalizer = File.join(HERE, 'finalize-powerbi-report.rb')
+    report_out, report_err, report_status = Open3.capture3(
+      'ruby', finalizer, '--workdir', opts[:outdir]
+    )
+    puts report_out unless report_out.empty?
+    warn report_err unless report_err.empty?
+    report_ok = report_status.success?
+    warn '[phase6-pbi] strict parity passed but the final accounting/report is RED' if
+      status == 'PASS' && !report_ok
+  end
+  exit(status == 'PASS' && report_ok ? 0 : 2)
 end
 
 abort('specify --emit-dax or --finalize')

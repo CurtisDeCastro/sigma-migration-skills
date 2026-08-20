@@ -6,7 +6,7 @@ Every documented source construct maps to a real, current Sigma target or a loud
 
 **`sigma_verified` legend:** ✅ y = the mapped Sigma target resolved at **query time** in a live migration (no `type=error` column) on the date shown; 🟡 n = target is documented but not yet query-verified.
 
-**Coverage:** 49 documented constructs across 5 dimensions; 3 live-verified.
+**Coverage:** 74 documented constructs across 6 dimensions; 3 live-verified.
 
 ## Visualization / chart kind
 
@@ -137,6 +137,53 @@ Authoritative source: <https://learn.microsoft.com/en-us/power-bi/developer/visu
 | | | | | _Grouped into one row because the guidance and the decision are identical for all of them. Keep box plots on this fallback even if another Sigma surface names box-chart; the workbook code representation does not publish it yet._ |
 | `infographic-cardbrowser` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA104381044) | `kpi` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
 | `calendar-heatmap` | [doc](https://appsource.microsoft.com/en-us/product/power-bi-visuals/WA200001930) | `pivot-table` | 🟡 n | warn+record-unsupported (NEVER coerce a custom visual to a chart) |
+
+## dax-function
+
+_Power BI DAX function/pattern coverage grounded in converter/powerbi.mjs and the fixtures/MANIFEST.md oracle. `support_status` describes the converter today, not theoretical Sigma capability: supported rows are emitted only for the documented shape; needs-review rows have a known Sigma path but require a model/grouping decision or a manual rewrite; unsupported rows have no automatic converter path. `support_evidence` is dated so a row cannot silently graduate. `converter_evidence` names the exact source symbol and anchor, while `fixture_oracle` names the manifest row that supplies expected behavior._
+
+Authoritative source: <https://learn.microsoft.com/en-us/dax/dax-function-reference>
+
+| construct | doc ref | Sigma target | sigma_verified | on-unmapped |
+|---|---|---|---|---|
+| `SUM` | [doc](https://learn.microsoft.com/en-us/dax/sum-function-dax) | `Sum(...)` | 🟡 n | warn+drop |
+| | | | | _Direct aggregate rewrite; table-qualified column references are subsequently normalized._ |
+| `AVERAGE` | [doc](https://learn.microsoft.com/en-us/dax/average-function-dax) | `Avg(...)` | 🟡 n | warn+drop |
+| `MIN` | [doc](https://learn.microsoft.com/en-us/dax/min-function-dax) | `Min(...)` | 🟡 n | warn+drop |
+| `MAX` | [doc](https://learn.microsoft.com/en-us/dax/max-function-dax) | `Max(...)` | 🟡 n | warn+drop |
+| `COUNT` | [doc](https://learn.microsoft.com/en-us/dax/count-function-dax) | `Count(...)` | 🟡 n | warn+drop |
+| | | | | _Count(column) retains Sigma null-skipping semantics._ |
+| `CALCULATE (conditional aggregate)` | [doc](https://learn.microsoft.com/en-us/dax/calculate-function-dax) | `SumIf / AvgIf / MinIf / MaxIf / CountIf / CountDistinct(If(...))` | 🟡 n | warn+drop the measure |
+| | | | | _Supported only for simple aggregate/composite-aggregate bodies with row predicates. Multiple predicates are ANDed. Filter-context modifiers and predicates that compare to measures are rejected._ |
+| `DIVIDE` | [doc](https://learn.microsoft.com/en-us/dax/divide-function-dax) | `numerator / NullIf(denominator, 0), or If(denominator = 0, alternate, numerator / denominator)` | 🟡 n | warn+drop |
+| | | | | _Formula rewrite is mechanical only when both dependencies are hostable on the same Sigma element; cross-table ratios still require a common-grain redesign._ |
+| `SUMX` | [doc](https://learn.microsoft.com/en-us/dax/sumx-function-dax) | `Sum(row_expression)` | 🟡 n | warn+drop |
+| | | | | _Nested/derived-table iterators do not graduate through this row; they remain needs-review._ |
+| `AVERAGEX` | [doc](https://learn.microsoft.com/en-us/dax/averagex-function-dax) | `Avg(row_expression)` | 🟡 n | warn+drop |
+| `MINX` | [doc](https://learn.microsoft.com/en-us/dax/minx-function-dax) | `Min(row_expression)` | 🟡 n | warn+drop |
+| `MAXX` | [doc](https://learn.microsoft.com/en-us/dax/maxx-function-dax) | `Max(row_expression)` | 🟡 n | warn+drop |
+| `RELATED` | [doc](https://learn.microsoft.com/en-us/dax/related-function-dax) | `cross-element column reference on a derived <Table> View` | 🟡 n | warn+drop the calculated column |
+| | | | | _Requires a model relationship that the converter can materialize on the derived view._ |
+| `LOOKUPVALUE` | [doc](https://learn.microsoft.com/en-us/dax/lookupvalue-function-dax) | `Lookup(result, local_key, lookup_key), or an explicit relationship/self-join` | 🟡 n | warn+manual-translate; never pass raw LOOKUPVALUE through |
+| | | | | _Self-lookups require an aliased element or self-join and are structural, not formula-only._ |
+| `DISTINCTCOUNT` | [doc](https://learn.microsoft.com/en-us/dax/distinctcount-function-dax) | `CountDistinct(...)` | 🟡 n | warn+drop |
+| `COUNTROWS` | [doc](https://learn.microsoft.com/en-us/dax/countrows-function-dax) | `Count()` | 🟡 n | warn+drop |
+| `SAMEPERIODLASTYEAR` | [doc](https://learn.microsoft.com/en-us/dax/sameperiodlastyear-function-dax) | `grouped DateLookback(value, period, 1, "year") element` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
+| | | | | _Support is structural and requires a discoverable fact value column plus date column on a derived view._ |
+| `DATEADD (CALCULATE time shift)` | [doc](https://learn.microsoft.com/en-us/dax/dateadd-function-dax) | `grouped DateLookback(value, period, amount, unit) element` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
+| | | | | _This row covers DATEADD as a DAX filter-context time shift, not ordinary scalar date arithmetic._ |
+| `TOTALYTD` | [doc](https://learn.microsoft.com/en-us/dax/totalytd-function-dax) | `two-level grouped element with CumulativeSum(value), reset by year` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
+| | | | | _There is no scalar YTD formula equivalent; support means structural emission._ |
+| `DATESYTD` | [doc](https://learn.microsoft.com/en-us/dax/datesytd-function-dax) | `two-level grouped element with CumulativeSum(value), reset by year` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
+| `YoY computed chain` | [doc](https://learn.microsoft.com/en-us/power-bi/transform-model/quick-measures) | `(current - prior) / prior on the emitted prior-period element` | 🟡 n | warn+drop dangling source metric; use the emitted grouped chain |
+| | | | | _The converter realizes the dependency chain structurally. It does not claim every arbitrary measure-on-measure YoY expression is mechanical._ |
+| `RANKX` | [doc](https://learn.microsoft.com/en-us/dax/rankx-function-dax) | — (no Sigma equivalent) | 🟡 n | warn+drop metric+record-needs-review |
+| | | | | _No scalar/portable equivalent. A grouped workbook implementation is possible but context-specific._ |
+| `ALLEXCEPT` | [doc](https://learn.microsoft.com/en-us/dax/allexcept-function-dax) | — (no Sigma equivalent) | 🟡 n | warn+drop metric+record-needs-review |
+| `SUMMARIZE` | [doc](https://learn.microsoft.com/en-us/dax/summarize-function-dax) | — (no Sigma equivalent) | 🟡 n | emit explicit non-runnable placeholder+record-unsupported |
+| `USERELATIONSHIP` | [doc](https://learn.microsoft.com/en-us/dax/userelationship-function-dax) | `alternate relationship join path plus explicit grouping on that path` | 🟡 n | warn+record-needs-review; never ignore an unmatched relationship silently |
+| | | | | _An already-active relationship is stripped as a no-op. An inactive match is materialized, but formula-time relationship swapping has no scalar equivalent and the grouping path must be reviewed._ |
+| `PATH family (PATH / PATHITEM / PATHCONTAINS)` | [doc](https://learn.microsoft.com/en-us/dax/parent-and-child-functions-dax) | — (no Sigma equivalent) | 🟡 n | warn+drop+record-unsupported |
 
 ---
 _Compositional constructs that do not serialize to a flat table (Set Analysis, filtered `*If`, ratio measures, TO_CHAR/Excel mask parsers, count-on-joined-view) stay as cited predicates in the classifier; this matrix covers the enumerable maps._
