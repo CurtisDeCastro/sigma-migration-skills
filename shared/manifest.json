@@ -1188,7 +1188,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/cleanup-orphan-workbooks.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/cleanup-orphan-workbooks.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/cleanup-orphan-workbooks.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/cleanup-orphan-workbooks.rb"
       ]
     },
     {

@@ -66,7 +66,8 @@ qlik_hard_gate_closure = {
   'shared/lib/flip_gate.rb'                 => "#{qlik_scripts}/lib/flip_gate.rb",
   'shared/scripts/record-visual-check.rb'   => "#{qlik_scripts}/record-visual-check.rb",
   'shared/lib/cli_encoding.rb'              => "#{qlik_scripts}/lib/cli_encoding.rb",
-  'shared/lib/blind_grade.rb'               => "#{qlik_scripts}/lib/blind_grade.rb"
+  'shared/lib/blind_grade.rb'               => "#{qlik_scripts}/lib/blind_grade.rb",
+  'shared/scripts/cleanup-orphan-workbooks.rb' => "#{qlik_scripts}/cleanup-orphan-workbooks.rb"
 }.freeze
 missing_qlik_closure = qlik_hard_gate_closure.reject { |canonical, target| ENTRIES.fetch(canonical, []).include?(target) }
 ok('Qlik assert-phase6 hard gate is manifest-registered with its full shared closure') do
