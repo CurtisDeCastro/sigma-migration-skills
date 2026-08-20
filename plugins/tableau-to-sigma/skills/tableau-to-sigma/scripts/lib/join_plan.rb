@@ -232,7 +232,19 @@ module JoinPlan
                   .map { |op| op.to_s[/\A\[([^\]]+)\]\z/, 1] }.compact
         pairs << { l: sides[0], r: sides[1] } if sides.size == 2
       end
-      dm_rel      = dm_index[[left, right]]
+      dm_rel = dm_index[[left, right]]
+      reverse_rel = dm_rel.nil? ? dm_index[[right, left]] : nil
+      if reverse_rel
+        # The converter may reverse Tableau's authoring-order endpoints when
+        # database-backed cardinality proves the first endpoint is the unique
+        # target (child fact -> parent dimension in Sigma). Gate 16 must probe
+        # the ACTUAL DM target, not the stale XML order, or it blocks a correct
+        # relationship by repeatedly proving the child is non-unique.
+        left, right = right, left
+        lobj, robj = robj, lobj
+        pairs = pairs.map { |pair| { l: pair[:r], r: pair[:l] } }
+        dm_rel = reverse_rel
+      end
       right_table = vc_physical_fqn(right, db, schema) || twb_table_fqn(doc, robj[:rel])
       if pairs.empty?
         # No physical key survives the .twb's own <expression> scan — either
