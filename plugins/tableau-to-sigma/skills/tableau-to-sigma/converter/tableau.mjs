@@ -5261,6 +5261,8 @@ function convertTableauToSigma(xmlContent, options = {}) {
               keys: inferredKeys,
               uniqueA: /^true$/i.test(String(attr(firstEp, "unique-key") || "")),
               uniqueB: /^true$/i.test(String(attr(secondEp, "unique-key") || "")),
+              dbUniqueA: /^true$/i.test(String(attr(firstEp, "is-db-set-unique-key") || "")),
+              dbUniqueB: /^true$/i.test(String(attr(secondEp, "is-db-set-unique-key") || "")),
               relExprText: JSON.stringify(rel.expression || ""),
               derivedVia: "name-inference",
               ...droppedConditions > 0 ? { droppedConditions } : {}
@@ -5410,6 +5412,8 @@ function convertTableauToSigma(xmlContent, options = {}) {
             keys,
             uniqueA: /^true$/i.test(String(attr(firstEp, "unique-key") || "")),
             uniqueB: /^true$/i.test(String(attr(secondEp, "unique-key") || "")),
+            dbUniqueA: /^true$/i.test(String(attr(firstEp, "is-db-set-unique-key") || "")),
+            dbUniqueB: /^true$/i.test(String(attr(secondEp, "is-db-set-unique-key") || "")),
             relExprText: JSON.stringify(rel.expression || ""),
             derivedVia: "serialized",
             ...skippedComputed > 0 ? { droppedConditions: skippedComputed } : {}
@@ -5546,12 +5550,23 @@ function convertTableauToSigma(xmlContent, options = {}) {
             }
           }
           const hintContradicted = [];
+          const hintOriented = [];
           for (const e of relEdges) {
             const da = dist.get(e.a) ?? 0;
             const db = dist.get(e.b) ?? 0;
             let carrier = e.a, target = e.b, carrierUnique = e.uniqueA, targetUnique = e.uniqueB;
             let keys = e.keys.map((k) => ({ sourceColumnId: k.aColId, targetColumnId: k.bColId }));
-            const flip = db < da || db === da && (visitOrder.get(e.b) ?? 0) < (visitOrder.get(e.a) ?? 0);
+            // Sigma relationships are many -> one lookups. Tableau serializes
+            // decisive endpoint cardinality as unique-key=true together with
+            // is-db-set-unique-key=true; when exactly one endpoint has that
+            // database-backed evidence, it MUST be the target even
+            // when the relationship-degree election picked the unique hub as
+            // the workbook's default/fact element. Ignoring this evidence
+            // produces a valid-looking one -> many Lookup that returns one
+            // arbitrary child row and silently undercounts child-fact measures.
+            // Both/neither unique remains on the evidence-ranked BFS path.
+            const uniqueHintDecisive = e.dbUniqueA !== e.dbUniqueB;
+            const flip = uniqueHintDecisive ? e.dbUniqueA : db < da || db === da && (visitOrder.get(e.b) ?? 0) < (visitOrder.get(e.a) ?? 0);
             if (flip) {
               carrier = e.b;
               target = e.a;
@@ -5559,6 +5574,8 @@ function convertTableauToSigma(xmlContent, options = {}) {
               targetUnique = e.uniqueA;
               keys = e.keys.map((k) => ({ sourceColumnId: k.bColId, targetColumnId: k.aColId }));
             }
+            if (uniqueHintDecisive)
+              hintOriented.push(`${carrier.cleanName}\u2192${target.cleanName}`);
             if (carrierUnique && !targetUnique)
               hintContradicted.push(`${carrier.cleanName}\u2192${target.cleanName}`);
             if (!carrier.element.relationships)
@@ -5579,6 +5596,9 @@ function convertTableauToSigma(xmlContent, options = {}) {
           }
           if (hintContradicted.length > 0) {
             warnings.push(`\u26A0 Tableau performance-option hints (unique-key) mark the SOURCE side unique on ${hintContradicted.length} oriented edge(s): ${hintContradicted.join(", ")}. As oriented these would be one-to-many, which a Sigma relationship cannot express (many-to-one left join into a unique target) \u2014 the hints are often db-derived or stale, so VERIFY each edge's direction and target uniqueness; model a genuinely one-to-many edge as a join element instead.`);
+          }
+          if (hintOriented.length > 0) {
+            warnings.push(`\u2139 Tableau database-backed unique-key endpoint hints oriented ${hintOriented.length} relationship(s) many\u2192one for Sigma Lookup semantics: ${hintOriented.join(", ")}. The join-cardinality probe still verifies target uniqueness before GREEN.`);
           }
         }
         electedFactEl = electedEntry ? electedEntry.element : null;

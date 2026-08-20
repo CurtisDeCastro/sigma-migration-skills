@@ -81,6 +81,7 @@ OptionParser.new do |p|
   p.on('--layout PATH')             { |v| opts[:layout] = v }
   p.on('--meta PATH', 'parse-twb-layout sister meta file (worksheets+shared_filters)') { |v| opts[:meta] = v }
   p.on('--master-map PATH')         { |v| opts[:mmap] = v }
+  p.on('--grain-plan PATH', 'Single-datasource logical-table grain plan (worksheet -> DM source routing)') { |v| opts[:grain_plan] = v }
   p.on('--master-element-id ID')    { |v| opts[:master_id] = v }
   p.on('--controls PATH', 'JSON file: array of control specs to emit alongside the chart elements') { |v| opts[:controls] = v }
   p.on('--title STR',     'Dashboard title text element to emit (e.g., "Orders Dashboard")')         { |v| opts[:title] = v }
@@ -1188,6 +1189,36 @@ gw     = JSON.parse(File.read(File.join(opts[:tab], 'get-workbook.json')))
 views  = gw.dig('views', 'view') || []
 views  = [views] unless views.is_a?(Array)
 view_by_name = views.each_with_object({}) { |v, h| h[v['name']] = v }
+
+# Single-datasource logical-table grain routing. The orchestrator provides the
+# converter-derived source registry; CSV headers identify the worksheet grain
+# without guessing. Tableau's generated "Count of <logical table>" header is
+# authoritative because it names the table whose row grain Tableau counted.
+grain_plan = opts[:grain_plan] && File.exist?(opts[:grain_plan]) ?
+               (JSON.parse(File.read(opts[:grain_plan])) rescue nil) : nil
+if grain_plan && grain_plan['datasources'].is_a?(Array)
+  grain_plan['datasources'].each { |grain| grain['worksheets'] = [] }
+  views.each do |view|
+    csv_path = File.join(opts[:tab], 'views', "#{view['id']}.csv")
+    next unless File.exist?(csv_path)
+    headers = begin
+      CSV.open(csv_path, 'r', headers: true, encoding: 'bom|utf-8') { |csv| csv.first&.headers || [] }
+    rescue StandardError
+      []
+    end
+    hits = grain_plan['datasources'].select do |grain|
+      pattern = grain['count_pattern']
+      pattern && headers.any? { |header| Regexp.new(pattern).match?(header.to_s.strip) }
+    end
+    if hits.one?
+      hits.first['worksheets'] << view['name']
+    elsif hits.size > 1
+      warn "multi-grain: worksheet '#{view['name']}' has generated table-count headers for " \
+           "#{hits.map { |grain| grain['table'] }.join(', ')} — routing is ambiguous; left on default master"
+    end
+  end
+  File.write(opts[:grain_plan], JSON.pretty_generate(grain_plan))
+end
 
 # Translate a Tableau format-value string into a Sigma format hash. PR-12:
 # delegates to the shared lib/format_map.rb (the parser's translate_format
@@ -8327,11 +8358,12 @@ def deep_gsub!(node, from, to)
   node
 end
 
-def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {}, cbg: {}, mmap: {})
+def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls: [], id2name: {}, cbg: {}, mmap: {}, mode: 'multi-DS')
   routed = {}
   return routed unless plan && plan['datasources'].is_a?(Array) && plan['datasources'].size > 1
   norm = ->(s) { s.to_s.downcase.gsub(/[^a-z0-9]/, '') }
-  dominant = plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
+  dominant = plan['datasources'].find { |d| d['default'] } ||
+             plan['datasources'].max_by { |d| (d['worksheets'] || []).size }
   ws_to_ds = {}
   plan['datasources'].each do |d|
     next if d == dominant
@@ -8432,23 +8464,23 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
             next unless cons.dig('source', 'elementId') == el['id']
             splice_strings.call(cons, wrap_c, "[#{el['name']}/#{cn}]", agg_c)
           end
-          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed " \
+          warnings << "NOTE #{mode}: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed " \
                       "into its consumer chart formulas as #{agg_c[0, 110]} (helper exposes the base columns)"
         else
           # el is a CHART: splice the decomposition at viz level; its
           # [Master/…] base refs are prefix-rewritten with everything below.
           splice_strings.call(el, agg_wrap, "[Master/#{cn}]", agg_t)
-          warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed at " \
+          warnings << "NOTE #{mode}: '#{el['_worksheet']}' calc '#{cn}' is an aggregated calc — decomposed at " \
                       "viz level over sub-master columns: #{agg_t.gsub('[Master/', "[#{safe_cap}/")[0, 110]}"
         end
       elsif row_t
         sm['columns'] << { 'id' => "#{sm['id']}-c#{sm['columns'].size}", 'name' => cn,
                            'formula' => row_t.gsub('[Master/', "[#{safe_cap}/") }
-        warnings << "NOTE multi-DS: '#{el['_worksheet']}' calc '#{cn}' emitted as a DERIVED column on " \
+        warnings << "NOTE #{mode}: '#{el['_worksheet']}' calc '#{cn}' emitted as a DERIVED column on " \
                     "sub-master '#{sm['name']}': #{sm['columns'].last['formula'][0, 110]}"
       else
         manual_calcs << cn
-        warnings << "multi-DS STAYS-MANUAL: '#{el['_worksheet']}' references calc '#{cn}' on datasource " \
+        warnings << "#{mode} STAYS-MANUAL: '#{el['_worksheet']}' references calc '#{cn}' on datasource " \
                     "'#{caption}' whose formula could not be auto-translated " \
                     "(#{f.to_s.gsub(/\s+/, ' ')[0, 90]}) — no sub-master column emitted; the pre-POST ref " \
                     'gate will name the broken ref; author it on the sub-master by hand (--master-col)'
@@ -8468,7 +8500,7 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
     deep_gsub!(el, '[Master/', "[Master (#{safe_cap})/")
     el['source'] = { 'kind' => 'table', 'elementId' => sm['id'] }
     routed[el['_worksheet']] = caption
-    warnings << "NOTE multi-DS: '#{el['_worksheet']}' auto-routed to datasource '#{caption}' " \
+    warnings << "NOTE #{mode}: '#{el['_worksheet']}' auto-routed to source '#{caption}' " \
                 "(sub-master #{sm['id']}, #{cols.size} column(s))"
   end
   # A filter on the master does NOT propagate to sub-master-sourced charts
@@ -8488,7 +8520,7 @@ def route_multi_ds!(elements, data_elements, plan, master_id, warnings, controls
           ctl['filters'] << { 'source' => { 'kind' => 'table', 'elementId' => sm['id'] },
                               'columnId' => sm_cols[cname] }
         else
-          warnings << "multi-DS: control '#{ctl['name']}' targets master column '#{cname}' which " \
+          warnings << "#{mode}: control '#{ctl['name']}' targets master column '#{cname}' which " \
                       "'#{sm['name']}' does not expose — routed charts on that datasource are NOT " \
                       'filtered by it (named residue; verify the outlier datasource carries the column)'
         end
@@ -8513,6 +8545,19 @@ begin
   end
 rescue => e
   warnings << "multi-DS routing error (charts left on the master + WARN wall): #{e.message}"
+end
+$grain_routed = {}
+begin
+  if grain_plan
+    id2name = mmap.values.each_with_object({}) { |v, h| h[v['id']] = v['name'] if v['id'] && v['name'] }
+    $grain_routed = route_multi_ds!(
+      elements, data_elements, grain_plan, opts[:master_id], warnings,
+      controls: param_controls + auto_controls + extras, id2name: id2name,
+      cbg: meta['columns_by_guid'] || {}, mmap: mmap, mode: 'multi-grain'
+    )
+  end
+rescue => e
+  warnings << "multi-grain routing error (charts left on the default master + WARN wall): #{e.message}"
 end
 # routing tags on hidden helpers are internal — never emit them in the spec
 data_elements.each { |e| e.delete('_worksheet') }
