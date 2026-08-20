@@ -785,9 +785,16 @@ begin
 
   if options[:check]
     stale = []
-    [[options[:json_out], json], [options[:markdown], markdown]].each do |path, expected|
-      stale << path unless File.file?(path) && File.binread(path) == expected
+    json_current = begin
+      JSON.parse(File.read(options[:json_out])) if File.file?(options[:json_out])
+    rescue JSON::ParserError
+      nil
     end
+    stale << options[:json_out] unless json_current == document
+
+    markdown_current = File.file?(options[:markdown]) ? File.binread(options[:markdown]) : nil
+    markdown_current = markdown_current.gsub(/\r\n?/, "\n") if markdown_current
+    stale << options[:markdown] unless markdown_current == markdown
     unless stale.empty?
       warn "migration report check failed; stale or missing output(s): #{stale.join(', ')}"
       exit 1
