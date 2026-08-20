@@ -273,6 +273,39 @@ check(Array(cov5['unresolved']).none? { |u| %w[Coordinate\ Map Sized\ Coordinate
 check(cov5.dig('summary', 'sourceBindings') == 7 && cov5.dig('summary', 'resolvedBindings') == 7,
       'all seven source coordinate/size/series bindings are honestly resolved', fails)
 
+# =============================================================================
+# Scenario 6: Azure Map without coordinates/geocodable metadata downgrades to a
+# DATA-PRESERVING bar. Series becomes the category and Size becomes Y; the
+# consumed Series must not also emit a color legend/control.
+# =============================================================================
+fallback_signals = {
+  'source' => 'powerbi', 'pages' => [{
+    'page_id' => 'p0', 'page_title' => 'Fallback Map', 'page_w' => 1280, 'page_h' => 720,
+    'interactions' => [], 'visuals' => [
+      azure_visual.call('map-fallback', 'Group Magnitude', {
+                          'Series' => ['G.Group'], 'Size' => ['G.Metric']
+                        })
+    ]
+  }]
+}
+out6, cov6 = run_builder(sig: fallback_signals, mmap: geo_mmap)
+els6 = out6.dig('document', 'elements')
+fallback = els6.find { |e| e['name'] == 'Group Magnitude' }
+check(fallback && fallback['kind'] == 'bar-chart',
+      'coordinate-less Azure Map uses the documented bar fallback', fails)
+fallback_y = fallback && fallback['columns'].find { |c| Array(fallback.dig('yAxis', 'columnIds')).include?(c['id']) }
+check(fallback_y && fallback_y['formula'] == 'Sum([master-geo/Metric])',
+      "Azure Size survives downgrade as the bar measure (got #{fallback_y && fallback_y['formula']})", fails)
+fallback_x = fallback && fallback['columns'].find { |c| c['id'] == fallback.dig('xAxis', 'columnId') }
+check(fallback_x && fallback_x['formula'] == '[master-geo/Group]' && !fallback.key?('color'),
+      'Azure Series is consumed as the bar category, not duplicated as color', fails)
+check(els6.none? { |e| e['kind'] == 'control' && e['controlType'] == 'legend' },
+      'no dependent legend control is emitted for the consumed Series role', fails)
+fallback_cov = Array(cov6['unresolved']).find { |u| u['visual'] == 'Group Magnitude' }
+check(fallback_cov && fallback_cov['severity'] == 'approximated' &&
+      Array(cov6['unresolved']).none? { |u| u['visual'] == 'Group Magnitude' && u['detail'].to_s.include?('no measure') },
+      'coverage records only the honest map→bar approximation, not a missing-measure defect', fails)
+
 puts
 puts(fails.empty? ? 'ALL PASS' : "#{fails.size} FAILURE(S)")
 fails.each { |f| puts "  - #{f}" }

@@ -1158,7 +1158,21 @@ def resolve_map_kind(rec, name)
                     action: 'Supply a region-typed column (country/state/county/zip/place) via --bim dataCategory, ' \
                             'or lat+long bindings, to render a real Sigma map — or accept the bar approximation.')
   series = (b['Series'] || b['Legend'] || []).first
-  b['Category'] = [series] if series  # old downgrade kept the legend as the bar category
+  # Native maps use Size for magnitude; the bar fallback reads Y/Values. Carry
+  # the same measure across the downgrade instead of emitting an empty yAxis.
+  if Array(b['Y']).empty? && Array(b['Values']).empty? && !Array(b['Size']).empty?
+    b['Y'] = Array(b.delete('Size')).compact
+  end
+  # A non-geocodable Location still makes a useful bar category.
+  b['Category'] = Array(b['Location']).compact if Array(b['Category']).empty? && !Array(b['Location']).empty?
+  if Array(b['Category']).empty? && series
+    # The old downgrade uses the legend/series as the bar category. Consume the
+    # role: leaving it behind colors by the same column and emits a redundant
+    # interactive legend control targeting a chart that may not be queryable.
+    b['Category'] = [series]
+    b.delete('Series')
+    b.delete('Legend')
+  end
   'bar-chart'
 end
 
@@ -1437,6 +1451,13 @@ def prepare_legend_control!(el, rec, fields, masters, master, legend_qr, target_
   # waterfall charts. Waterfall splitBy keeps its chart-local legend instead.
   return unless %w[bar-chart line-chart area-chart combo-chart scatter-chart
                    pie-chart donut-chart].include?(el['kind'])
+  # A cartesian target without a measure is not queryable and may be stripped
+  # during spec readback. Never emit a dependent control until the target has a
+  # real series; otherwise the control becomes a ghost/dead legend.
+  if %w[bar-chart line-chart area-chart combo-chart scatter-chart].include?(el['kind']) &&
+     Array(el.dig('yAxis', 'columnIds')).empty?
+    return
+  end
 
   # Pie/donut legends are presentation-first and already render in-panel in
   # Sigma. A separate legend control consumes chart canvas height and shrinks the

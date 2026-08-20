@@ -300,6 +300,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-intake.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-verify-warehouse.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-build-parity-plan.rb
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-phase6-parity-pbi.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-element-match.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-native-query.rb
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-composite-gate.rb
@@ -423,6 +424,7 @@ jobs:
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-extract-viz-signals.py
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-filters.py
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-viz-kind-parity.py
+            plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/test-pbi-fabric-resolve.py
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/tests/test-extract-model-pbix.py
             plugins/powerbi-to-sigma/skills/powerbi-to-sigma/tests/test-extract-report-classic.py
             shared/lib/test_plugin_embed.py
