@@ -427,6 +427,7 @@ jobs:
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grounding.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_metric_reference.py
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_build_looker_accounting.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_migrate_looker_terminal.py
             plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_migrate_looker_post_workbook_coderep.py
             plugins/qlik-to-sigma/skills/qlik-to-sigma/tests/test_grounding.py
             plugins/qlik-to-sigma/skills/qlik-to-sigma/tests/test_completion_contract.py
