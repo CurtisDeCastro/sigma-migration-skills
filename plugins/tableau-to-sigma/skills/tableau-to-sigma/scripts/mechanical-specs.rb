@@ -260,6 +260,69 @@ module MechanicalSpecs
     (facts.empty? ? base : facts).max_by { |e| (e['columns'] || []).size }
   end
 
+  # Build the single-datasource logical-table grain registry consumed by the
+  # workbook router. Tableau relationships preserve each logical table's grain;
+  # one dashboard can therefore contain a child-fact chart (Absence Records)
+  # beside a parent-grain chart (Employees). A single hidden workbook master
+  # cannot represent both without Lookup undercount or fan-out.
+  #
+  # The converter emits a derived "<Table> View" for every relationship carrier
+  # (the many side) and leaves a target-only unique table as its base element.
+  # This registry names the correct queryable DM source per physical table and a
+  # relationship-key column that can represent Tableau's generated
+  # "Count of <logical table>" measure at that table's own row grain.
+  def object_grain_plan(model, default_element_name: nil)
+    els = all_elements(model)
+    by_id = els.each_with_object({}) { |e, h| h[e['id']] = e if e['id'] }
+    derived_by_base = els.select { |e| e.dig('source', 'kind') == 'table' && e.dig('source', 'elementId') }
+                         .each_with_object({}) { |e, h| h[e.dig('source', 'elementId')] = e }
+    incoming_keys = Hash.new { |h, k| h[k] = [] }
+    els.each do |carrier|
+      Array(carrier['relationships']).each do |rel|
+        Array(rel['keys']).each { |key| incoming_keys[rel['targetElementId']] << key['targetColumnId'] }
+      end
+    end
+
+    base_elements = els.select { |element| %w[warehouse-table sql].include?(element.dig('source', 'kind')) }
+                       .group_by { |element| [element.dig('source', 'kind'), Array(element.dig('source', 'path'))] }
+                       .values
+                       .map do |copies|
+      copies.max_by do |element|
+        participation = Array(element['relationships']).size + incoming_keys[element['id']].size
+        [participation, Array(element['columns']).size]
+      end
+    end
+
+    grains = base_elements.filter_map do |base|
+      table = Array(base.dig('source', 'path')).last.to_s
+      table = elem_name(base) if table.empty?
+      next if table.to_s.empty?
+
+      source = derived_by_base[base['id']] || base
+      key_ids = Array(base['relationships']).flat_map { |rel| Array(rel['keys']).map { |key| key['sourceColumnId'] } }
+      key_ids.concat(incoming_keys[base['id']])
+      key_names = key_ids.filter_map do |id|
+        col = Array(base['columns']).find { |candidate| candidate['id'] == id }
+        col_display(col) if col
+      end.uniq
+      count_key = key_names.one? ? key_names.first : nil
+      source_name = elem_name(source)
+      base_name = elem_name(base)
+      aliases = [table, base_name, source_name, display_name(table)].compact.map(&:to_s).reject(&:empty?).uniq
+      {
+        'table' => table,
+        'caption' => source_name,
+        'base_element' => base_name,
+        'aliases' => aliases,
+        'columns' => Array(source['columns']).filter_map { |column| col_display(column) }.uniq,
+        'count_key' => count_key,
+        'default' => [source_name, base_name].any? { |name| name.to_s.casecmp?(default_element_name.to_s) }
+      }
+    end
+    return nil if grains.size < 2
+    { 'version' => 1, 'datasources' => grains.sort_by { |grain| grain['default'] ? 0 : 1 } }
+  end
+
   # Fact-table hint for a SINGLE-datasource multi-table (object-model /
   # "noodle") workbook — the shape dominant_fact_table cannot help with (it
   # needs a landing manifest and >=2 datasources). Derived from the .twb's own

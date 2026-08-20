@@ -166,6 +166,18 @@
         "scripts/lib/sql_ident_check.rb (paired fix, same commit): scan()'s `AS <name>` handling now walks past the initial word/quoted token to confirm the alias really is exactly one legal identifier — an `AS SUB-CATEGORY` clause tokenizes as word(SUB), punct(-), word(CATEGORY), and the OLD scan took only \"SUB\" as \"the\" alias, leaving \"- CATEGORY\" to re-enter the stream as spurious candidate column refs (how the live run printed a false-clean OK: \"CATEGORY\" happened to coincidentally match a real, unrelated column). A new extend_alias_run walk reconstructs the WHOLE glued-together name (any punct other than a hard `,`/`)` boundary is consumed together with whatever token follows it, so a caption fragment that happens to spell a real SQL keyword — e.g. the \"OVER\" inside \"Year-over-Year\" — does not truncate the reconstruction) and records it in a new bad_aliases list; check() surfaces each as an `illegal_alias: true` finding (via the file's existing W2.9 sql_ident/illegal_reason legality oracle for the quoted-fix suggestion) that flips `ok` to false independent of any catalog — this closes the exact coverage gap the live run hit without touching the pre-existing source-identifier-resolution checks or the oracle's separately-tested refuse-on-embedded-double-quote policy"
       ],
       "upstream_pr": null
+    },
+    {
+      "commit": "worktree (tableau one-to-many grain fix)",
+      "summary": "Object-model database-backed unique-key direction fix. A live Workforce migration serialized EMPLOYEES as unique-key=true + is-db-set-unique-key=true and ABSENCE_RECORDS/TIME_ENTRIES as the many sides, but the degree-elected EMPLOYEES hub overrode that evidence and emitted EMPLOYEES→children Sigma relationships. Sigma relationships are many-to-one Lookups, so child measures returned one arbitrary row per employee and the absence chart undercounted (0% parity). This patch makes database-backed endpoint uniqueness decisive for relationship direction; non-database-backed or ambiguous hints retain the existing evidence-ranked BFS path and every oriented edge remains protected by the live join-cardinality probe.",
+      "changes": [
+        "relationship collection now records is-db-set-unique-key independently for each endpoint, alongside the existing unique-key hint",
+        "pass-2 orientation uses database-backed uniqueness when exactly one endpoint has it: the non-unique endpoint carries the relationship and the database-unique endpoint is the target; key ids swap with the direction",
+        "plain unique-key hints without is-db-set-unique-key keep the existing BFS/fact-election behavior because historical Tableau workbooks can carry stale performance hints",
+        "grain-preserving derived child views inherit only direct columns from their unique target; target columns synthesized through a different child relationship are excluded so sibling facts never chain through the hub into each other",
+        "every repaired edge remains fail-closed behind probe-join-keys target-uniqueness verification"
+      ],
+      "upstream_pr": null
     }
   ],
   "_upstream_and_revendor_tasks": [

@@ -4620,6 +4620,39 @@ if mechanical
       { 'id' => id, 'name' => nm }
     line "master-col override: '#{nm}' = #{fx[0, 80]}"
   end
+  # A Tableau object-model dashboard can mix logical-table grains on one page
+  # (for example child-fact Absence Records beside parent Employees). Build a
+  # registry of the converter's grain-correct DM sources and teach the CSV
+  # header mapper that Tableau's generated "Count of <logical table>" means a
+  # Count() over that table's relationship key AT THAT TABLE'S GRAIN. The chart
+  # router below consumes the same registry and repoints only the affected
+  # worksheets to a hidden sub-master.
+  grain_plan = MechanicalSpecs.object_grain_plan(conv['model'], default_element_name: fact['name'])
+  grain_plan_path = File.join(WORK, 'grain-plan.json')
+  if grain_plan
+    grain_plan['datasources'].each do |grain|
+      Array(grain['columns']).each do |column_name|
+        next if mmap.values.any? { |entry| entry['name'].to_s.casecmp?(column_name.to_s) }
+        synthetic_id = "m-grain-#{MechanicalSpecs.slug(column_name)}"
+        mmap[MechanicalSpecs.header_regex(column_name)] = {
+          'id' => synthetic_id,
+          'name' => column_name,
+          'grain_element' => grain['caption']
+        }
+      end
+      next if grain['count_key'].to_s.empty?
+      key_entry = mmap.values.find { |entry| entry['name'].to_s.casecmp?(grain['count_key'].to_s) }
+      next unless key_entry
+      table = Regexp.escape(grain['table'].to_s)
+      display = Regexp.escape(MechanicalSpecs.display_name(grain['table'].to_s))
+      pattern = "(?i)^Count of (?:#{table}|#{display})(?:\\s*\\([^)]*#{table}\\))?$"
+      mmap[pattern] = key_entry.merge('grain_element' => grain['caption'], 'generated_table_count' => true)
+      grain['count_pattern'] = pattern
+    end
+    File.write(grain_plan_path, JSON.pretty_generate(grain_plan))
+    line "grain plan: #{grain_plan['datasources'].size} logical table source(s); " \
+         "#{grain_plan['datasources'].count { |grain| grain['count_pattern'] }} generated table-count mapping(s)"
+  end
   mmap_path = File.join(WORK, 'master-map.json')
   File.write(mmap_path, JSON.pretty_generate(mmap))
   line "master-map: #{master_columns.size} master column(s) (fact element '#{fact['name']}', #{real_labels ? real_labels.size : 0} readback labels)"
@@ -4700,6 +4733,7 @@ if mechanical
   build_cmd += ['--meta', layout_json.sub(/\.json$/, '-meta.json')] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
   build_cmd += ['--auto-controls'] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
   build_cmd += ['--detected-actions', detected_actions_path] if File.exist?(detected_actions_path)
+  build_cmd += ['--grain-plan', grain_plan_path] if grain_plan && File.exist?(grain_plan_path)
   # Per-dashboard scope (defensive — the layout is already pre-scoped, so a single
   # dashboard yields exactly one page; passing the flags keeps a standalone build
   # honest if it's ever handed a full layout).
@@ -4805,6 +4839,19 @@ if mechanical
         c['formula'] = c['formula'].gsub(/\[#{Regexp.escape(real)}\/([^\]]+)\]/) do
           col = Regexp.last_match(1)
           exact = labels.include?(col) ? col : by_norm[nrmc.call(col)]
+          # Related columns on a derived grain view round-trip with the target
+          # element suffix ("Employment Type (EMPLOYEES)"). The builder asks
+          # for the unsuffixed Tableau caption. Accept ONLY a unique
+          # prefix+parenthetical match; two role-played/duplicate candidates
+          # remain unresolved rather than guessing.
+          unless exact
+            stem = nrmc.call(col)
+            suffixed = labels.select do |label|
+              label.match?(/\A#{Regexp.escape(col)}\s+\([^)]+\)\z/i) ||
+                (nrmc.call(label).start_with?(stem) && label.include?('('))
+            end
+            exact = suffixed.first if suffixed.one?
+          end
           if exact
             fixed += 1 if exact != col
             "[#{real}/#{exact}]"
