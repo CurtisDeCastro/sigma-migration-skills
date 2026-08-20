@@ -213,7 +213,7 @@ Dir.mktmpdir('migration-report-inconsistent') do |dir|
                                                 consistency['message'].include?('summary total 2 != 1'))
 end
 
-builder_source = File.read(SCRIPT)
+builder_source = File.read(BUILDER)
 ok('report outputs use binary writes so --check is byte-stable on Windows',
    builder_source.include?('File.binwrite(temporary, content)') &&
      !builder_source.include?('File.write(temporary, content)'))
