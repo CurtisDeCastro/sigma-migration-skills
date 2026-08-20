@@ -334,7 +334,8 @@ scenario('verified source kind (line) disagrees with the live readback (bar) -> 
              'pages' => [{ 'id' => 'overview', 'name' => 'Overview' }],
              'elements' => [{ 'id' => 'sales-region', 'name' => 'Sales by Region',
                               'kind' => 'bar-chart', 'visibleAsSource' => true,
-                              'xAxis' => { 'columnId' => 'region' } }],
+                              'xAxis' => { 'columnId' => 'region' },
+                              'yAxis' => { 'columnIds' => ['sales'] } }],
              'layout' => '<Page id="overview"><Element elementId="sales-region"/></Page>')
 end
 
