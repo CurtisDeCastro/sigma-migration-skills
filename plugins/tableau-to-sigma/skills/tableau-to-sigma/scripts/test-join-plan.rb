@@ -163,7 +163,7 @@ check(reversed['left'] == 'STATE_REF' && reversed['right'] == 'ACT_BASE',
       "ledger uses the actual DM carrier/target, not TWB authoring order (got #{reversed['left']}/#{reversed['right']})", fails)
 check(reversed['right_table'] == 'ANALYTICS.PUBLIC.ACT_BASE' && reversed['probe_keys'] == ['ENTITY_ID'],
       'reversed ledger probes uniqueness on the actual Sigma target', fails)
-check(JoinPlan.object_table_key('ABSENCE_RECORDS (CSA.ABSENCE_RECORDS)') == 'ABSENCE_RECORDS',
+check(JoinPlan.object_table_key('CHILD_EVENTS (DEMO.CHILD_EVENTS)') == 'CHILD_EVENTS',
       'VC relation label normalizes to its physical table token for DM orientation matching', fails)
 
 puts "\n== object-graph duplicate-table role resolves its suffixed GUID + physical VC table =="

@@ -348,7 +348,7 @@ module JoinPlan
   end
 
   # Tableau VC/object-graph relation labels commonly carry a friendly name plus
-  # a physical suffix: "ABSENCE_RECORDS (CSA.ABSENCE_RECORDS)". Converter
+  # a physical suffix: "CHILD_EVENTS (DEMO.CHILD_EVENTS)". Converter
   # elements are keyed by their physical source.path tail. Normalize both onto
   # the physical table token for orientation lookup, while preserving the raw
   # names in the emitted ledger for operator readability.
