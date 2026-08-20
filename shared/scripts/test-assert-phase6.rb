@@ -340,8 +340,56 @@ scenario('verified source kind (line) disagrees with the live readback (bar) -> 
 end
 
 puts '== waiver budget (exit 19; checked LAST, after every other gate passes) =='
-scenario('3 budget-counted waivers (column+layout+orphan), 1 policy-excluded (visual-comparison) -> exit 19', 19,
-         HAPPY_FLAGS + ['--skip-orphan-check', 'budget test: deliberately exceed the cap of 2'])
+overflow_flags = HAPPY_FLAGS +
+                 ['--skip-orphan-check', 'budget test: deliberately exceed the cap of 2']
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  code = run_gate(dir, *overflow_flags)
+  parity = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  eq(code, 19,
+     '3 budget-counted waivers, 1 policy-excluded waiver -> exit 19 by default')
+  eq(File.exist?(File.join(dir, 'phase6-success.json')), false,
+     'unaccepted waiver-budget overflow writes no success marker')
+  eq(parity['success_sentinel'], false,
+     'unaccepted waiver-budget overflow keeps parity success_sentinel false')
+end
+
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  reason = 'owner accepted the named verification debt for this handoff'
+  code = run_gate(dir, *overflow_flags, '--accept-waiver-budget-exceeded', reason)
+  success = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  parity = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
+  ledger = JSON.parse(File.read(File.join(dir, 'degradation-ledger.json')))
+  acceptance = Array(ledger['entries']).find do |entry|
+    entry['class'] == 'quality-waiver' &&
+      entry['item'] == '--accept-waiver-budget-exceeded'
+  end
+  eq(code, 0, 'explicitly accepted waiver-budget overflow exits 0')
+  eq(success['verdict'], 'YELLOW',
+     'accepted overflow stamps phase6-success verdict YELLOW')
+  eq(success['budget_exceeded'], true,
+     'accepted overflow stamps phase6-success budget_exceeded=true')
+  eq(parity['verdict'], 'YELLOW',
+     'accepted overflow stamps parity-final verdict YELLOW')
+  eq(parity['budget_exceeded'], true,
+     'accepted overflow stamps parity-final budget_exceeded=true')
+  eq(parity.dig('waiver_reasons', '--accept-waiver-budget-exceeded'), reason,
+     'accepted overflow records the named reason in parity waiver accounting')
+  eq(acceptance && acceptance['reason'], reason,
+     'accepted overflow records its reason as a quality waiver')
+end
+
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  write_json(dir, 'parity-final.json',
+             'charts_total' => 3, 'charts_pass' => 2, 'status' => 'FAIL', 'mode' => 'live')
+  code = run_gate(dir, *overflow_flags, '--accept-waiver-budget-exceeded',
+                  'must not bypass an earlier hard gate')
+  eq(code, 2, 'overflow acceptance does not bypass an earlier hard gate')
+  eq(File.exist?(File.join(dir, 'phase6-success.json')), false,
+     'overflow acceptance is not consumed before every other gate passes')
+end
 
 puts
 puts '== gate 3 (ruzs: silent SKIP paths are RECORDED, never a free pass) =='

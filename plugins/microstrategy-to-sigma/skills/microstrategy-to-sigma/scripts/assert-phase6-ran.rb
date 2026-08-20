@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # Hard gate that proves a tableau-to-sigma conversion is actually complete.
 # The subagent MUST run this script before declaring GREEN. It checks seven
-# independent things — failing ANY of them blocks the GREEN declaration:
+# independent things — failing ANY of them blocks a terminal handoff:
 #
 #   0. Pre-POST render integrity — when the workdir carries a local workbook
 #      authored code-rep candidate (wb-spec.json or workbook-spec.json), every
@@ -122,7 +122,7 @@
 #                              # unbuildable zones; name them in your report)
 #
 # Exit codes:
-#   0  every gate passes — conversion is allowed to declare GREEN
+#   0  every gate passes — conversion has a terminal GREEN or YELLOW handoff
 #   1  parity-final.json missing (Phase 6 skipped — the regression case)
 #   2  parity-final.json exists but status=FAIL / pass-rate below min /
 #      extract-mode without --allow-extract / charts_total==0
@@ -240,8 +240,10 @@
 #      ships GREEN. GREEN is unavailable on this run regardless of individual
 #      escapes — the highest achievable result is YELLOW. Every run stamps
 #      `waivers` + `waiver_count` (the full census) into parity-final.json so
-#      the report (and any reviewer) sees the count. There is NO escape flag
-#      for this cap. One POLICY exclusion never consumes the budget:
+#      the report (and any reviewer) sees the count. A named
+#      --accept-waiver-budget-exceeded REASON may accept the overflow only
+#      after every other gate passes; it records a quality waiver and stamps a
+#      terminal YELLOW handoff. One POLICY exclusion never consumes the budget:
 #        - --skip-visual-comparison ONLY under the sanctioned builder→verifier
 #          split (its reason references the verifier, matched /verifier/i —
 #          the verifier session records the verdict); any other reason counts.
@@ -578,8 +580,13 @@ OptionParser.new do |p|
   p.on('--allow-empty-tiles REASON', 'gate 13: accept displayed dashboard tile(s) that export ZERO data rows — REQUIRED reason string that MUST cite the source PNG showing the chart is genuinely empty on the SOURCE dashboard. Never use this to wave away a broken data path (filter/calc bug). Counted against the waiver budget; name it in your migration report.') { |v| opts[:allow_empty_tiles] = v }
   p.on('--skip-visual-similarity REASON', 'waive gate 14 (measured visual-similarity floor) — REQUIRED reason string. Counted against the waiver budget; name it in your migration report.') { |v| opts[:skip_vsim] = v }
   p.on('--accept-manual-residues LIST', 'gate 15: comma-separated residue CALC names from <workdir>/manual-residues.json to WAIVE as accepted-unbuilt (their tiles keep the magnitude proxy — name each in your migration report). Counted against the waiver budget. Unnamed unbuilt residues still fail (exit 22).') { |v| opts[:accept_manual_residues] = v.split(',').map(&:strip).reject(&:empty?) }
+  p.on('--accept-waiver-budget-exceeded REASON', 'accept waiver-budget overflow only after every other gate passes; records a named quality waiver and stamps a terminal YELLOW handoff') { |v| opts[:accept_waiver_budget_exceeded] = v }
 end.parse!
 abort('--workdir (or --tableau) required') unless opts[:tab]
+if opts.key?(:accept_waiver_budget_exceeded) &&
+   opts[:accept_waiver_budget_exceeded].to_s.strip.empty?
+  abort('--accept-waiver-budget-exceeded requires a non-empty REASON')
+end
 
 # A waived gate must never pass SILENTLY. record_waiver prints a loud banner and
 # appends to <workdir>/waivers.json so the migration report (and any future
@@ -3876,11 +3883,33 @@ end
 # Waiver budget cap (exit 19) — checked LAST so genuine gate failures surface
 # first. Individually-arguable escapes stack into an unverified workbook (a
 # field run passed one workbook purely by combining --skip-parity-gate with
-# --allow-missing-tiles); more than WAIVER_BUDGET waivers means GREEN is
-# unavailable regardless of what each escape was for. No escape flag exists
-# for this cap — reduce the waiver count by fixing the underlying issues, or
-# report the migration as YELLOW.
+# --allow-missing-tiles); more than WAIVER_BUDGET waivers requires a decision.
+# The default remains exit 19 with no success marker. A named
+# --accept-waiver-budget-exceeded reason is consumed only HERE, after every
+# other gate passed, and converts that decision into a terminal YELLOW handoff.
 # ---------------------------------------------------------------------------
+budget_exceeded = budget_flags.length > effective_waiver_budget
+budget_exceeded_accepted = budget_exceeded &&
+                           !opts[:accept_waiver_budget_exceeded].to_s.strip.empty?
+
+if budget_exceeded_accepted
+  acceptance_flag = '--accept-waiver-budget-exceeded'
+  acceptance_reason = opts[:accept_waiver_budget_exceeded].to_s.strip
+  waiver_flags << acceptance_flag unless waiver_flags.include?(acceptance_flag)
+  waiver_reasons[acceptance_flag] = acceptance_reason
+  record_waiver.call(acceptance_flag, 'waiver-budget overflow decision', acceptance_reason)
+  begin
+    _pf_accept = JSON.parse(File.read(summary_path))
+    _pf_accept['waivers'] = waiver_flags
+    _pf_accept['waiver_count'] = waiver_flags.length
+    _pf_accept['waiver_reasons'] = waiver_reasons
+    _pf_accept['budget_exceeded'] = true
+    File.write(summary_path, JSON.pretty_generate(_pf_accept))
+  rescue StandardError
+    nil # gate 1 already validated parity-final; bookkeeping must not sink handoff
+  end
+end
+
 # ---------------------------------------------------------------------------
 # Degradation ledger + verdict (PLAN-v3 PR-14) — derived ONCE here, from the
 # artifacts on disk (the census stamped above included), and written to
@@ -3899,7 +3928,7 @@ if DEG_LEDGER_LOADED
   end
 end
 
-if budget_flags.length > effective_waiver_budget
+if budget_exceeded && !budget_exceeded_accepted
   warn "[FAIL] waiver budget exceeded — #{budget_flags.length} quality waiver/escape flag(s) on this run " \
        "(budget #{effective_waiver_budget}#{effective_waiver_budget < WAIVER_BUDGET ? ", Tier-#{run_tier} scaled from #{WAIVER_BUDGET}" : ''})."
   warn '       GREEN unavailable — too many waivers; the highest achievable result is YELLOW.'
@@ -3907,7 +3936,9 @@ if budget_flags.length > effective_waiver_budget
   budget_flags.each { |f| warn "         - #{f}: #{WAIVER_HIDES[f] || 'a verification gate did not run'}" }
   warn '       Waivers are for impossibilities, not obstacles. Fix the underlying issues until'
   warn "       <= #{effective_waiver_budget} remain, or report this migration as YELLOW (never GREEN) and name"
-  warn '       every waiver in the report. There is no escape flag for this cap.'
+  warn '       every waiver in the report. To accept this decision explicitly, rerun with'
+  warn '       --accept-waiver-budget-exceeded REASON; the reason becomes a quality waiver'
+  warn '       and the terminal handoff is YELLOW.'
   if deg_entries
     v19 = DegradationLedger.verdict(deg_entries, budget_exceeded: true)
     warn "       VERDICT: #{v19} — degradation ledger (#{deg_entries.length} entr#{deg_entries.length == 1 ? 'y' : 'ies'}):"
@@ -3928,6 +3959,7 @@ end
 # any other recorded degradation at YELLOW. The string rides in the success
 # marker (verify-complete.rb quotes and cross-checks it).
 final_verdict = deg_entries ? DegradationLedger.verdict(deg_entries) : nil
+final_verdict = 'YELLOW' if budget_exceeded_accepted
 # ── W2.3: verdict attestation + the labeled factory verdict ─────────────────
 # Countersignature evidence (orchestration.md O3): a verifier-recorded final
 # pass (parity-final.json visual_notes prefixed 'VERIFIER:') or a PARSEABLE
@@ -3979,6 +4011,7 @@ begin
             'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ') }
   _succ['verdict'] = final_verdict if final_verdict
   _succ['verdict_by'] = verdict_by if final_verdict
+  _succ['budget_exceeded'] = true if budget_exceeded_accepted
   File.write(File.join(_wd, 'phase6-success.json'), JSON.pretty_generate(_succ))
   _pend = File.join(_wd, 'parity-pending.json')
   File.delete(_pend) if File.exist?(_pend)
@@ -3990,6 +4023,7 @@ begin
       _pf['success_sentinel'] = true
       _pf['verdict'] = final_verdict if final_verdict
       _pf['verdict_by'] = verdict_by if final_verdict
+      _pf['budget_exceeded'] = true if budget_exceeded_accepted
       File.write(File.join(_wd, 'parity-final.json'), JSON.pretty_generate(_pf))
     rescue StandardError
       nil
@@ -4004,6 +4038,7 @@ end
 ev_append.call('phase6-gates', final_verdict || 'all-pass', 'gate-summary',
                'parity-final.json', ev_key.call, nil,
                { 'waivers' => waiver_flags.length, 'budget_waivers' => budget_flags.length,
+                 'budget_exceeded' => budget_exceeded,
                  'degradations' => (deg_entries ? deg_entries.length : nil) }.compact)
 
 if final_verdict.nil?
@@ -4011,6 +4046,14 @@ if final_verdict.nil?
   puts "[OK] all gates pass — conversion may declare GREEN" \
        "#{waiver_flags.any? ? " (#{budget_flags.length}/#{waiver_flags.length} waiver(s) within budget — name them in the report: #{waiver_flags.join(', ')})" : ''}"
   puts '     (lib/degradation_ledger.rb not vendored — no PR-14 verdict derived; re-vendor to enable.)'
+elsif budget_exceeded_accepted
+  puts "[OK] all gates pass — VERDICT: YELLOW (waiver-budget overflow explicitly accepted; " \
+       "#{budget_flags.length} budget waiver(s), budget #{effective_waiver_budget})"
+  puts "     Acceptance reason: #{opts[:accept_waiver_budget_exceeded]}"
+  if deg_entries
+    puts "     This run recorded #{deg_entries.length} degradation(s):"
+    DegradationLedger.report_lines(deg_entries).each { |l| puts "     #{l}" }
+  end
 elsif factory_labeled
   puts '[OK] all gates pass — VERDICT: GREEN (factory, self-attested) (degradation ledger empty; Tier-S'
   puts '     factory run with no verifier countersignature — the label is part of the verdict string and'

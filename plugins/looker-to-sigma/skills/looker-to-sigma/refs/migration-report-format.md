@@ -20,8 +20,8 @@ ruby scripts/build-migration-report.rb --workdir /path/to/workdir --check
 | `--json-out PATH` | `<workdir>/migration-result.json` |
 | `--check` | Build both outputs in memory, compare them byte-for-byte with the files on disk, and write nothing |
 
-Exit 0 means complete accounting with a GREEN or YELLOW verdict. Exit 1 means
-RED, including a stale or missing output in `--check` mode. Exit 2 means the
+GREEN and YELLOW are terminal handoffs and exit 0. RED is blocked and exits 1,
+including a stale or missing output in `--check` mode. Exit 2 means the
 invocation or an input JSON artifact is invalid.
 
 Normal mode writes both reports even when the result is RED. This makes
@@ -120,8 +120,28 @@ Declared counts that disagree with their detail records are RED.
   inconsistent, parity fails or is absent, or render/blank-risk evidence fails
   or is absent.
 
-`needs-review` and `skipped` are terminal accounting states, so a YELLOW report
-can still exit 0. They are not silently treated as successful migration.
+100% accounted does not mean 100% migrated. Explicit terminal
+`approximated`, `needs-review`, and `skipped` rows make the handoff YELLOW and
+complete because the remaining disposition is named. They are not silently
+treated as faithful migration. Missing or contradictory accounting, failed
+parity, and failed or absent render evidence make the result RED and blocked.
+
+The normative terminal matrix is:
+
+| Condition | Verdict | `completion_status` | Exit |
+| --- | --- | --- | ---: |
+| Every row is `migrated`/`not-applicable`; no degradation or waiver; all hard checks pass | GREEN | `complete` | 0 |
+| Every row has exactly one terminal status; any explicit `approximated`/`needs-review`/`skipped`, degradation, or waiver; all hard checks pass | YELLOW | `complete` | 0 |
+| Missing/contradictory accounting, inconsistent artifacts, or failed/absent parity/render evidence | RED | `blocked` | 1 |
+
+Decision-required stops are not terminal report verdicts. In particular, gate
+exit 10 (required render absent) and exit 19 (waiver budget exceeded) remain
+nonzero unless explicitly accepted. Exit 10 uses the existing named
+`--skip-visual-gate REASON` acceptance. Waiver-budget overflow may be accepted
+only by rerunning `assert-phase6-ran.rb` with
+`--accept-waiver-budget-exceeded REASON` after every other gate passes. That
+named acceptance records a quality waiver and produces a YELLOW, exit-0
+handoff; without it, exit 19 writes no success marker.
 
 ## JSON contract
 
@@ -131,6 +151,7 @@ can still exit 0. They are not silently treated as successful migration.
 {
   "schema_version": 1,
   "verdict": "GREEN",
+  "completion_status": "complete",
   "summary": {
     "total": 1,
     "accounted": 1,
