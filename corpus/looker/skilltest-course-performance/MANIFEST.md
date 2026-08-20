@@ -25,6 +25,7 @@ entire pipeline and verifies the expected hazard gate and SQLite value oracle.
     {"path": "../../../plugins/looker-to-sigma/skills/looker-to-sigma/fixtures/skilltest-course-performance/course_performance.dashboard.lookml", "format": "text"},
     {"path": "../../../plugins/looker-to-sigma/skills/looker-to-sigma/fixtures/skilltest-course-performance/warehouse_rows.json", "format": "json"},
     {"path": "../../../plugins/looker-to-sigma/skills/looker-to-sigma/fixtures/skilltest-course-performance/oracle_expected.json", "format": "json"},
+    {"path": "generate_goldens.py", "format": "text"},
     {"path": "checks.sh", "format": "text"}
   ],
   "goldens": {}
