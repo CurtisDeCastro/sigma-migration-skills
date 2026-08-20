@@ -79,6 +79,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import scout_gate
 import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 from build_workbook import build_field_index, parse_join_aliases, disp, leaf
+from looker_filter_expr import matches_filter_expr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T0 = time.time()
@@ -400,8 +401,9 @@ def expected_offline(el, ev, rows):
         i = ev.idx.get(d)
         if i is None:
             continue
-        wanted = {v.strip().casefold() for v in str(val).split(",") if v.strip()}
-        data = [r for r in data if str(r[i]).casefold() in wanted]
+        verdicts = [matches_filter_expr(r[i], val) for r in data]
+        if all(verdict is not None for verdict in verdicts):
+            data = [row for row, keep in zip(data, verdicts) if keep]
     if el.get("tileType") == "looker_scatter" and len(ms) >= 2:
         groups = {None: data}
         if ds:

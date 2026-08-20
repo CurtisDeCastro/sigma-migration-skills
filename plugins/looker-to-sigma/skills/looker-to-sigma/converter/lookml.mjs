@@ -1390,10 +1390,14 @@ function lookFindColId(elementResult, colName) {
 }
 function lookParseFilterExpr(expr, columnId) {
   expr = (expr || "").trim();
-  if (/^NULL$/i.test(expr))
+  if (/^(?:IS\s+)?NULL$/i.test(expr))
     return { id: sigmaShortId(), columnId, kind: "list", mode: "include", values: [null] };
-  if (/^NOT\s+NULL$/i.test(expr))
+  if (/^(?:(?:IS\s+)?NOT\s+NULL|-NULL)$/i.test(expr))
     return { id: sigmaShortId(), columnId, kind: "list", mode: "exclude", values: [null] };
+  if (/^EMPTY$/i.test(expr))
+    return { id: sigmaShortId(), columnId, kind: "list", mode: "include", values: [null, ""] };
+  if (/^(?:(?:IS\s+)?NOT\s+EMPTY|-EMPTY)$/i.test(expr))
+    return { id: sigmaShortId(), columnId, kind: "list", mode: "exclude", values: [null, ""] };
   if (/^\d+\s+(second|minute|hour|day|week|month|quarter|year)s?$/i.test(expr))
     return null;
   if (/^(this|last|next|current)\s+/i.test(expr))
@@ -1405,10 +1409,10 @@ function lookParseFilterExpr(expr, columnId) {
   if (/^[\[(]/.test(expr))
     return null;
   if (expr.startsWith("-")) {
-    const vals2 = expr.slice(1).split(/\s*,\s*-?\s*/).map((v) => v.replace(/^"|"$/g, "").trim()).filter(Boolean);
+    const vals2 = expr.slice(1).split(/\s*,\s*-?\s*/).map((v) => v.replace(/^"|"$/g, "").trim()).filter(Boolean).flatMap((v) => /^NULL$/i.test(v) ? [null] : /^EMPTY$/i.test(v) ? [null, ""] : [v]);
     return { id: sigmaShortId(), columnId, kind: "list", mode: "exclude", values: vals2 };
   }
-  const vals = expr.split(",").map((v) => v.replace(/^"|"$/g, "").trim()).filter(Boolean);
+  const vals = expr.split(",").map((v) => v.replace(/^"|"$/g, "").trim()).filter(Boolean).flatMap((v) => /^NULL$/i.test(v) ? [null] : /^EMPTY$/i.test(v) ? [null, ""] : [v]);
   if (vals.length > 0)
     return { id: sigmaShortId(), columnId, kind: "list", mode: "include", values: vals };
   return null;

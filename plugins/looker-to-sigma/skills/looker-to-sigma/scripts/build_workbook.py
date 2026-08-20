@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import code_rep                 # noqa: E402  workbook document/envelope adapter
 import coverage_catalog as _cc  # noqa: E402
 import trellis_emit as _te      # noqa: E402  shared native-trellis emitter (supported-kind gate + fallbacks)
+from looker_filter_expr import parse_filter_expr  # noqa: E402
 _CAT_DIR = _cc.default_catalog_dir(__file__)
 VIZ_CAT  = _cc.load(_CAT_DIR, "viz-kind")        # Looker vis type   -> Sigma element kind
 FMT_CAT  = _cc.load(_CAT_DIR, "number-format")   # value_format_name -> Sigma number format (D3)
@@ -1441,7 +1442,8 @@ def main():
         # explore's measure(s) as Max(Lookup(...)) columns now that base is built.
         attach_merge(el, base, kind, ex)
 
-        # tile-level hard filters → element filters (string values; date/numeric → warn)
+        # tile-level hard filters → element filters. Looker null sentinels are
+        # operators, not literal strings ("NOT NULL" must never become a value).
         for fld, val in (el.get("filters") or {}).items():
             if kind == "progress":
                 warnings.append(
@@ -1459,9 +1461,13 @@ def main():
                 # carry it hidden so the filter works without adding a visible column.
                 col = {"id": sid("c"), "formula": f"[{master_of(ex)['name']}/{d}]", "name": d, "hidden": True}
                 base["columns"].append(col)
-            vals = [v.strip() for v in str(val).split(",") if v.strip()]
-            base.setdefault("filters", []).append(
-                {"id": sid("f"), "columnId": col["id"], "kind": "list", "mode": "include", "values": vals})
+            sigma_filter = parse_filter_expr(val, col["id"], sid("f"))
+            if sigma_filter is None:
+                warnings.append(
+                    f"tile '{el['name']}': filter {fld}={val!r} uses an unsupported "
+                    "Looker expression — add manually in Sigma")
+                continue
+            base.setdefault("filters", []).append(sigma_filter)
         # tile sorts: -> Sigma sort. Verified shapes (live POST + readback + render,
         # 2026-06-10):
         #   bar/line/area/scatter : xAxis.sort  = {by: <colId>, direction}
