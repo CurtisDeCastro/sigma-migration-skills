@@ -52,6 +52,9 @@ user-invocable: true
 >   Completion also requires complete accounting: every formula in
 >   `formula-audit.json` and every object in `source-object-census.json` has one
 >   terminal disposition in `MIGRATION_REPORT.md` / `migration-result.json`.
+>   A complete report ends `STATUS: GREEN|YELLOW` plus `COMPLETION: complete`
+>   and exits 0. `approximated`, `needs-review`, or `skipped` objects are
+>   honestly YELLOW, never relabeled GREEN. RED remains blocked/nonzero.
 > - **This is a PRODUCTION migration, not a demo.** The bar is EXACT parity
 >   against the same warehouse, always. At a wall: follow the printed
 >   STOP/handoff, or surface the blocker plainly and stop — NEVER a third
@@ -151,7 +154,8 @@ ruby scripts/migrate-tableau.rb \
 #   run the printed mcp-v2 queries for the REMAINING charts (pivot grids) only …
 # PASS 2 — finalize: phase6 verify + cleanup-orphans + census-aware report/gate
 ruby scripts/migrate-tableau.rb --workbook "<name>" \
-  --finalize --actuals <workdir>/parity-actuals.json [--allow-missing-tiles N]
+  --finalize --actuals <workdir>/parity-actuals.json [--allow-missing-tiles N] \
+  [--accept-waiver-budget-exceeded "<reason>"]
 # … writes MIGRATION_REPORT.md + migration-result.json; incomplete accounting fails …
 ```
 
@@ -270,10 +274,11 @@ On ANY nonzero exit or waiver: `refs/gates.md`. On a STOP naming a script:
 - **Waiver discipline — waivers are for impossibilities, not obstacles.** >2
   quality waivers caps at YELLOW (exit 19); data-class residuals can never be
   waived; a third waiver means stop and fix. Verbatim: `refs/gates.md`.
-- **Verdict model (PR-14) — GREEN / YELLOW / PARTIAL is derived, never
-  self-reported.** GREEN needs an EMPTY `degradation-ledger.json`; any scope
-  cut caps at PARTIAL; `verify-complete.rb` exits 6 if your report contradicts
-  the derivation — quote the ledger verbatim. Full model: `refs/gates.md`.
+- **Terminal verdict model — GREEN / YELLOW is derived, never self-reported.**
+  GREEN needs an EMPTY `degradation-ledger.json`; any explicit approximation,
+  skip, scope cut, waiver, or residual is YELLOW. Both are complete exit-0
+  handoffs only when every hard gate passes. `verify-complete.rb` exits 6 if
+  your report contradicts the derivation. Full model: `refs/gates.md`.
 
 ---
 

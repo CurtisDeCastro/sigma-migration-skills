@@ -63,7 +63,7 @@ def base_workdir(dir, parity_extra: {})
   File.write(File.join(dir, 'source-object-census.json'),
              JSON.generate('summary' => summary, 'objects' => [object]))
   File.write(File.join(dir, 'migration-result.json'),
-             JSON.generate('verdict' => 'GREEN', 'summary' => summary,
+             JSON.generate('verdict' => 'GREEN', 'completion_status' => 'complete', 'summary' => summary,
                            'source_objects' => [object.reject { |key, _| key == 'evidence' }]))
 end
 
@@ -239,6 +239,23 @@ Dir.mktmpdir do |dir|
         'junk tier_basis blanked from the banner (closed vocabulary on read)', fails)
 end
 
+# B6 explicit decision: rely on the shared gate's named overflow acceptance.
+# The Tableau orchestrator adds completion_status after the final report exists.
+Dir.mktmpdir do |dir|
+  base_workdir(dir)
+  File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
+  out, err, st = run_gate(
+    dir, *two_quality_waivers,
+    '--accept-waiver-budget-exceeded', 'approved migration handoff'
+  )
+  marker = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  check(st.success?, "accepted Tier-S waiver overflow → exit 0 (got #{st.exitstatus}: #{err.lines.first})", fails)
+  check(marker['verdict'] == 'YELLOW' && marker['budget_exceeded'] == true,
+        'shared gate stamps accepted overflow YELLOW', fails)
+  check(out.include?('VERDICT: YELLOW'),
+        'shared gate prints the accepted YELLOW verdict', fails)
+end
+
 # ---------------------------------------------------------------------------
 # C. Gate-18 Tier-S GT-trio skip (W2.1 gate half). On Tier-S the trio may not
 # run; the gate itself evaluates the VALUED-anchors oracle (gate 18's own
@@ -317,6 +334,14 @@ puts 'D. W2.3 factory verdict labeling + verify-complete reconciliation'
 FACTORY_LABEL = 'GREEN (factory, self-attested)'
 
 def run_verify(dir, *args)
+  # Shared assert-phase6-ran owns gates/verdict; the Tableau finalizer adds the
+  # plugin-local completion field after migration-result.json is rebuilt.
+  success_path = File.join(dir, 'phase6-success.json')
+  if File.exist?(success_path)
+    success = JSON.parse(File.read(success_path))
+    success['completion_status'] = 'complete'
+    File.write(success_path, JSON.pretty_generate(success))
+  end
   out, err, st = Open3.capture3({}, RbConfig.ruby, VERIFY, '--workdir', dir, *args)
   [out, err, st]
 end
@@ -370,7 +395,8 @@ Dir.mktmpdir do |dir|
         'parity-final + phase6-success stamp the labeled verdict', fails)
   check(pf['verdict_by'] == 'builder-self-attested' && sj['verdict_by'] == 'builder-self-attested',
         "verdict_by stamped 'builder-self-attested' in both markers", fails)
-  vout, _verr, vst = run_verify(dir)
+  vout, verr, vst = run_verify(dir)
+  warn verr unless vst.success?
   check(vst.success?, "verify-complete on the labeled workdir → exit 0 (got #{vst.exitstatus})", fails)
   check(vout.include?("VERDICT: #{FACTORY_LABEL}") && vout.include?('builder-self-attested'),
         'verify-complete prints the labeled verdict + attestation', fails)

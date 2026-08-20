@@ -93,7 +93,7 @@ Encoding.default_external = Encoding::UTF_8
 # applies accepted items one at a time under a parity-unchanged gate.
 # Default = OFF everywhere. See refs/phase-e-enhance.md.
 #
-# Exit codes: 0 = done (ALL gates green — only possible via --finalize);
+# Exit codes: 0 = done (all gates pass; terminal GREEN or YELLOW via --finalize);
 # 10 = decisions needed (OPEN QUESTIONS printed, NO Sigma objects created);
 # 11 = gap scan found ❌-unhandled features (re-run with --force to accept);
 # 12 = pass 1 complete, parity PENDING (run the printed MCP queries, then
@@ -179,6 +179,7 @@ require_relative 'lib/workbook_code' # flat workbook elements + layout-owned pag
 require_relative 'lib/metric_binding' # shared DM-metric binder ([Metrics/<name>] over inline re-derive)
 require_relative 'lib/tableau_warehouse_column_refs'
 require_relative 'lib/tableau_rest' # in-process Tableau token minting (Windows-safe; no bash/eval)
+require_relative 'lib/tableau_terminal_outcome'
 require_relative 'hydrate-custom-sql'
 
 $stdout.sync = true # progress lines interleave correctly when piped/captured
@@ -352,6 +353,10 @@ OptionParser.new do |o|
   o.on('--allow-missing-tiles N', Integer) { |v| opts[:allow_missing_tiles] = v }
   o.on('--min-pass-rate F', Float, 'accept a parity pass-rate below 1.0 at the gate — ONLY for honest, ' \
                                    'NAMED divergences (LOD placeholders / cross-grain semantics)') { |v| opts[:min_pass_rate] = v }
+  o.on('--accept-waiver-budget-exceeded REASON',
+       'accept final-gate waiver-budget overflow after every other gate passes; records the reason and completes YELLOW') do |v|
+    opts[:accept_waiver_budget_exceeded] = v
+  end
   # Phase E (opt-in) — Enhance. NEVER runs without --enhance; with --enhance
   # but no --enhance-accept the run stops at exit 14 with the scan proposals
   # (present them per-item to the human, e.g. AskUserQuestion), then re-run
@@ -1299,7 +1304,7 @@ end
 # ---------------------------------------------------------------------------
 # PASS 2 (--finalize) — phase6 finalize + cleanup-orphans + the census-aware
 # assert-phase6-ran hard gate. Resumes from <WORK>/migrate-state.json; phases
-# 1–5 are NOT re-run. Exit 0 here is the ONLY green exit of the orchestrator.
+# 1–5 are NOT re-run. Exit 0 here is the only terminal-complete orchestrator exit.
 # ---------------------------------------------------------------------------
 if opts[:finalize]
   abort '--actuals required with --finalize (the parity-actuals.json you built from the MCP queries)' unless opts[:actuals]
@@ -1363,6 +1368,9 @@ if opts[:finalize]
   gate += ['--allow-extract'] if state['extract_mode']
   gate += ['--allow-missing-tiles', opts[:allow_missing_tiles].to_s] if opts[:allow_missing_tiles]
   gate += ['--min-pass-rate', opts[:min_pass_rate].to_s] if opts[:min_pass_rate]
+  if opts[:accept_waiver_budget_exceeded]
+    gate += ['--accept-waiver-budget-exceeded', opts[:accept_waiver_budget_exceeded]]
+  end
   # Gate 11 (post-publish interactivity guide) waiver pass-through — the gate
   # itself decides whether the source's actions require POSTPUBLISH_GUIDE.md.
   gate += ['--skip-postpublish-guide', opts[:skip_postpublish_guide]] if opts[:skip_postpublish_guide]
@@ -1589,14 +1597,49 @@ if opts[:finalize]
   )
   report_doc = (JSON.parse(File.read(File.join(WORK, 'migration-result.json'))) rescue {})
   report_verdict = report_doc['verdict'] || 'unavailable'
+  report_completion = report_doc['completion_status'] || 'blocked'
+  # The report is built from the final source census after the shared gate
+  # stamps its sentinel. Reconcile that sentinel to the report's canonical
+  # GREEN/YELLOW verdict only when the gate itself passed and the report is a
+  # complete terminal handoff. This prevents a preliminary census from leaving
+  # GREEN on phase6-success.json when final accounting contains an explicit
+  # approximated/skipped row. Factory GREEN keeps its attestation suffix.
+  if gst.success? && TerminalOutcome::COMPLETE_VERDICTS.include?(report_verdict) &&
+     report_completion == 'complete'
+    %w[phase6-success.json parity-final.json].each do |name|
+      path = File.join(WORK, name)
+      doc = (JSON.parse(File.read(path)) rescue nil)
+      next unless doc.is_a?(Hash)
+      factory_green = report_verdict == 'GREEN' &&
+                      doc['verdict'].to_s == 'GREEN (factory, self-attested)'
+      doc['verdict'] = factory_green ? doc['verdict'] : report_verdict
+      doc['completion_status'] = 'complete'
+      File.write(path, JSON.pretty_generate(doc))
+    end
+  end
+  success_doc = (JSON.parse(File.read(File.join(WORK, 'phase6-success.json'))) rescue {})
+  success_verdict = success_doc['verdict'].to_s.sub(/\s+\(factory, self-attested\)\z/, '')
+  success_complete = success_doc['completion_status'] == 'complete'
   line "migration report: #{report_verdict}#{report_st.success? ? '' : " (exit #{report_st.exitstatus})"}"
 
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  accounting_ok = census_st.success? && report_st.success? && report_verdict != 'RED'
-  all_green = parity_ok && clst.success? && gst.success? && dsfst.success? &&
-              agst.success? && accounting_ok
+  accounting_ok = census_st.success? && report_st.success? && report_verdict != 'RED' &&
+                  TerminalOutcome::COMPLETE_VERDICTS.include?(report_verdict) &&
+                  report_completion == 'complete'
+  sentinel_ok = success_complete && success_verdict == report_verdict
+  gates_passed = parity_ok && clst.success? && gst.success? && dsfst.success? &&
+                 agst.success? && accounting_ok && sentinel_ok
+  terminal_outcome = TableauTerminalOutcome.resolve(
+    report: report_doc,
+    success: success_doc,
+    gates_passed: gates_passed,
+    gate_exit: gst.exitstatus,
+    budget_accepted: !opts[:accept_waiver_budget_exceeded].to_s.empty?
+  )
+  all_green = terminal_outcome['exit'].zero?
+  decision_required = terminal_outcome['exit'] == TableauTerminalOutcome::DECISION_REQUIRED_EXIT
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1735,9 +1778,13 @@ if opts[:finalize]
   puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"} action-gates=#{agst.success? ? 'PASS' : "FAIL(#{agst.exitstatus})"} source-census=#{census_st.success? ? 'PASS' : "FAIL(#{census_st.exitstatus})"} report=#{report_verdict}#{report_st.success? ? '' : "(#{report_st.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "PUNCH LIST  : #{_pl_note}" if _pl_note
-  puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
+  terminal_status = terminal_outcome['verdict']
+  completion_status = terminal_outcome['completion_status']
+  puts "STATUS: #{terminal_status}"
+  puts "COMPLETION: #{completion_status}"
   puts '======================================='
-  quiet_event('result', 'stage' => 'finalize', 'status' => all_green ? 'GREEN' : 'NOT GREEN',
+  quiet_event('result', 'stage' => 'finalize', 'status' => terminal_status,
+              'completion_status' => completion_status,
               'workbook_id' => wb_id, 'data_model_id' => state['data_model_id'],
               'gates' => { 'phase6' => p6st.exitstatus, 'cleanup' => clst.exitstatus,
                            'assert_phase6_ran' => gst.exitstatus, 'ds_filters' => dsfst.exitstatus,
@@ -1745,6 +1792,11 @@ if opts[:finalize]
                            'migration_report' => report_st.exitstatus,
                            'migration_report_verdict' => report_verdict })
   phase_summary
+  if decision_required
+    puts 'DECISION REQUIRED: waiver budget exceeded. Fix waivers or rerun with'
+    puts '  --accept-waiver-budget-exceeded "<reason>"'
+    exit 10
+  end
   # ── Same-failure loop breaker (signature + attempt cap) ────────────────────
   # A NOT-GREEN finalize records its gate signature; re-running --finalize into
   # the SAME failure a second time is grinding, not converging — hard-STOP and
@@ -1819,7 +1871,7 @@ if opts[:finalize]
     # disproven that those earlier occurrences were a non-converging loop.
     Offramp.loop_reset(WORK)
   end
-  exit(all_green ? 0 : 3)
+  exit terminal_outcome['exit']
 end
 
 # ---------------------------------------------------------------------------
@@ -5944,7 +5996,7 @@ finalize_cmd = "  ruby scripts/migrate-tableau.rb #{opts[:wb_id] ? "--workbook-i
                "#{opts[:out] ? " --out #{WORK}" : ''} \\\n    --finalize --actuals #{File.join(WORK, 'parity-actuals.json')}"
 puts finalize_cmd
 puts '(--finalize runs phase6 finalize + orphan cleanup + the census-aware'
-puts ' assert-phase6-ran hard gate; exit 0 there is the ONLY green exit.)'
+puts ' assert-phase6-ran hard gate; exit 0 there is the only terminal-complete exit.)'
 puts 'PHASE E     : requested (--enhance) — runs at --finalize AFTER all gates are green' if opts[:enhance]
 puts '=================================================================='
 

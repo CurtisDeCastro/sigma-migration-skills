@@ -41,7 +41,7 @@ def write_source_accounting(wd, status: 'migrated', verdict: 'GREEN', result_sta
              JSON.generate('summary' => summary, 'objects' => [object]))
   result_object = object.reject { |key, _| key == 'evidence' }.merge('status' => result_status || status)
   File.write(File.join(wd, 'migration-result.json'),
-             JSON.generate('verdict' => verdict, 'summary' => summary,
+             JSON.generate('verdict' => verdict, 'completion_status' => 'complete', 'summary' => summary,
                            'source_objects' => [result_object]))
 end
 
@@ -61,6 +61,7 @@ Dir.mktmpdir do |wd|
   # State 3 — success present, no pending => exit 0, DONE
   File.write(File.join(wd, 'phase6-success.json'),
              JSON.generate('workbookId' => 'wb-1', 'gates' => 'all-pass',
+                           'completion_status' => 'complete',
                            'generatedAt' => '2026-07-09T00:00:00Z'))
   write_source_accounting(wd)
   code, out = run_vc(VC, wd)
@@ -90,8 +91,9 @@ end
 def success_marker(wd, extra = {})
   File.write(File.join(wd, 'phase6-success.json'),
              JSON.generate({ 'workbookId' => 'wb-1', 'gates' => 'all-pass',
+                             'completion_status' => 'complete',
                              'generatedAt' => '2026-07-19T00:00:00Z' }.merge(extra)))
-  write_source_accounting(wd)
+  write_source_accounting(wd, verdict: extra.fetch('verdict', 'GREEN'))
 end
 
 # Clean workdir → DONE with VERDICT: GREEN and an explicitly-empty ledger.
@@ -112,19 +114,52 @@ Dir.mktmpdir do |wd|
   check(out.include?('VERDICT: GREEN'), 'legacy marker still gets the derived verdict printed', fails)
 end
 
-# Scope cut (coverage.json dropped tile) + consistent PARTIAL claims → DONE,
-# verdict PARTIAL, ledger entry printed inline.
+# Legacy GREEN artifacts minted before completion_status derive completion from
+# the verdict. An explicit current value remains authoritative.
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN')
+  %w[phase6-success.json migration-result.json].each do |name|
+    path = File.join(wd, name)
+    doc = JSON.parse(File.read(path))
+    doc.delete('completion_status')
+    File.write(path, JSON.generate(doc))
+  end
+  code, = run_vc(VC, wd)
+  check(code == 0, "legacy GREEN without completion_status => exit 0 (got #{code})", fails)
+end
+
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN')
+  result = JSON.parse(File.read(File.join(wd, 'migration-result.json')))
+  result['completion_status'] = 'blocked'
+  File.write(File.join(wd, 'migration-result.json'), JSON.generate(result))
+  code, out = run_vc(VC, wd)
+  check(code == 7, "explicit blocked GREEN report remains invalid (got #{code})", fails)
+  check(out.include?('completion_status is not complete'),
+        'explicit report completion status is enforced', fails)
+end
+
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN', 'completion_status' => 'blocked')
+  code, out = run_vc(VC, wd)
+  check(code == 6, "explicit blocked GREEN success marker remains invalid (got #{code})", fails)
+  check(out.include?('phase6-success.json completion_status is not complete'),
+        'explicit marker completion status is enforced', fails)
+end
+
+# Scope cut (coverage.json dropped tile) is explicit skipped scope and therefore
+# a complete YELLOW handoff, never the obsolete PARTIAL terminal label.
 Dir.mktmpdir do |wd|
   File.write(File.join(wd, 'coverage.json'), JSON.generate(
     'unresolved' => [{ 'visual' => 'Region Map', 'severity' => 'dropped', 'detail' => 'no basemap' }]))
   File.write(File.join(wd, 'parity-final.json'), JSON.generate(
-    'status' => 'PASS', 'waivers' => [], 'waiver_count' => 0, 'verdict' => 'PARTIAL'))
-  success_marker(wd, 'verdict' => 'PARTIAL', 'waivers' => [])
+    'status' => 'PASS', 'waivers' => [], 'waiver_count' => 0, 'verdict' => 'YELLOW'))
+  success_marker(wd, 'verdict' => 'YELLOW', 'waivers' => [])
   code, out = run_vc(VC, wd)
-  check(code == 0, "dropped tile + honest PARTIAL claims => exit 0 (got #{code})", fails)
-  check(out.include?('VERDICT: PARTIAL'), 'verdict PARTIAL surfaces on the DONE line', fails)
+  check(code == 0, "dropped tile + honest YELLOW claims => exit 0 (got #{code})", fails)
+  check(out.include?('STATUS: YELLOW') && out.include?('COMPLETION: complete'),
+        'scope cut prints the YELLOW complete banner', fails)
   check(out.include?('[scope-cut]') && out.include?('Region Map'), 'the ledger entry prints inline, one line', fails)
-  check(out.include?('SUBSET of the source'), 'PARTIAL names the scope-cut meaning', fails)
 end
 
 # THE LIE (field case): a report claiming GREEN + 0 waivers over a workdir
