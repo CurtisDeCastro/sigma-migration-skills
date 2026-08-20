@@ -8,8 +8,9 @@
 require 'json'
 require 'optparse'
 require_relative 'lib/degradation_ledger'
+require_relative 'lib/terminal_outcome'
 
-TERMINAL = %w[migrated approximated needs-review skipped not-applicable].freeze
+TERMINAL = TerminalOutcome::TERMINAL_STATUSES
 
 opts = {}
 OptionParser.new do |parser|
@@ -79,6 +80,7 @@ report_rows = rows(report)
 unless census.dig('summary', 'complete') == true && !census_rows.empty? &&
        census_rows.all? { |row| TERMINAL.include?(status(row)) } &&
        report.dig('summary', 'complete') == true &&
+       report['completion_status'].to_s == 'complete' &&
        report.dig('summary', 'accounted').to_i == report.dig('summary', 'total').to_i
   warn 'NOT DONE: accounting/report is incomplete or has a non-terminal object'
   exit 4
@@ -130,12 +132,20 @@ end
 if report['degradations'].is_a?(Array) && report['degradations'] != derived
   contradictions << 'migration-result degradation ledger differs from fresh derivation'
 end
-accounting_yellow = report_rows.any? do |row|
-  %w[approximated needs-review skipped].include?(status(row))
-end
-expected_report_verdict = derived.empty? && !accounting_yellow ? 'GREEN' : 'YELLOW'
+expected_report_verdict = TerminalOutcome.report_verdict(
+  terminal_rows: report_rows.map { |row| status(row) },
+  degradation_entries: derived,
+  waiver_entries: Array(report['waivers'])
+)
 unless report['verdict'].to_s.upcase == expected_report_verdict
   contradictions << "migration-result verdict #{report['verdict'].inspect} contradicts #{expected_report_verdict}"
+end
+unless TerminalOutcome.completion_status(expected_report_verdict) == 'complete'
+  contradictions << "derived terminal verdict #{expected_report_verdict} is not a complete handoff"
+end
+marker_verdict = marker['verdict'].to_s.upcase
+if !marker_verdict.empty? && marker_verdict != expected_report_verdict
+  contradictions << "shared marker verdict #{marker['verdict'].inspect} contradicts terminal #{expected_report_verdict}"
 end
 state = read_json(File.join(workdir, 'run-state.json')) || {}
 contradictions << 'dry-run state cannot be complete' if state['mode'] == 'dry-run' && state['complete'] == true
@@ -147,7 +157,8 @@ unless contradictions.empty?
   exit 7
 end
 
-puts "DONE: Sisense hard gates, strict parity, accounting, render, ledger, and report reconcile"
+puts "DONE: Sisense hard gates, emitted-scope parity, accounting, render, ledger, and report reconcile"
+puts "  VERDICT: #{expected_report_verdict} (#{report['completion_status']})"
 puts "  workbook: #{marker['workbookId']}"
 puts "  charts: #{passed}/#{total}"
 puts "  objects: #{census_rows.length}/#{census_rows.length}"

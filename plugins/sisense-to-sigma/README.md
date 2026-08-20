@@ -20,8 +20,8 @@ workbook, layout, and parity.
 2. **(opt-in) RLS scan** — `detect_rls.py`: Sisense data-security → Sigma row-level security (zero-overhead when none).
 3. **Convert model** — `convert.py model`: warehouse-table elements + relationships (cardinality-resolved), ElastiCube custom-SQL → Sigma SQL (verbatim + flagged). POST + read back real ids.
 4. **Convert dashboards** — `convert.py dashboard`: current `{name, document}` workbook request with flat elements, metadata-only pages, and required authoritative layout; indicator→KPI (bounded gauge→progress), waterfall/chart/*→chart, pivot2→pivot, table; JAQL→Sigma formulas; filters→controls; Sisense columnar layout → Sigma 24-col grid. Unsupported/release-gated features are loud gaps.
-5. **Verify parity** — `verify_parity.py` (data: Sisense JAQL == warehouse) + `verify_layout.py` (structural layout) + render visual-QA (`sigma-export-png.py` + `refs/layout-visual-qa.md`).
-6. **Gap scout** — `scan_gaps.py` measures coverage, records gaps to a `learned-rules.json` ledger; `escalate-gap.py` files a tracking issue (opt-in).
+5. **Verify parity** — `verify_parity.py` proves every emitted widget (including approximations) matches Sisense JAQL; explicitly skipped/not-applicable omissions stay in the source census but are excluded from required chart parity. `verify_layout.py` and render visual-QA cover the emitted workbook.
+6. **Account and report** — `scan_gaps.py` inventories the full source, then census-backed accounting turns explicit manual gaps into an honest YELLOW handoff. Missing/contradictory objects or emitted divergence remain RED.
 
 ## Status
 

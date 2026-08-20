@@ -197,6 +197,38 @@ def run_accounting(workdir, gap, model, dashboards, provenance, parity=None):
     return run(command, check=False)[0]
 
 
+def run_accounted_gap_check(workdir, gap, parity=None):
+    command = [
+        sys.executable, HERE / "check-accounted-gaps.py",
+        "--gap-report", gap,
+        "--census", workdir / "source-object-census.json",
+        "--out", workdir / "accounted-gap-result.json",
+    ]
+    if parity and Path(parity).is_file():
+        command += ["--parity", parity]
+    return run(command, check=False)[0]
+
+
+def reconcile_terminal_marker(workdir):
+    """Make the shared all-pass marker quote the plugin's TerminalOutcome verdict."""
+    report = read_json(workdir / "migration-result.json")
+    marker_path = workdir / "phase6-success.json"
+    marker = read_json(marker_path)
+    verdict = str(report.get("verdict") or "RED").upper()
+    if report.get("completion_status") != "complete" or verdict not in ("GREEN", "YELLOW"):
+        raise MigrationError(
+            "final report is not a complete TerminalOutcome handoff: %s/%s" %
+            (verdict, report.get("completion_status"))
+        )
+    previous = marker.get("verdict")
+    if previous and str(previous).upper() != verdict:
+        marker["shared_verdict"] = previous
+    marker["verdict"] = verdict
+    marker["completion_status"] = "complete"
+    write_json(marker_path, marker)
+    return verdict
+
+
 def tile_boxes(workbook, page_id, output):
     """Derive render-side tile boxes from the authoritative inline layout."""
     root = workbook.get("document", workbook)
@@ -300,6 +332,15 @@ def visual_gate_options(args):
     return []
 
 
+def shared_gate_outcome(returncode, acceptance_reason=None):
+    """Map the shared gate's process contract to Sisense terminal policy."""
+    if returncode == 0:
+        return 0
+    if returncode == 19 and not str(acceptance_reason or "").strip():
+        return 10
+    return 2
+
+
 def main(argv=None):
     # Resolve neutral-file environment overrides before argparse captures its
     # defaults. This is read-only and occurs before any live API operation.
@@ -342,6 +383,10 @@ def main(argv=None):
                         metavar="PAGE=REASON")
     parser.add_argument("--skip-visual-comparison", metavar="REASON")
     parser.add_argument("--blind-grade", metavar="PATH")
+    parser.add_argument(
+        "--accept-waiver-budget-exceeded", metavar="REASON",
+        help="accept shared-gate exit 19 as a named terminal YELLOW decision",
+    )
     args = parser.parse_args(argv)
     if args.dry_run and args.reuse_dm:
         parser.error("--dry-run cannot use a live --reuse-dm")
@@ -349,6 +394,9 @@ def main(argv=None):
         parser.error("--skip-visual-comparison requires a non-empty reason")
     if args.blind_grade and args.skip_visual_comparison:
         parser.error("--blind-grade and --skip-visual-comparison are mutually exclusive")
+    if (args.accept_waiver_budget_exceeded is not None and
+            not args.accept_waiver_budget_exceeded.strip()):
+        parser.error("--accept-waiver-budget-exceeded requires a non-empty reason")
     if not args.dry_run and args.from_discovery is None and not args.cube:
         parser.error("live discovery requires --cube")
     if args.dry_run:
@@ -578,44 +626,40 @@ def main(argv=None):
                              (lint_rc, layout_rc))
     record("workbook-convert-layout")
 
-    parity_plan = workdir / "parity-plan.json"
-    parity_checks = workdir / "parity-checks.json"
-    parity_build = [
-        sys.executable, HERE / "build-sisense-parity.py", "build",
-        "--dashboards", dashboards_path, "--model", model_path,
-        "--cube", cube, "--database", args.database, "--schema", args.schema,
-        "--checks-out", parity_checks, "--plan-out", parity_plan,
-    ]
-    if args.parity_checks:
-        parity_build += ["--parity-checks", args.parity_checks]
-    parity_plan_rc, _ = run(parity_build, check=False)
-
     if args.dry_run:
-        phase("6", "offline dry-run accounting (no POST/parity/render)")
-        strict_rc, _ = run([
-            sys.executable, HERE / "scan_gaps.py", dashboards_path,
-            "--model", model_path, "--out", gap_path,
-            "--rules", workdir / "learned-rules.json", "--strict",
-        ], cwd=workdir, check=False)
+        phase("6", "offline emitted-scope parity planning and accounting")
+        parity_plan = workdir / "parity-plan.json"
+        parity_checks = workdir / "parity-checks.json"
+        parity_build = [
+            sys.executable, HERE / "build-sisense-parity.py", "build",
+            "--dashboards", dashboards_path, "--model", model_path,
+            "--cube", cube, "--database", args.database, "--schema", args.schema,
+            "--workbook", wb_spec, "--gap-report", gap_path,
+            "--checks-out", parity_checks, "--plan-out", parity_plan,
+        ]
+        if args.parity_checks:
+            parity_build += ["--parity-checks", args.parity_checks]
+        parity_plan_rc, _ = run(parity_build, check=False)
         accounting_rc = run_accounting(
             workdir, gap_path, model_path, dashboards_path, provenance
+        )
+        accounted_gap_rc = (
+            run_accounted_gap_check(workdir, gap_path)
+            if accounting_rc == 0 else 1
         )
         record(
             "dry-run-finished", "incomplete",
             complete=False, post_complete=False, parity_complete=False,
             render_complete=False, success_stamped=False,
-            strict_gap_complete=(strict_rc == 0),
             parity_plan_complete=(parity_plan_rc == 0),
             accounting_complete=(accounting_rc == 0),
+            accounted_gap_complete=(accounted_gap_rc == 0),
         )
         print("\nDRY RUN COMPLETE: discovery, scans, model/workbook conversion, "
               "blank-risk lint, layout, parity planning, and accounting exercised.")
         print("POST/parity/render are explicitly NOT complete; no success marker was stamped.")
         print("artifacts: %s" % workdir)
         return 0
-
-    if parity_plan_rc:
-        raise MigrationError("parity planning produced zero executable checks")
 
     phase("5c", "POST/readback workbook")
     post_wb = [
@@ -628,7 +672,25 @@ def main(argv=None):
     wb_id = read_json(workdir / "wb-ids.json")["workbookId"]
     record("workbook-post-readback", post_complete=True)
 
-    phase("6", "JAQL parity and normalized final contract")
+    phase("6", "build parity scope from emitted workbook")
+    parity_plan = workdir / "parity-plan.json"
+    parity_checks = workdir / "parity-checks.json"
+    parity_build = [
+        sys.executable, HERE / "build-sisense-parity.py", "build",
+        "--dashboards", dashboards_path, "--model", model_path,
+        "--cube", cube, "--database", args.database, "--schema", args.schema,
+        "--workbook", workdir / "wb-readback.json", "--gap-report", gap_path,
+        "--checks-out", parity_checks, "--plan-out", parity_plan,
+    ]
+    if args.parity_checks:
+        parity_build += ["--parity-checks", args.parity_checks]
+    parity_plan_rc, _ = run(parity_build, check=False)
+    if parity_plan_rc:
+        record("parity-scope", "failed")
+        return 2
+    record("parity-scope")
+
+    phase("6b", "JAQL parity and normalized final contract")
     verify_rc, _ = run([
         sys.executable, HERE / "verify_parity.py", parity_checks,
         "--snow-conn", args.snow_conn,
@@ -671,9 +733,6 @@ def main(argv=None):
                 "%s=%s" % (name, by_stem[name])
                 for name in target_names if name in by_stem
             ]
-    source_dashboards = read_json(dashboards_path)
-    source_dashboards = source_dashboards if isinstance(source_dashboards, list) else [source_dashboards]
-    source_widget_count = sum(len(row.get("widgets") or []) for row in source_dashboards)
     tiles = []
     layout_pages = []
     for page in pages:
@@ -682,7 +741,9 @@ def main(argv=None):
         tiles.append("%s=%s" % (page["id"], tile_path))
         layout_pages.append({
             "page": page.get("name") or page["id"],
-            "zones": source_widget_count if len(pages) == 1 else len(page_tiles),
+            # Layout scope follows emitted elements. Explicit source omissions
+            # remain in source-object-census.json, not as phantom layout zones.
+            "zones": len(page_tiles),
             "placed": len(page_tiles),
             "grid_fill_pct": round(grid_fill, 6),
             "unplaced_elements": unplaced,
@@ -703,7 +764,7 @@ def main(argv=None):
     run(visual_command)
     record("visual", render_complete=True)
 
-    phase("8", "control probe, orphan cleanup, strict gap gate")
+    phase("8", "control probe, cleanup, and source accounting")
     controls = [row for row in (read_json(wb_spec).get("document") or {}).get("elements") or []
                 if row.get("kind") == "control" or row.get("controlType")]
     if controls:
@@ -721,26 +782,22 @@ def main(argv=None):
         "ruby", HERE / "cleanup-orphan-workbooks.rb",
         "--workdir", workdir, "--keep", wb_id,
     ])
-    strict_rc, _ = run([
-        sys.executable, HERE / "scan_gaps.py", dashboards_path,
-        "--model", model_path, "--out", gap_path,
-        "--rules", workdir / "learned-rules.json", "--strict",
-    ], cwd=workdir, check=False)
-    if strict_rc:
-        record("strict-gap", "failed")
-        return 2
-
-    # The shared gate consumes source-vs-built control scope. Build a
-    # preliminary census now, then refresh the same accounting after the gate
-    # so the final report is post-gate evidence.
-    preliminary_accounting_rc = run_accounting(
+    accounting_rc = run_accounting(
         workdir, gap_path, model_path, dashboards_path, provenance,
         workdir / "parity-final.json",
     )
-    if preliminary_accounting_rc:
-        record("preliminary-accounting", "failed")
+    if accounting_rc:
+        record("accounting", "failed")
         return 2
-    record("preliminary-accounting")
+    record("accounting")
+
+    accounted_gap_rc = run_accounted_gap_check(
+        workdir, gap_path, workdir / "parity-final.json"
+    )
+    if accounted_gap_rc:
+        record("accounted-gap", "failed")
+        return 2
+    record("accounted-gap")
 
     control_scope = workdir / "control-scope.json"
     control_scope_rc, _ = run([
@@ -789,19 +846,29 @@ def main(argv=None):
     if targets:
         gate += ["--sigma-render", targets[0].split("=", 1)[1]]
     gate += visual_gate_options(args)
+    if args.accept_waiver_budget_exceeded:
+        gate += [
+            "--accept-waiver-budget-exceeded",
+            args.accept_waiver_budget_exceeded,
+        ]
     gate_rc, _ = run(gate, check=False)
     if gate_rc:
+        outcome = shared_gate_outcome(
+            gate_rc, args.accept_waiver_budget_exceeded
+        )
+        if outcome == 10:
+            record("shared-assert", "decision-required")
+            print(
+                "DECISION REQUIRED: shared waiver budget exceeded. "
+                "Resolve waivers or rerun with "
+                "--accept-waiver-budget-exceeded REASON for a YELLOW handoff.",
+                file=sys.stderr,
+            )
+            return 10
         record("shared-assert", "failed")
-        return 2
+        return outcome
 
-    phase("10", "post-gate accounting and final report")
-    accounting_rc = run_accounting(
-        workdir, gap_path, model_path, dashboards_path, provenance,
-        workdir / "parity-final.json",
-    )
-    if accounting_rc:
-        record("accounting", "failed")
-        return 2
+    phase("10", "final report from reconciled accounting")
     final_command = [
         sys.executable, HERE / "finalize-sisense-report.py",
         "--workdir", workdir,
@@ -817,6 +884,7 @@ def main(argv=None):
     if run(final_command, check=False)[0]:
         record("report", "failed")
         return 2
+    reconcile_terminal_marker(workdir)
     record("report")
 
     phase("11", "verify complete")
@@ -827,8 +895,15 @@ def main(argv=None):
     if verify_complete_rc:
         record("verify-complete", "failed", complete=False)
         return 2
-    record("verify-complete", complete=True, success_stamped=True)
-    print("\nSisense migration COMPLETE: DM %s, workbook %s, %.1fs" %
+    migration_result = read_json(workdir / "migration-result.json")
+    verdict = str(migration_result.get("verdict") or "RED").upper()
+    completion_status = migration_result.get("completion_status")
+    record(
+        "verify-complete", complete=True, success_stamped=True,
+        terminal_verdict=verdict, completion_status=completion_status,
+    )
+    print("\nSisense migration COMPLETE — VERDICT: %s" % verdict)
+    print("DM %s, workbook %s, %.1fs" %
           (dm_id, wb_id, time.time() - started))
     return 0
 
