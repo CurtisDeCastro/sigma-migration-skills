@@ -222,7 +222,9 @@ Dir.mktmpdir('pbi-accounting-success') do |dir|
         controls.dig('summary', 'emitted') == 1 && controls['detail'].length == 1,
         'control census accounts every source slicer')
   code, output = command(RbConfig.ruby, VERIFY, '--workdir', dir)
-  check(code.zero? && output.include?('DONE'), 'verify-complete accepts complete non-RED fresh report')
+  condition = code.zero? && output.include?('DONE')
+  check(condition, "verify-complete accepts complete non-RED fresh report" \
+                   "#{condition ? '' : " [exit=#{code}; #{output.strip}]"}")
 
   census['summary']['complete'] = false
   write_json(File.join(dir, 'source-object-census.json'), census)
@@ -244,7 +246,9 @@ Dir.mktmpdir('pbi-accounting-route') do |dir|
   code, = command(RbConfig.ruby, FINALIZER, '--workdir', dir)
   check(code.zero?, 'needs-review route produces a non-RED diagnostic report')
   code, output = command(RbConfig.ruby, VERIFY, '--workdir', dir)
-  check(code == 7 && output.include?('time-intelligence'), 'missing route chart PASS is rejected with exit 7')
+  condition = code == 7 && output.include?('time-intelligence')
+  check(condition, "missing route chart PASS is rejected with exit 7" \
+                   "#{condition ? '' : " [exit=#{code}; #{output.strip}]"}")
 end
 
 puts 'unaccounted measure and report contradiction'
