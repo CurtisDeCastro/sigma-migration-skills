@@ -49,6 +49,9 @@ user-invocable: true
 >   is complete **only** when `ruby scripts/verify-complete.rb --workdir <WORK>`
 >   exits 0 / prints ✅ DONE. A clean **PASS 1 (exit 12) is NOT done** — it means
 >   "run `--finalize`". Never report success or write a completion summary before.
+>   Completion also requires complete accounting: every formula in
+>   `formula-audit.json` and every object in `source-object-census.json` has one
+>   terminal disposition in `MIGRATION_REPORT.md` / `migration-result.json`.
 > - **This is a PRODUCTION migration, not a demo.** The bar is EXACT parity
 >   against the same warehouse, always. At a wall: follow the printed
 >   STOP/handoff, or surface the blocker plainly and stop — NEVER a third
@@ -143,11 +146,13 @@ ruby scripts/migrate-tableau.rb \
   --workbook "<name>" --connection <SIGMA_CONNECTION_ID> --folder <SIGMA_FOLDER_ID> \
   [--db <DB> --schema <SCHEMA>] [--name '<prefix>'] [--row-scale 1.5] \
   [--reuse-dm [ID]] [--force] [--yes]
+# … gap scan writes <workdir>/formula-audit.json + source-object-census.json …
 # … pass 1 auto-fills <workdir>/parity-actuals.json (collect-parity-actuals.rb);
 #   run the printed mcp-v2 queries for the REMAINING charts (pivot grids) only …
-# PASS 2 — finalize: phase6 verify + cleanup-orphans + census-aware hard gate
+# PASS 2 — finalize: phase6 verify + cleanup-orphans + census-aware report/gate
 ruby scripts/migrate-tableau.rb --workbook "<name>" \
   --finalize --actuals <workdir>/parity-actuals.json [--allow-missing-tiles N]
+# … writes MIGRATION_REPORT.md + migration-result.json; incomplete accounting fails …
 ```
 
 > **`--db`/`--schema` (always together) — there is NO default database.** The
@@ -224,7 +229,7 @@ phase by hand or need to understand why it stopped.
 |---|---|---|---|---|
 | −1 | Mission intake | write `mission.json` | inferred fields confirmed | `MIGRATION_REQUEST.md` |
 | 0 | Preflight + intake | `bootstrap.sh`; `doctor.sh`; `intake.rb` | `bootstrap.json` + `doctor.json` + `connection.json` | `refs/environment.md`, `refs/model-fit.md`, `refs/orchestration.md` (contexts) |
-| 0a | **Gap scan** (mandatory) | `scan-workbook-gaps.rb` | `gaps.json` — ❌ features → scout or `--force` | `refs/phase-0-scope.md`, `refs/coverage-matrix.md`, `refs/blending.md` (blends) |
+| 0a | **Gap scan** (mandatory) | `scan-workbook-gaps.rb` | `gaps.json` + `formula-audit.json` + `source-object-census.json` — ❌ features → scout or `--force`; every source formula/object starts an accounting row | `refs/phase-0-scope.md`, `refs/coverage-matrix.md`, `refs/blending.md` (blends) |
 | 0b | Destination + mode (ask) | `pick-destination.rb` | folder id + conversion mode | `refs/phase-0-scope.md` |
 | 0c | Scope/cost sign-off | `estimate-cost.rb --workdir` | `cost-estimate.json` + run-state ack (`cost_estimate_acknowledged`) | `refs/phase-0-scope.md`, `refs/model-fit.md` §3, `refs/performance.md` |
 | 1 | Discover the source | `tableau-discover.rb` (PAT) or MCP | `get-workbook.json`, `views/*.csv`, `.twb` | `refs/phase-1-discover.md`, `refs/tableau-rest.md`, `refs/multi-datasource.md`, `refs/object-model.md`, `refs/story-points.md`, `refs/extract-landing.md` |
@@ -235,7 +240,7 @@ phase by hand or need to understand why it stopped.
 | 3 | Build the DM spec | author → `validate-spec.rb --type datamodel` | clean `dm-spec.json` + `join-plan.json` probed (exit 23) + `semantic-edits.json` proven (exit 27) | `refs/phase-3-datamodel.md`, `refs/data-model-spec.md`, `refs/window-functions.md`, `refs/blending.md`, `refs/multi-datasource.md` |
 | 4 | POST the DM + **read back** | `post-and-readback.rb --type datamodel` | `dm-ids.json` (server ids) | `refs/phase-4-post-dm.md` |
 | 5 | Build workbook | `build-charts-from-signals.rb` → `post-and-readback` → `build-dashboard-layout.rb` → `put-layout.rb` | `preflight_lint` clean; body = metadata + `document{pages(metadata only),elements(flat),layout(required)}`; layout owns pages, places each element once, and is the **LAST write**; LOD/aggregation audits resolved | `refs/phase-5-workbook.md`, `refs/workbook-code-release-gaps.md`, `refs/chart-patterns.md`, `refs/layout-grid.md`, `refs/story-points.md` |
-| 6 | **🚧 Parity + anchors + ground truth + visual** | `phase6-parity.rb`; `verify-anchors.rb`; ground-truth trio; then the gate sequence | 🚧 `parity-final.json` PASS + `anchors-verdict.json` + per-tile `numeric_parity` (exit 25) + recorded visual verdict + full `run-state.json` | `refs/phase-6-parity.md`, `refs/source-anchors.md`, `refs/ground-truth-oracle.md`, `refs/gates.md`, `refs/blind-grader-brief.md`, `refs/visual-similarity.md`, `refs/control-parity.md`, `refs/orchestration.md` (verifier) |
+| 6 | **🚧 Parity + anchors + ground truth + visual** | `phase6-parity.rb`; `verify-anchors.rb`; ground-truth trio; then finalization and the gate sequence | 🚧 `parity-final.json` PASS + `anchors-verdict.json` + per-tile `numeric_parity` (exit 25) + recorded visual verdict + full `run-state.json` + `MIGRATION_REPORT.md` / `migration-result.json` with complete source-object and formula accounting | `refs/phase-6-parity.md`, `refs/source-anchors.md`, `refs/ground-truth-oracle.md`, `refs/gates.md`, `refs/migration-report-format.md`, `refs/blind-grader-brief.md`, `refs/visual-similarity.md`, `refs/control-parity.md`, `refs/orchestration.md` (verifier) |
 | 5g | **RCF fidelity loop** | `fidelity-loop.rb` render → compare → fix until clean | 🚧 (default-on) `fidelity-ledger.json` no unresolved spec-fixable deltas (gate 8d) | `refs/phase-5g-rcf.md`, `refs/fidelity-rubric.md`, `refs/fidelity-recipes.md`, `refs/layout-visual-qa.md` |
 | E | Enhance (opt-in) | `enhance-scan.rb` → `enhance-apply.rb` | cloned "— Enhanced" workbook | `refs/phase-e-enhance.md`, `refs/postpublish-interactivity.md` |
 | — | Security RLS/CLS | detect always; apply opt-in | `apply_sigma_rls.py` | `refs/security-rls.md` |

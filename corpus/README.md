@@ -40,6 +40,7 @@ corpus/
 | looker/skilltest-course-performance | synthetic complex LookML dashboard (dynamic parameters, null filter, pre-aggregated relationship, rolling window) | executable offline pipeline + hazard-gate and SQLite oracle checks |
 | domo/orders-smoke | synthetic Domo DataSets + cards + Beast Modes | DM (2 elements) |
 | domo/orders-presentation | synthetic Domo cards + card-data snapshot | presentation-override derivation pin (checks.sh, no golden DM) |
+| sisense/ecommerce-smoke | existing Sample ECommerce model + dashboard fixtures | DM + workbook + structured gap report (checks.sh also verifies layout) |
 
 ## Runner
 

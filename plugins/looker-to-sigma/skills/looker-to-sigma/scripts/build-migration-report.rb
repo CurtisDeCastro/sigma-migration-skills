@@ -767,7 +767,10 @@ def write_atomic(path, content)
   dir = File.dirname(File.expand_path(path))
   raise MigrationReportError, "output directory does not exist: #{dir}" unless File.directory?(dir)
   temporary = "#{path}.tmp.#{$$}"
-  File.write(temporary, content)
+  # Binary mode is required for byte-stable `--check` output on Windows.
+  # Text-mode File.write expands LF to CRLF there, while the in-memory expected
+  # string remains LF-only, making an immediately generated report look stale.
+  File.binwrite(temporary, content)
   File.rename(temporary, path)
 ensure
   File.delete(temporary) if defined?(temporary) && File.exist?(temporary)
@@ -782,9 +785,16 @@ begin
 
   if options[:check]
     stale = []
-    [[options[:json_out], json], [options[:markdown], markdown]].each do |path, expected|
-      stale << path unless File.file?(path) && File.binread(path) == expected
+    json_current = begin
+      JSON.parse(File.read(options[:json_out])) if File.file?(options[:json_out])
+    rescue JSON::ParserError
+      nil
     end
+    stale << options[:json_out] unless json_current == document
+
+    markdown_current = File.file?(options[:markdown]) ? File.binread(options[:markdown]) : nil
+    markdown_current = markdown_current.gsub(/\r\n?/, "\n") if markdown_current
+    stale << options[:markdown] unless markdown_current == markdown
     unless stale.empty?
       warn "migration report check failed; stale or missing output(s): #{stale.join(', ')}"
       exit 1

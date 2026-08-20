@@ -102,7 +102,17 @@ Dir.mktmpdir('migration-report-full') do |dir|
   )
   ok('--check accepts current deterministic outputs', check_status.exitstatus == 0)
 
+  # Cross-platform freshness is semantic for JSON and line-ending-neutral for
+  # Markdown. Windows text-mode tools may reserialize JSON or write CRLF without
+  # changing the report contract.
+  File.binwrite(File.join(dir, 'migration-result.json'), JSON.generate(result))
   report_path = File.join(dir, 'MIGRATION_REPORT.md')
+  File.binwrite(report_path, markdown.gsub("\n", "\r\n"))
+  _stdout, _stderr, portable_status = run_builder(
+    dir, '--check', env: { 'SOURCE_DATE_EPOCH' => '0' }
+  )
+  ok('--check accepts semantic JSON and CRLF Markdown', portable_status.exitstatus == 0)
+
   File.open(report_path, 'a') { |file| file.write("manual edit\n") }
   before = File.binread(report_path)
   _stdout, stale_stderr, stale_status = run_builder(
@@ -212,6 +222,11 @@ Dir.mktmpdir('migration-report-inconsistent') do |dir|
   ok('inconsistent report count is named', consistency['status'] == 'FAIL' &&
                                                 consistency['message'].include?('summary total 2 != 1'))
 end
+
+builder_source = File.read(BUILDER)
+ok('report outputs use binary writes so --check is byte-stable on Windows',
+   builder_source.include?('File.binwrite(temporary, content)') &&
+     !builder_source.include?('File.write(temporary, content)'))
 
 puts($failures.zero? ? "\nall build-migration-report tests passed" : "\n#{$failures} FAILED")
 exit($failures.zero? ? 0 : 1)
