@@ -83,6 +83,38 @@ offline-only path that normalizes into the same contract.
 
 ---
 
+## Credentials-free readiness audit (mandatory, before migration)
+
+Run the local audit against the complete LookML checkout before authenticating
+to Sigma or POSTing anything. `migrate-looker.py` runs it automatically after
+source parsing and before credential loading; it can also run standalone:
+
+```bash
+node scripts/audit-lookml-readiness.mjs \
+  --lookml-dir /path/to/lookml --explore <explore> \
+  --out /tmp/<name>/lookml-readiness.json \
+  --field-census /tmp/<name>/lookml-field-census.json \
+  --formula-mapping /tmp/<name>/formula-mapping.json
+```
+
+This uses the vendored converter and needs no Looker or Sigma credentials.
+`lookml-readiness.json` records scoped files, explores, joins, derived tables,
+extends, and classified warnings; `lookml-field-census.json` accounts for every
+dimension, expanded dimension-group timeframe, and measure as exact,
+approximate, or omitted; `formula-mapping.json` pairs source and Sigma formulas
+with dependency depth and unresolved references. Exit 0 means clean/caveat,
+exit 1 means blocked, and exit 2 means the audit itself failed. A blocked audit
+is a hard pre-POST stop. Use `refs/open-items.md` for the durable gap/evidence
+status; keep run-specific findings in the workdir.
+
+The field/formula censuses do not replace final object accounting. Maintain
+`<workdir>/source-object-census.json` for every in-scope model, explore, view,
+dashboard/Look, tile, filter, and field/formula finding. Each must end as
+`migrated`, `approximated`, `needs-review`, `skipped`, or `not-applicable`,
+with evidence.
+
+---
+
 ## ONE COMMAND (preferred): migrate-looker.py
 
 > ## ⛔ THE ONE PATH (do not improvise a workbook)
@@ -95,7 +127,11 @@ offline-only path that normalizes into the same contract.
 >   tell the user to authenticate** — do not build a shell.
 > - **"Done" is a file on disk, not "pages exist."** Complete only when
 >   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
->   stamped `phase6-success.json`). An empty workbook is never done.
+>   stamped `phase6-success.json`). An empty workbook is never done. Before
+>   that check, run `ruby scripts/build-migration-report.rb --workdir <WORK>`
+>   and its `--check` mode: every source object and field/formula finding must
+>   have one terminal disposition in `MIGRATION_REPORT.md`,
+>   `migration-result.json`, and `source-object-census.json`.
 
 The whole pipeline — parse → **RLS gate** → convert → **DM-reuse check** → DM
 POST + readback → workbook build (layout inline) → **source-freshness
@@ -186,6 +222,10 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
 | Script | Purpose |
 |---|---|
 | `scripts/migrate-looker.py` | **ONE-COMMAND orchestrator** (preferred entry) — chains every phase below + the scripted parity hard gate; see the section above. |
+| `scripts/audit-lookml-readiness.mjs` | **Credentials-free pre-POST gate:** converts the scoped LookML in memory, classifies warnings, and writes `lookml-readiness.json`, `lookml-field-census.json`, and `formula-mapping.json`; blocked omissions/refs/extends exit 1. |
+| `scripts/build-looker-accounting.py` | **Source-object reconciliation:** joins the readiness artifacts, dashboard contract, DM/workbook specs, controls, and parity into `source-object-census.json`, `coverage.json`, and `looker-controls-coverage.json`; omitted or contradictory source objects fail completion. |
+| `scripts/build-migration-report.rb` | **Final accounting:** reads `source-object-census.json` and gate artifacts, then writes `MIGRATION_REPORT.md` + `migration-result.json`; `--check` fails stale, missing, contradictory, or incomplete accounting. See `refs/migration-report-format.md`. |
+| `scripts/verify-complete.rb` | **Completion check:** refuses DONE unless the phase-6 sentinel, source-object census, and migration result are present, complete, and mutually consistent. |
 | `scripts/phase6-parity-looker.rb` | **Phase 4 (parity gate):** two-pass orchestrator — PASS 1 reads the workbook spec → `parity-plan.json` + per-chart fetch instructions; PASS 2 `--finalize` runs `verify-parity.rb` and writes the **`parity-final.json` sentinel** the hard gate requires. Same contract as quicksight/thoughtspot/tableau. |
 | `scripts/verify-parity.rb` | **Phase 4:** the comparator (strict set-compare with date-bucket canonicalization; `--extract-mode` tolerance variant). Vendored from the shared converter copy. |
 | `scripts/assert-phase6-ran.rb` | **HARD GATE** (vendored **byte-identical** across the 5 plugins — keep the md5 in lockstep): parity ran + PASS, no orphan workbooks, no `type=error` columns, layout applied, layout lint (gate 6), **control lint (gate 7** — dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape, exit 9; see `refs/control-parity.md`**)**. `ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>` must **exit 0** before declaring GREEN. |

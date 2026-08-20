@@ -179,7 +179,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/layout_lint.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/layout_lint.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/layout_lint.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/layout_lint.rb"
       ]
     },
     {
@@ -192,7 +193,8 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/flip_gate.rb",
-        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/flip_gate.rb"
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/flip_gate.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/flip_gate.rb"
       ]
     },
     {
@@ -205,7 +207,9 @@
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/degradation_ledger.rb",
-        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/degradation_ledger.rb"
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/degradation_ledger.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/degradation_ledger.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/degradation_ledger.rb"
       ],
       "note": "W2.23's STANDING EXEMPTION for domo/hex was DISCHARGED 2026-08-05: this is the deliberate early-Wave-3 fan-out it called for \u2014 BOTH ledger sibs (this file + evidence_ledger.rb) added to domo and hex together, in one atomic commit, with domo's suites run \u2014 not a sync-tooling accident. Motivation: assert-phase6-ran.rb is vendored to 8 plugins but this lib was vendored to only 6, so on domo and hex the gate fell through to its legacy uncapped path (\"all gates pass \u2014 conversion may declare GREEN\") with no PR-14 verdict derivation \u2014 a GREEN there was strictly weaker than the same string from the 6 synced converters. Found while driving domo's 48-card cold run to a defensible gold verdict."
     },
@@ -439,7 +443,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/verify-warehouse.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-warehouse.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-warehouse.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-warehouse.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-warehouse.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-warehouse.rb"
       ]
     },
     {
@@ -470,7 +475,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/probe-controls.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/probe-controls.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/probe-controls.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/probe-controls.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/probe-controls.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/probe-controls.rb"
       ]
     },
     {
@@ -517,7 +523,9 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/assert-phase6-ran.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/assert-phase6-ran.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/assert-phase6-ran.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/assert-phase6-ran.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/assert-phase6-ran.rb"
       ]
     },
     {
@@ -531,7 +539,9 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/record-visual-check.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/record-visual-check.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/record-visual-check.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/record-visual-check.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/record-visual-check.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/record-visual-check.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/record-visual-check.rb"
       ]
     },
     {
@@ -545,7 +555,9 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/blind_grade.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/blind_grade.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/blind_grade.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/blind_grade.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/blind_grade.rb"
       ]
     },
     {
@@ -560,7 +572,8 @@
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/cli_encoding.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/cli_encoding.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/cli_encoding.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/cli_encoding.rb"
       ]
     },
     {
@@ -1184,7 +1197,9 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/cleanup-orphan-workbooks.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/cleanup-orphan-workbooks.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/cleanup-orphan-workbooks.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/cleanup-orphan-workbooks.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/cleanup-orphan-workbooks.rb"
       ]
     },
     {

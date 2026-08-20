@@ -767,7 +767,10 @@ def write_atomic(path, content)
   dir = File.dirname(File.expand_path(path))
   raise MigrationReportError, "output directory does not exist: #{dir}" unless File.directory?(dir)
   temporary = "#{path}.tmp.#{$$}"
-  File.write(temporary, content)
+  # Binary mode is required for byte-stable `--check` output on Windows.
+  # Text-mode File.write expands LF to CRLF there, while the in-memory expected
+  # string remains LF-only, making an immediately generated report look stale.
+  File.binwrite(temporary, content)
   File.rename(temporary, path)
 ensure
   File.delete(temporary) if defined?(temporary) && File.exist?(temporary)
