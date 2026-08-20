@@ -28,6 +28,50 @@ entire pipeline and verifies the expected hazard gate and SQLite value oracle.
     {"path": "generate_goldens.py", "format": "text"},
     {"path": "checks.sh", "format": "text"}
   ],
-  "goldens": {}
+  "goldens": {
+    "data-model.json": {
+      "pages": 1,
+      "elements": 2,
+      "columns": 14,
+      "metrics": 1,
+      "relationships": 1,
+      "warnings": 9,
+      "element_names": ["Enrollment Metrics", "Period Bridge"],
+      "metric_names": ["Enrollments Total"],
+      "relationship_names": ["period_bridge"]
+    },
+    "workbook.json": {
+      "pages": 2,
+      "elements": 16,
+      "columns": 29,
+      "metrics": 0,
+      "relationships": 0,
+      "warnings": 0
+    },
+    "contract.json": {
+      "pages": 0,
+      "elements": 4,
+      "columns": 0,
+      "metrics": 0,
+      "relationships": 0,
+      "warnings": 0
+    },
+    "modeling-hazards.json": {
+      "pages": 0,
+      "elements": 0,
+      "columns": 0,
+      "metrics": 0,
+      "relationships": 0,
+      "warnings": 0
+    },
+    "dynamic-controls.json": {
+      "pages": 0,
+      "elements": 0,
+      "columns": 0,
+      "metrics": 0,
+      "relationships": 0,
+      "warnings": 0
+    }
+  }
 }
 ```
