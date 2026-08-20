@@ -232,8 +232,10 @@ module JoinPlan
                   .map { |op| op.to_s[/\A\[([^\]]+)\]\z/, 1] }.compact
         pairs << { l: sides[0], r: sides[1] } if sides.size == 2
       end
-      dm_rel = dm_index[[left, right]]
-      reverse_rel = dm_rel.nil? ? dm_index[[right, left]] : nil
+      left_key = object_table_key(left)
+      right_key = object_table_key(right)
+      dm_rel = dm_index[[left, right]] || dm_index[[left_key, right_key]]
+      reverse_rel = dm_rel.nil? ? (dm_index[[right, left]] || dm_index[[right_key, left_key]]) : nil
       if reverse_rel
         # The converter may reverse Tableau's authoring-order endpoints when
         # database-backed cardinality proves the first endpoint is the unique
@@ -328,15 +330,33 @@ module JoinPlan
         next if right_name.empty?
         keys = (rel['keys'] || []).map { |k| dm_column_physical_name(tgt, k['targetColumnId']) }.compact
         next if keys.empty?
-        idx[[element_name(el), right_name]] = {
+        record = {
           derived_via:        rel['derivedVia'],
           partial:            rel['partial'] == true,
           dropped_conditions: rel['droppedConditions'],
           keys:               keys
         }
+        left_name = element_name(el)
+        idx[[left_name, right_name]] = record
+        left_physical = Array(el.dig('source', 'path')).last.to_s
+        right_physical = Array(tgt&.dig('source', 'path')).last.to_s
+        idx[[object_table_key(left_physical), object_table_key(right_physical)]] = record \
+          unless left_physical.empty? || right_physical.empty?
       end
     end
     idx
+  end
+
+  # Tableau VC/object-graph relation labels commonly carry a friendly name plus
+  # a physical suffix: "ABSENCE_RECORDS (CSA.ABSENCE_RECORDS)". Converter
+  # elements are keyed by their physical source.path tail. Normalize both onto
+  # the physical table token for orientation lookup, while preserving the raw
+  # names in the emitted ledger for operator readability.
+  def object_table_key(name)
+    raw = name.to_s
+    parenthesized = raw.scan(/\(([^()]*)\)/).flatten.last
+    token = parenthesized.to_s.include?('.') ? parenthesized.to_s.split('.').last : raw
+    token.strip.upcase.gsub(/\s+/, '_')
   end
 
   # A dm_spec column's PHYSICAL (warehouse) name: its explicit display `name`
