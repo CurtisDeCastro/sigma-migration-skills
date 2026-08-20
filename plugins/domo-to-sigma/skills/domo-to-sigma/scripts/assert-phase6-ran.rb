@@ -4,8 +4,8 @@
 # independent things — failing ANY of them blocks the GREEN declaration:
 #
 #   0. Pre-POST render integrity — when the workdir carries a local workbook
-#      code-rep candidate (wb-spec.json, workbook-spec.json, then
-#      wb-readback.json), every chart/KPI/table/pivot/crosstab must have a
+#      authored code-rep candidate (wb-spec.json or workbook-spec.json), every
+#      chart/KPI/table/pivot/crosstab must have a
 #      usable data binding. Evidence is always written to
 #      blank-risk-elements.json. No local candidate → stated SKIP so legacy
 #      live-only runs remain valid.
@@ -1093,14 +1093,16 @@ gate_context_started = true
 
 # ---------------------------------------------------------------------------
 # Gate 0 — local pre-POST render integrity (exit 32)
-# Prefer the authored spec, then its conventional alternate name, then the
-# post-POST readback. This gate is intentionally conditional on a LOCAL
-# candidate: older live-only converter runs never retained one, and their
+# Prefer the authored spec, then its conventional alternate name. A readback is
+# deliberately not a candidate: this is a pre-POST gate, while readback-only
+# fixtures and legacy runs use the later live-column/render gates. This gate is
+# intentionally conditional on a LOCAL authored candidate; older live-only
+# converter runs never retained one, and their
 # existing live gates remain authoritative. When a candidate exists there is
 # no waiver — a data element with no binding is a deterministic blank-render
 # risk and must be fixed before another POST.
 # ---------------------------------------------------------------------------
-render_spec_path = %w[wb-spec.json workbook-spec.json wb-readback.json]
+render_spec_path = %w[wb-spec.json workbook-spec.json]
                    .map { |name| File.join(opts[:tab], name) }
                    .find { |path| File.exist?(path) }
 render_evidence_path = File.join(opts[:tab], 'blank-risk-elements.json')
@@ -1132,7 +1134,7 @@ if render_spec_path
   puts "[OK] render-integrity gate: #{render_report['elements_checked']} data element(s) checked in " \
        "#{File.basename(render_spec_path)}; 0 blank risks (evidence: blank-risk-elements.json)"
 else
-  puts '[SKIP] render-integrity gate: no local wb-spec.json, workbook-spec.json, or wb-readback.json candidate; ' \
+  puts '[SKIP] render-integrity gate: no local wb-spec.json or workbook-spec.json candidate; ' \
        'legacy live-only run preserved'
 end
 
