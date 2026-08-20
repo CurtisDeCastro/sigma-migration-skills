@@ -3,6 +3,7 @@
 
 import json
 import os
+import pathlib
 import sqlite3
 import subprocess
 import sys
@@ -29,7 +30,7 @@ def converter_result(tmp):
     json.dump(files, open(source, "w", encoding="utf-8"))
     open(runner, "w", encoding="utf-8").write(
         "import fs from 'node:fs';\n"
-        f"import {{ convertLookMLToSigma }} from {json.dumps('file://' + CONVERTER)};\n"
+        f"import {{ convertLookMLToSigma }} from {json.dumps(pathlib.Path(CONVERTER).resolve().as_uri())};\n"
         f"const files=JSON.parse(fs.readFileSync({json.dumps(source)},'utf8'));\n"
         "const value=convertLookMLToSigma(files,{exploreName:'enrollment_metrics',"
         "connectionId:'fixture',joinStrategy:'relationships'});\n"

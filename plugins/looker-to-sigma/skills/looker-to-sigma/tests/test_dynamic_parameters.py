@@ -3,6 +3,7 @@
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,7 @@ def convert(tmp):
     json.dump(files, open(files_path, "w", encoding="utf-8"))
     open(runner_path, "w", encoding="utf-8").write(
         "import fs from 'node:fs';\n"
-        f"import {{ convertLookMLToSigma }} from {json.dumps('file://' + CONVERTER)};\n"
+        f"import {{ convertLookMLToSigma }} from {json.dumps(pathlib.Path(CONVERTER).resolve().as_uri())};\n"
         f"const files = JSON.parse(fs.readFileSync({json.dumps(files_path)}, 'utf8'));\n"
         "const result = convertLookMLToSigma(files, {exploreName:'order_fact', "
         "connectionId:'fixture', joinStrategy:'relationships'});\n"
