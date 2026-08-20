@@ -2,14 +2,15 @@
 """Focused offline regression tests for the Qlik completion contract."""
 
 import importlib.util
+import binascii
 import json
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
-
-from PIL import Image, ImageDraw
 
 
 SKILL = Path(__file__).resolve().parents[1]
@@ -21,24 +22,42 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def healthy_png(path, blank_tiles=False):
+def write_png(path, width, height, pixel):
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", (600, 300), "white")
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, 599, 45), fill=(25, 55, 95))
-    for x in range(25, 575, 55):
-        draw.rectangle((x, 70, x + 25, 260 - (x % 95)), fill=(50, 120, 190))
-    if blank_tiles:
-        image = Image.new("RGB", (600, 300), "white")
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, 599, 35), fill=(25, 55, 95))
-        draw.line((20, 50, 580, 50), fill="black", width=2)
-    image.save(path, "PNG")
+    rows = b"".join(
+        b"\x00" + b"".join(bytes(pixel(x, y)) for x in range(width))
+        for y in range(height)
+    )
+
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data)) + kind + data
+            + struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    payload = b"\x89PNG\r\n\x1a\n"
+    payload += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    payload += chunk(b"IDAT", zlib.compress(rows))
+    payload += chunk(b"IEND", b"")
+    path.write_bytes(payload)
+
+
+def healthy_png(path, blank_tiles=False):
+    def pixel(x, y):
+        if y < (35 if blank_tiles else 45):
+            return (25, 55, 95)
+        if blank_tiles:
+            return (0, 0, 0) if 49 <= y <= 51 and 20 <= x <= 580 else (255, 255, 255)
+        for bar_x in range(25, 575, 55):
+            if bar_x <= x <= bar_x + 25 and 70 <= y <= 260 - (bar_x % 95):
+                return (50, 120, 190)
+        return (255, 255, 255)
+
+    write_png(path, 600, 300, pixel)
 
 
 def blank_png(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (600, 300), "white").save(path, "PNG")
+    write_png(path, 600, 300, lambda _x, _y: (255, 255, 255))
 
 
 class CompletionContractTest(unittest.TestCase):
