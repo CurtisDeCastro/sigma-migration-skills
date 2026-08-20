@@ -710,6 +710,12 @@ def main():
                         display = disp(expr)
                         need(display, explore)
                         expr = f"[{master_of(explore)['name']}/{display}]"
+                    expr = re.sub(
+                        r"\bDATE_TRUNC\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*([^)]+)\)",
+                        lambda match: f'DateTrunc("{match.group(1).lower()}", {match.group(2).strip()})',
+                        expr,
+                        flags=re.I,
+                    )
                     expr = re.sub(r"\bNULLIF\s*\(", "NullIf(", expr, flags=re.I)
                     if re.search(r"\{%|\{\{|\$\{|;|\bSELECT\b", expr, re.I):
                         continue
