@@ -4839,6 +4839,19 @@ if mechanical
         c['formula'] = c['formula'].gsub(/\[#{Regexp.escape(real)}\/([^\]]+)\]/) do
           col = Regexp.last_match(1)
           exact = labels.include?(col) ? col : by_norm[nrmc.call(col)]
+          # Related columns on a derived grain view round-trip with the target
+          # element suffix ("Employment Type (EMPLOYEES)"). The builder asks
+          # for the unsuffixed Tableau caption. Accept ONLY a unique
+          # prefix+parenthetical match; two role-played/duplicate candidates
+          # remain unresolved rather than guessing.
+          unless exact
+            stem = nrmc.call(col)
+            suffixed = labels.select do |label|
+              label.match?(/\A#{Regexp.escape(col)}\s+\([^)]+\)\z/i) ||
+                (nrmc.call(label).start_with?(stem) && label.include?('('))
+            end
+            exact = suffixed.first if suffixed.one?
+          end
           if exact
             fixed += 1 if exact != col
             "[#{real}/#{exact}]"
