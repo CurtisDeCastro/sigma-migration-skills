@@ -42,6 +42,7 @@
 require 'json'
 require 'tmpdir'
 require 'fileutils'
+require 'open3'
 
 GATE = File.expand_path('../scripts/assert-phase6-ran.rb', __dir__)
 # Self-identifies the adopting converter from this file's own path (e.g. a
@@ -61,6 +62,13 @@ def run_gate(dir, *extra_args)
   env = { 'SIGMA_BASE_URL' => '', 'SIGMA_API_TOKEN' => '' }
   system(env, *cmd, out: File::NULL, err: File::NULL)
   $?.exitstatus
+end
+
+def capture_gate(dir, *extra_args)
+  cmd = ['ruby', GATE, '--workdir', dir] + extra_args
+  env = { 'SIGMA_BASE_URL' => '', 'SIGMA_API_TOKEN' => '' }
+  out, err, status = Open3.capture3(env, *cmd)
+  [status.exitstatus, out + err]
 end
 
 def write_json(dir, name, obj)
@@ -292,6 +300,20 @@ end
 puts '== waiver budget (exit 19; checked LAST, after every other gate passes) =='
 scenario('3 budget-counted waivers (column+layout+orphan), 1 policy-excluded (visual-comparison) -> exit 19', 19,
          HAPPY_FLAGS + ['--skip-orphan-check', 'budget test: deliberately exceed the cap of 2'])
+Dir.mktmpdir('powerbi-p6-budget-accepted') do |dir|
+  write_good_fixtures(dir)
+  code, output = capture_gate(
+    dir,
+    *(HAPPY_FLAGS +
+      ['--skip-orphan-check', 'budget test: deliberately exceed the cap of 2',
+       '--accept-waiver-budget-exceeded', 'reviewed exception for focused test'])
+  )
+  marker = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  eq(code, 0, 'accepted waiver-budget overflow -> exit 0')
+  eq(marker['verdict'], 'YELLOW', 'accepted waiver-budget marker is YELLOW')
+  eq(output.include?('VERDICT: YELLOW') && !output.include?('VERDICT: GREEN'), true,
+     'accepted waiver-budget banner says YELLOW, never GREEN')
+end
 
 puts
 if $failures.zero? then puts 'ALL PASS'; exit 0 else puts "#{$failures} FAILURE(S)"; exit 1 end

@@ -3,9 +3,10 @@
 #
 # verify-complete.rb — the single offline "is this migration actually done?" check.
 #
-# A Power BI→Sigma conversion produced a real, non-empty workbook ONLY when
-# migrate-powerbi.rb finished and stamped <workdir>/phase6-success.json
-# (workbookId + chartCount + gates) at exit 0. An EMPTY / placeholder workbook
+# A Power BI→Sigma conversion is terminal ONLY when assert-phase6-ran.rb stamped
+# <workdir>/phase6-success.json with gates=all-pass after strict parity. The
+# one-shot builder writes parity-pending.json and exits 10 instead. An EMPTY /
+# placeholder workbook
 # (pages but no elements — the classic failure where a blocked agent hand-builds
 # a shell) never gets that marker, because the orchestrator refuses to green a
 # 0-element build. So "built" is a fact on disk, not "the pages look right".
@@ -18,14 +19,16 @@
 # Usage:  ruby scripts/verify-complete.rb --workdir <dir> [--workbook-id <id>]
 #
 # Exit codes:
-#   0  DONE   — non-empty build marker + parity-final.json proving every chart
-#              strict-PASS against the source
+#   0  COMPLETE — terminal GREEN or YELLOW report + all-pass marker +
+#                 strict-PASS evidence for every emitted/in-scope chart
 #   2  NOT DONE — no success marker (conversion didn't complete / was hand-built)
 #   3  NOT DONE — marker present but 0 chart elements (empty workbook)
 #   4  DONE-BUT-MISMATCH — success marker is for a different workbook than asked
 #   5  NOT DONE — value parity missing, stale-only, divergent, or internally inconsistent
-#   6  NOT DONE — source accounting/report result missing, stale, RED, or mismatched
-#   7  NOT DONE — a parity-required time-intelligence route lacks chart PASS proof
+#   6  NOT DONE — source accounting/report result missing, stale, blocked,
+#                 verdict-mismatched, or emitted-chart parity incomplete
+#   7  NOT DONE — a routed/emitted time-intelligence route lacks chart PASS
+#                 proof, or a review/skipped route is not terminal/non-emitted
 #   8  NOT DONE — degradation ledger or migration report is stale/contradictory
 
 require 'json'
@@ -33,6 +36,7 @@ require 'open3'
 require 'optparse'
 require 'rbconfig'
 require_relative 'lib/degradation_ledger'
+require_relative 'lib/terminal_outcome'
 
 TERMINAL = %w[migrated approximated needs-review skipped not-applicable].freeze
 
@@ -44,12 +48,17 @@ end.parse!(ARGV)
 abort 'FATAL: --workdir required' unless opts[:wd]
 
 succ = File.join(opts[:wd], 'phase6-success.json')
+pending = File.join(opts[:wd], 'parity-pending.json')
 unless File.exist?(succ)
   warn 'NOT DONE - no phase6-success.json in the workdir.'
   warn '   The conversion did not complete a resolution-verified build. If pages exist but are empty,'
   warn '   they were NOT produced by a real migrate-powerbi.rb run - re-run the orchestrator'
   warn "   (never hand-author a workbook). Workdir checked: #{opts[:wd]}"
   exit 2
+end
+if File.exist?(pending)
+  warn 'NOT DONE - parity-pending.json is present; the one-shot build is routing to strict parity.'
+  exit 5
 end
 
 sj = begin
@@ -61,6 +70,10 @@ end
 if sj['chartCount'].to_i <= 0
   warn 'NOT DONE - success marker present but 0 chart elements (empty workbook).'
   exit 3
+end
+unless sj['gates'].to_s == 'all-pass'
+  warn "NOT DONE - phase6-success.json is resolution-only (gates=#{sj['gates'] || 'missing'}), not a terminal gate marker."
+  exit 5
 end
 if opts[:wb] && !sj['workbookId'].to_s.empty? && sj['workbookId'] != opts[:wb]
   warn "DONE marker is for a DIFFERENT workbook (#{sj['workbookId']}) than --workbook-id #{opts[:wb]}."
@@ -129,16 +142,30 @@ accounted = census.dig('summary', 'accounted').to_i
 declared_total = census.dig('summary', 'total').to_i
 result_complete = result.dig('summary', 'complete') == true &&
                   result.dig('summary', 'accounted').to_i == result.dig('summary', 'total').to_i
+expected_verdict = TerminalOutcome.expected_report_verdict(
+  result_rows,
+  Array(result['degradations']) + Array(result['waivers'])
+)
+emitted_charts = census_rows.select do |row|
+  row['type'].to_s == 'visual' && row['emitted'] == true && row['parity_in_scope'] == true
+end
+unproven_emitted = emitted_charts.reject { |row| row['parity_proven'] == true }
 accounting_valid = !census_rows.empty? && accounted == census_rows.length &&
                    declared_total == census_rows.length &&
                    census.dig('summary', 'complete') == true &&
                    census_rows.all? { |row| TERMINAL.include?(row['terminal_status'].to_s) } &&
                    canonical_census == canonical_result && result_complete &&
-                   result['verdict'].to_s != 'RED'
+                   result['verdict'].to_s == expected_verdict &&
+                   result['completion_status'].to_s == 'complete' &&
+                   sj['verdict'].to_s == expected_verdict &&
+                   census.dig('summary', 'strict_parity_complete') == true &&
+                   unproven_emitted.empty?
 unless accounting_valid
-  warn 'NOT DONE - source census and migration result are incomplete, RED, or disagree on exact identity/status.'
+  warn 'NOT DONE - source census/report are incomplete, verdict-inconsistent, or lack strict parity for every emitted chart.'
   warn "   census=#{census_rows.length} objects (declared #{accounted}/#{declared_total}); " \
-       "report=#{result_rows.length}, verdict=#{result['verdict'] || 'missing'}"
+       "report=#{result_rows.length}, verdict=#{result['verdict'] || 'missing'} " \
+       "(expected #{expected_verdict}), completion_status=#{result['completion_status'] || 'missing'}, " \
+       "marker_verdict=#{sj['verdict'] || 'missing'}, unproven_emitted=#{unproven_emitted.length}"
   exit 6
 end
 
@@ -148,19 +175,33 @@ unless routing.is_a?(Hash)
   warn 'NOT DONE - time-intelligence-routing.json is required for the final route census.'
   exit 7
 end
-routes = Array(routing['routes']).select { |route| route['parity_required'] == true }
+routes = Array(routing['routes'])
 proof_by_ref = proofs.to_h { |proof| [proof['query_ref'].to_s, proof] }
 route_failures = routes.filter_map do |route|
   query_ref = route.dig('source_measure', 'query_ref').to_s
   proof = proof_by_ref[query_ref]
-  next if route['status'] == 'routed' && proof &&
-          proof['route_status'] == 'routed' && proof['parity_required'] == true &&
-          proof['parity_proven'] == true && Array(proof['pass_charts']).any?
-  "#{query_ref}: route=#{route['status']}, parity_proven=#{proof && proof['parity_proven']}"
+  route_status = route['status'].to_s
+  emitted = %w[routed emitted].include?(route_status)
+  terminal_only = %w[needs-review skipped].include?(route_status)
+  valid = if emitted
+            proof && proof['terminal_accounted'] == true && proof['emitted'] == true &&
+              proof['parity_required'] == true && proof['parity_proven'] == true &&
+              Array(proof['pass_charts']).any?
+          elsif terminal_only
+            proof && proof['terminal_accounted'] == true && proof['emitted'] == false &&
+              proof['parity_required'] == false && proof['parity_proven'] == false &&
+              Array(proof['pass_charts']).empty?
+          else
+            false
+          end
+  next if valid
+
+  "#{query_ref}: route=#{route_status}, emitted=#{proof && proof['emitted']}, " \
+    "parity_required=#{proof && proof['parity_required']}, parity_proven=#{proof && proof['parity_proven']}"
 end
 extra_proofs = proof_by_ref.keys - routes.map { |route| route.dig('source_measure', 'query_ref').to_s }
 unless route_failures.empty? && extra_proofs.empty?
-  warn 'NOT DONE - every parity-required time-intelligence route must be routed to a present strict-PASS chart.'
+  warn 'NOT DONE - emitted time-intelligence routes need strict-PASS proof; review/skipped routes must be terminal and non-emitted.'
   (route_failures + extra_proofs.map { |ref| "#{ref}: accounting proof has no source route" })
     .each { |failure| warn "   - #{failure}" }
   exit 7
@@ -188,10 +229,12 @@ unless report_status.success?
   exit 8
 end
 
-puts 'DONE - migrate-powerbi.rb built a resolution-verified workbook for this run.'
+headline = expected_verdict == 'GREEN' ? 'DONE - GREEN terminal handoff' : 'COMPLETE - YELLOW terminal handoff'
+puts headline
 puts "   workbook     : #{sj['workbookId']}"
 puts "   charts       : #{sj['chartCount']}"
-puts "   gates        : #{sj['gates']} (columns resolve + freshness match)"
+puts "   gates        : #{sj['gates']} (all required gates)"
 puts "   value parity : CONFIRMED - #{passed}/#{total} strict matches (parity-final.json)"
+puts "   report       : #{expected_verdict} / completion_status=complete"
 puts "   stamped      : #{sj['generatedAt']}"
 exit 0

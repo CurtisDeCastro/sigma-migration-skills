@@ -333,17 +333,29 @@ begin
         bound_visuals = source_visuals.select do |_page, visual|
           Array(visual.fetch('bindings', {}).values).flatten.compact.map(&:to_s).include?(query_ref)
         end
+        route_emitted = %w[routed emitted].include?(route['status'].to_s)
         proven_visual = bound_visuals.find do |_page, visual|
           built = built_visual(visual, spec_wb_elements)
           built && readback_present?(built, readback_wb_elements) && visual_parity_pass?(visual, built, parity)
         end
-        parity_proven = route['status'] == 'routed' && strict_parity?(parity) && !proven_visual.nil?
-        status = parity_proven ? 'migrated' : 'needs-review'
+        parity_proven = route_emitted && strict_parity?(parity) && !proven_visual.nil?
+        status = if parity_proven
+                   'migrated'
+                 elsif route['status'].to_s == 'skipped'
+                   'skipped'
+                 else
+                   'needs-review'
+                 end
         measure_evidence << evidence('time-intelligence-routing.json',
                                      "route status=#{route['status']}; reason=#{route['reason']}")
-        measure_evidence << evidence('workbook readback + parity-final.json',
-                                     parity_proven ? "routed chart #{visual_name(proven_visual.last)} is present and strict-PASS" :
-                                                     'routed measure has no present strict-PASS chart')
+        if route_emitted
+          measure_evidence << evidence('workbook readback + parity-final.json',
+                                       parity_proven ? "routed chart #{visual_name(proven_visual.last)} is present and strict-PASS" :
+                                                       'emitted route has no present strict-PASS chart')
+        else
+          measure_evidence << evidence('time-intelligence-routing.json',
+                                       'terminal route is explicitly not emitted as a proven route')
+        end
       elsif time_intel_shape
         status = 'needs-review'
         measure_evidence << evidence('model + time-intelligence-routing.json',
@@ -407,17 +419,18 @@ begin
       end
       built = built_visual(visual, spec_wb_elements)
       in_readback = readback_present?(built, readback_wb_elements)
-      status = severity_status(rows)
-      if status.nil?
-        status = if !built
-                   'skipped'
-                 elsif !in_readback
-                   'needs-review'
-                 elsif data_visual?(visual)
-                   visual_parity_pass?(visual, built, parity) && strict_parity?(parity) ? 'migrated' : 'needs-review'
-                 else
-                   'migrated'
-                 end
+      emitted = !built.nil? && in_readback
+      parity_in_scope = data_visual?(visual)
+      parity_proven = emitted && parity_in_scope &&
+                      strict_parity?(parity) && visual_parity_pass?(visual, built, parity)
+      status = if !built
+                 'skipped'
+               elsif !in_readback
+                 'needs-review'
+               elsif parity_in_scope && !parity_proven
+                 'needs-review'
+               else
+                 severity_status(rows) || 'migrated'
       end
       visual_statuses[visual_id.to_s] = status
       details = []
@@ -431,7 +444,11 @@ begin
                               'visual is named in strict parity PASS evidence' :
                               'visual is not proven by strict parity PASS evidence')
       end
-      objects << object('visual', visual_id, name, status, details, 'parent_id' => page_id)
+      objects << object('visual', visual_id, name, status, details,
+                        'parent_id' => page_id,
+                        'emitted' => emitted,
+                        'parity_in_scope' => parity_in_scope,
+                        'parity_proven' => parity_proven)
     end
   end
 
@@ -480,6 +497,8 @@ begin
   # completion verifier can require freshness via this builder's --check mode.
   route_proofs = Array(routing['routes']).map do |route|
     query_ref = route.dig('source_measure', 'query_ref').to_s
+    route_status = route['status'].to_s
+    emitted = %w[routed emitted].include?(route_status)
     matching = source_visuals.select do |_page, visual|
       Array(visual.fetch('bindings', {}).values).flatten.compact.map(&:to_s).include?(query_ref)
     end
@@ -490,10 +509,12 @@ begin
     end
     {
       'query_ref' => query_ref,
-      'route_status' => route['status'],
-      'parity_required' => route['parity_required'] == true,
-      'parity_proven' => route['status'] == 'routed' && strict_parity?(parity) && !passed.empty?,
-      'pass_charts' => passed.sort,
+      'route_status' => route_status,
+      'terminal_accounted' => %w[routed emitted needs-review skipped].include?(route_status),
+      'emitted' => emitted,
+      'parity_required' => emitted,
+      'parity_proven' => emitted && strict_parity?(parity) && !passed.empty?,
+      'pass_charts' => emitted ? passed.sort : [],
       'reason' => route['reason']
     }
   end
@@ -508,7 +529,9 @@ begin
     route_proofs << {
       'query_ref' => query_ref,
       'route_status' => 'missing',
-      'parity_required' => true,
+      'terminal_accounted' => false,
+      'emitted' => false,
+      'parity_required' => false,
       'parity_proven' => false,
       'pass_charts' => [],
       'reason' => 'time-intelligence measure absent from routing artifact'
@@ -522,6 +545,9 @@ begin
   raise AccountingError, "duplicate source identities: #{duplicates.inspect}" unless duplicates.empty?
 
   counts = TERMINAL.to_h { |status| [status, objects.count { |row| row['terminal_status'] == status }] }
+  emitted_visuals = objects.select do |row|
+    row['type'] == 'visual' && row['emitted'] == true && row['parity_in_scope'] == true
+  end
   census = {
     'schema_version' => 1,
     'source' => 'powerbi',
@@ -529,7 +555,10 @@ begin
       'total' => objects.length,
       'accounted' => objects.length,
       'complete' => true,
-      'counts' => counts
+      'counts' => counts,
+      'emitted_charts' => emitted_visuals.length,
+      'emitted_charts_parity_proven' => emitted_visuals.count { |row| row['parity_proven'] == true },
+      'strict_parity_complete' => emitted_visuals.all? { |row| row['parity_proven'] == true }
     },
     'source_objects' => objects,
     'time_intelligence' => {
