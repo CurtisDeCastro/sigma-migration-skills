@@ -21,7 +21,8 @@ node "$S/audit-lookml-readiness.mjs" \
   --field-census "$TMP/lookml-field-census.json" \
   --formula-mapping "$TMP/formula-mapping.json"
 
-LOOKML_DIR="$FIXTURE" node "$S/convert_dm.mjs" order_fact "$TMP/dm-spec.json"
+LOOKML_DIR="$FIXTURE" CONVERTER_SRC="$SKILL/converter/lookml.mjs" \
+  node "$S/convert_dm.mjs" order_fact "$TMP/dm-spec.json"
 python3 "$S/parse_lookml_dashboard.py" \
   "$FIXTURE/skilltest_orders.dashboard.lookml" --out "$TMP/contract.json"
 python3 "$S/build_workbook.py" "$TMP/contract.json" \
