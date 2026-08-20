@@ -118,8 +118,10 @@ with evidence.
 ## ONE COMMAND (preferred): migrate-looker.py
 
 > ## ⛔ THE ONE PATH (do not improvise a workbook)
-> `migrate-looker.py` is the single entry point; it only reaches GREEN when the
-> `assert-phase6-ran` hard gate passes with real charts. Rules:
+> `migrate-looker.py` is the single entry point; it only reaches a complete
+> GREEN or YELLOW handoff when `assert-phase6-ran` passes with real charts and
+> `verify-complete.rb` reconciles the workbook, report, census, ledger, and
+> completion marker. Rules:
 > - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
 >   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages** — that
 >   bypasses parity + the gate and ships an EMPTY workbook (the #1 failure mode).
@@ -127,7 +129,8 @@ with evidence.
 >   tell the user to authenticate** — do not build a shell.
 > - **"Done" is a file on disk, not "pages exist."** Complete only when
 >   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE (the gate
->   stamped `phase6-success.json`). An empty workbook is never done. Before
+>   stamped `phase6-success.json`). The orchestrator runs this reconciliation
+>   on every terminal path. An empty workbook is never done. Before
 >   that check, run `ruby scripts/build-migration-report.rb --workdir <WORK>`
 >   and its `--check` mode: every source object and field/formula finding must
 >   have one terminal disposition in `MIGRATION_REPORT.md`,
@@ -137,8 +140,9 @@ The whole pipeline — parse → **RLS gate** → convert → **DM-reuse check**
 POST + readback → workbook build (layout inline) → **source-freshness
 preflight** → **scripted parity + hard gate** — as a single command (mirrors
 qlik-to-sigma's `migrate-qlik.rb` / thoughtspot's `migrate-thoughtspot.py`).
-Gates are never bypassed: the command exits non-zero if parity or
-`assert-phase6-ran.rb` fails.
+Gates are never silently bypassed. The command prints one honest
+`PARITY/VERDICT: GREEN|YELLOW|RED` banner: GREEN and YELLOW are complete exit-0
+handoffs; RED is blocked/nonzero.
 
 ```bash
 # env: SIGMA_CONNECTION_ID = the FULL warehouse-connection UUID (NOT a short
@@ -212,8 +216,20 @@ python3 scripts/migrate-looker.py --lookml-dir /path/to/lookml \
   pool** (measured 24.3s → 5.8s on the 5-chart fixture); set
   `LOOKER_PARITY_WORKERS=1` to serialize on a loaded warehouse (max is clamped
   to 4 — warehouse-friendly bursts only).
-- Exit codes: `0` GREEN · `3` MCP convert request emitted · `10` RLS decision
-  needed · `2` built but a gate FAILED. `--dry-run` = no Sigma POSTs.
+- **Terminal policy:** exact, fully accounted, waiver-free output is GREEN.
+  Fully accounted `approximated` / `needs-review` / `skipped` objects and named
+  source-visual waivers are complete YELLOW when all hard gates and
+  reconciliation pass. Use `--skip-visual-comparison REASON` only when the
+  Looker source image is genuinely unavailable; the Sigma render must still be
+  healthy. Numeric divergence, broken/blank renders, contradictory or
+  incomplete accounting, ERROR columns, and unported RLS remain RED/nonzero.
+  `--accept-waiver-budget-exceeded REASON` passes the named decision to the
+  shared assert. Without acceptance, assert exit 19 becomes orchestrator exit
+  10 (decision required); after every other gate passes, acceptance records the
+  overflow and completes YELLOW exit 0.
+- Exit codes: `0` complete GREEN/YELLOW · `3` MCP convert request emitted ·
+  `10` RLS/waiver-budget decision needed · `12` readiness blocked · `2` built
+  but RED. `--dry-run` = no Sigma POSTs.
 
 ---
 
