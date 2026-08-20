@@ -1269,6 +1269,10 @@ console.error('stats:', JSON.stringify(res.stats));
             resp = sigma("PUT", f"/v2/workbooks/{a.update_workbook}/spec", post_body)
             wb = a.update_workbook
         else:
+            # Keep the create payload wrapped immediately at the call site. The
+            # update branch above performs extra drift checks, but both writes
+            # must send the current document envelope.
+            post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
             resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
             match = re.search(r"workbookId[\"'\s:]+([0-9a-f-]{36})", resp)
             if not match:

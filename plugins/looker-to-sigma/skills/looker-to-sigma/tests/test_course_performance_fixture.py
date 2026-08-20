@@ -45,17 +45,32 @@ def build_workbook(tmp, converted):
     workbook = os.path.join(tmp, "wb-spec.json")
     dm = os.path.join(tmp, "dm-spec.json")
     dynamic = os.path.join(tmp, "dm-spec-dynamic-parameters.json")
-    parsed = subprocess.run(
+    force_prebuilt = os.environ.get("LOOKER_TEST_FORCE_PREBUILT_CONTRACT") == "1"
+    parsed = None if force_prebuilt else subprocess.run(
         [
             sys.executable,
             os.path.join(SCRIPTS, "parse_lookml_dashboard.py"),
             os.path.join(FIXTURE, "course_performance.dashboard.lookml"),
         ],
-        check=True,
         capture_output=True,
         text=True,
     )
-    open(contract, "w", encoding="utf-8").write(parsed.stdout)
+    if parsed is not None and parsed.returncode == 0:
+        open(contract, "w", encoding="utf-8").write(parsed.stdout)
+    elif force_prebuilt or "PyYAML required" in parsed.stderr + parsed.stdout:
+        # The Windows corpus smoke intentionally installs no Python packages.
+        # Linux unit CI still exercises the real parser with PyYAML; Windows
+        # continues through converter/builder/hazard/oracle using the committed
+        # normalized contract golden instead of skipping the case.
+        repo = os.path.abspath(os.path.join(SKILL, "..", "..", "..", ".."))
+        golden = os.path.join(
+            repo, "corpus", "looker", "skilltest-course-performance",
+            "golden", "contract.json",
+        )
+        value = json.load(open(golden, encoding="utf-8"))["workbook"]
+        json.dump(value, open(contract, "w", encoding="utf-8"))
+    else:
+        raise AssertionError(parsed.stdout + parsed.stderr)
     json.dump(converted["model"], open(dm, "w", encoding="utf-8"))
     json.dump(
         {"version": 1, "parameters": converted["dynamicParameters"]},
