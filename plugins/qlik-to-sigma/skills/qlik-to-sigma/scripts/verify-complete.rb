@@ -8,8 +8,9 @@
 require 'json'
 require 'optparse'
 require_relative 'lib/degradation_ledger'
+require_relative 'lib/terminal_outcome'
 
-TERMINAL = %w[migrated approximated needs-review skipped not-applicable].freeze
+TERMINAL = TerminalOutcome::TERMINAL_STATUSES.freeze
 PROVENANCE = %w[live engine-export inferred].freeze
 PASS_STATES = %w[PASS MATCH PASSED GREEN OK].freeze
 
@@ -113,7 +114,8 @@ census_complete = census.dig('summary', 'complete') == true &&
                       PROVENANCE.include?(row['source_provenance'].to_s) &&
                       row['evidence'].is_a?(Array) && !row['evidence'].empty?
                   end
-report_complete = report['verdict'].to_s.upcase != 'RED' &&
+report_complete = TerminalOutcome.report_exit(report['verdict']).zero? &&
+                  report['completion_status'] == 'complete' &&
                   report.dig('summary', 'complete') == true &&
                   report.dig('summary', 'accounted').to_i == report.dig('summary', 'total').to_i &&
                   report.dig('summary', 'total').to_i == report_rows.length &&
@@ -123,7 +125,9 @@ unless census_complete && report_complete
   fail_with(6, 'NOT DONE — source census/report is RED, incomplete, or has a failed check.',
             ["census complete=#{census.dig('summary', 'complete').inspect} " \
              "#{census.dig('summary', 'accounted')}/#{census.dig('summary', 'total')}",
-             "report verdict=#{report['verdict'].inspect} complete=#{report.dig('summary', 'complete').inspect}",
+             "report verdict=#{report['verdict'].inspect} " \
+             "completion_status=#{report['completion_status'].inspect} " \
+             "complete=#{report.dig('summary', 'complete').inspect}",
              "failed checks=#{Array(report['checks']).reject { |check| check['status'] == 'PASS' }.map { |check| check['name'] }.join(', ')}"])
 end
 
@@ -183,7 +187,7 @@ fail_with(8, 'NOT DONE — PNG/finalization contract failed.', png_errors) unles
 
 # Re-run the report's deterministic check so a post-finalization edit to either
 # JSON or Markdown cannot ride through on an old qlik-finalization.json.
-report_check = system('ruby', File.join(__dir__, 'build-migration-report.rb'),
+report_check = system('ruby', File.join(__dir__, 'check-migration-report.rb'),
                       '--workdir', wd, '--inventory', census_path, '--check',
                       out: File::NULL, err: File::NULL)
 fail_with(8, 'REPORT CONTRADICTION — generated migration report is stale.') unless report_check
@@ -210,16 +214,30 @@ end
 contradictions << 'migration report degradation list differs from fresh derivation' unless
   Array(report['degradations']) == derived
 
-accounting_yellow = report_rows.any? { |row| %w[approximated needs-review skipped].include?(status(row)) }
-expected_report_verdict = (derived.empty? && !accounting_yellow && Array(report['waivers']).empty?) ? 'GREEN' : 'YELLOW'
+expected_report_verdict = TerminalOutcome.report_verdict(
+  terminal_rows: report_rows,
+  degradation_entries: derived,
+  waiver_entries: Array(report['waivers'])
+)
 contradictions << "report verdict #{report['verdict'].inspect} != #{expected_report_verdict}" unless
   report['verdict'].to_s.upcase == expected_report_verdict
 
-derived_verdict = DegradationLedger.verdict(derived)
+# The shared assert still carries the older PARTIAL ledger label in its marker.
+# At the public terminal boundary, a fully accounted scope cut is YELLOW under
+# TerminalOutcome; only missing/contradictory accounting or a failed hard gate
+# is RED. Normalize that legacy internal label before checking gate claims.
+normalize_terminal_claim = lambda do |claim|
+  value = claim.to_s.upcase
+  next '' if value.empty?
+  next 'GREEN' if value.start_with?('GREEN')
+  next 'YELLOW' if value == 'YELLOW' || value.start_with?('PARTIAL')
+  value
+end
 { 'phase6-success.json' => success, 'parity-final.json' => parity }.each do |name, doc|
   claim = doc['verdict'].to_s
-  contradictions << "#{name} verdict #{claim.inspect} != #{derived_verdict}" unless
-    claim.empty? || claim == derived_verdict
+  normalized_claim = normalize_terminal_claim.call(claim)
+  contradictions << "#{name} verdict #{claim.inspect} != #{expected_report_verdict}" unless
+    normalized_claim.empty? || normalized_claim == expected_report_verdict
 end
 if parity.key?('waiver_count') && parity['waiver_count'].to_i != Array(parity['waivers']).length
   contradictions << 'parity waiver_count differs from its waiver list'
@@ -230,12 +248,12 @@ if success['waivers'].is_a?(Array) && parity['waivers'].is_a?(Array) &&
 end
 fail_with(9, 'REPORT CONTRADICTION — gate/report/ledger claims disagree.', contradictions) unless contradictions.empty?
 
-completion_verdict = report['verdict'].to_s.upcase == 'YELLOW' &&
-                     derived_verdict == 'GREEN' ? 'YELLOW' : derived_verdict
-puts "✅ DONE — Qlik hard gates, strict parity, PNG health, accounting, and report reconcile. VERDICT: #{completion_verdict}"
+completion_verdict = report['verdict'].to_s.upcase
+puts "✅ DONE — Qlik hard gates, strict parity, PNG health, accounting, and report reconcile."
 puts "   workbook : #{success['workbookId']}"
 puts "   charts   : #{passed}/#{total} strict matches"
 puts "   gates    : #{success['gates']}"
 puts "   objects  : #{census_rows.length}/#{census_rows.length} exactly reconciled"
 puts "   ledger   : #{derived.empty? ? 'empty' : "#{derived.length} degradation(s)"}"
-exit 0
+puts "TERMINAL: #{completion_verdict}"
+exit TerminalOutcome.report_exit(completion_verdict)

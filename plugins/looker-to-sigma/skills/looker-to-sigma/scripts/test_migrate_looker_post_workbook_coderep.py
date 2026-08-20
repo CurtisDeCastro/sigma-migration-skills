@@ -87,8 +87,16 @@ check(0 <= prelim_idx < gate_idx < final_idx < report_idx < result_idx,
 check('"visual-similarity.json"' in SRC and '"render-health.json"' in SRC and
       '"png_health.py"' in SRC,
       "render health derives from similarity evidence or a Sigma PNG")
-check("report_rc == 0" in main_src and 'report_verdict != "RED"' in main_src,
-      "failed or RED completion report prevents migration success")
+check(
+    all(contract in main_src for contract in (
+        "final_accounting_rc == 0",
+        "report_rc == 0",
+        'completion_status == "complete"',
+        "report_verdict in COMPLETE_VERDICTS",
+    )) and
+    "if not gates_pass or not complete or verdict not in COMPLETE_VERDICTS" in SRC,
+    "failed or RED completion report prevents migration success",
+)
 check("args.yes" not in SRC and "not a.yes" in SRC,
       "gap-scout gate uses parsed namespace a.yes")
 

@@ -9,6 +9,12 @@ require 'optparse'
 require 'pathname'
 require 'time'
 
+begin
+  require_relative 'lib/terminal_outcome'
+rescue LoadError
+  require_relative '../lib/terminal_outcome'
+end
+
 class MigrationReportError < StandardError; end
 
 class MigrationReport
@@ -75,10 +81,12 @@ class MigrationReport
     checks << render_check
     checks << blank_risk_check
 
-    hard_failure = checks.any? { |c| c['status'] == 'FAIL' }
-    yellow = @objects.any? { |o| %w[approximated needs-review skipped].include?(o['status']) }
-    yellow ||= waiver_entries.any? || degradation_entries.any?
-    verdict = hard_failure ? 'RED' : (yellow ? 'YELLOW' : 'GREEN')
+    verdict = TerminalOutcome.report_verdict(
+      terminal_rows: @objects,
+      degradation_entries: degradation_entries,
+      waiver_entries: waiver_entries,
+      hard_failure: checks.any? { |check| check['status'] == 'FAIL' }
+    )
 
     counts = TERMINAL.each_with_object({}) { |status, out| out[status] = 0 }
     @objects.each { |object| counts[object['status']] += 1 if counts.key?(object['status']) }
@@ -87,6 +95,7 @@ class MigrationReport
     @document = {
       'schema_version' => 1,
       'verdict' => verdict,
+      'completion_status' => TerminalOutcome.completion_status(verdict),
       'summary' => {
         'total' => @objects.length,
         'accounted' => accounted,
@@ -805,7 +814,7 @@ begin
     puts "migration report: #{document['verdict']} " \
          "(#{document.dig('summary', 'accounted')}/#{document.dig('summary', 'total')} accounted)"
   end
-  exit(document['verdict'] == 'RED' ? 1 : 0)
+  exit(TerminalOutcome.report_exit(document['verdict']))
 rescue MigrationReportError => e
   warn "build-migration-report: #{e.message}"
   exit 2

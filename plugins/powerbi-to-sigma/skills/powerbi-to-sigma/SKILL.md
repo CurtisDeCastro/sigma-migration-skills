@@ -81,14 +81,19 @@ directories is also registered in CI, so a new suite cannot be added and silentl
 >   connect to Power BI (device-code) or that the report must be published** — do
 >   not fall back to a hand-built shell.
 > - **"Done" is not "pages exist."** The migration is complete only when
->   `ruby scripts/verify-complete.rb --workdir <WORK>` prints ✅ DONE — i.e. the
->   `assert-phase6-ran` parity gate passed with real chart elements. An empty or
+>   `ruby scripts/verify-complete.rb --workdir <WORK>` prints a terminal
+>   **GREEN** or **YELLOW** handoff — i.e. `assert-powerbi-terminal.rb` ran the
+>   shared `assert-phase6-ran` gate and Power BI finalizer with real
+>   chart elements, strict parity, complete source accounting, and fresh
+>   report/census/ledger artifacts. An empty or
 >   placeholder workbook is never done, no matter how it looks. Before that
 >   check, Phase 6 automatically refreshes `<WORK>/source-object-census.json`
 >   and runs `finalize-powerbi-report.rb` plus the migration-report freshness
 >   check; every source table, column, measure, security role, page, visual, and
 >   control must have one terminal disposition in `MIGRATION_REPORT.md` and
->   `migration-result.json`.
+>   `migration-result.json`. The one-shot mechanical path deliberately writes
+>   `parity-pending.json` and exits **10** after a usable resolution-verified
+>   build; it never mints terminal GREEN before strict source parity.
 > - Small/older models (e.g. running on Haiku): if the report is large or complex,
 >   say so and confirm scope with the user before building — don't silently
 >   degrade to a partial shell.
@@ -225,7 +230,10 @@ resume with `--converter-out`. The hosted MCP is a fallback, not the default pat
   `scripts/route-pbi-time-intelligence.rb` with the model, DM spec/readback, and
   master map; write `$WORK/time-intelligence-routing.json` plus the patched
   master map. A GREEN run has zero `needs-review` routes, routes only to a
-  same-fact synthesized element, and parity evidence for every routed record.
+  same-fact synthesized element, and parity evidence for every routed/emitted
+  record. A `needs-review`/`skipped` route may be a terminal **YELLOW**
+  disposition only when it is explicitly accounted and not emitted as a proven
+  route; any emitted route still requires strict chart parity.
   The router never fabricates a DM element. Unresolved, ambiguous, cross-fact,
   or iterator routes stay unmapped and must be recorded as `needs-review` in
   `source-object-census.json`; see `refs/open-items.md`.
@@ -396,7 +404,7 @@ A workbook that POSTs 200 and passes numeric parity can still be visually broken
   - **Online DAX (high-fidelity / import-only models):** PBI `POST /v1.0/myorg/groups/{ws}/datasets/{id}/executeQueries` (DAX) via `--emit-dax`, vs the same Sigma aggregation. DAX-only; breaks under service-principal if RLS; needs the workspace/dataset (auto-wired from `freshness.json`).
     - **XMLA fallback (when `executeQueries` REST is blocked but the model is on capacity):** run the same measure through the Power BI Modeling MCP — `dax_query_operations Execute` on an `Initial Catalog`-bound connection — and diff against the Sigma actuals identically. Recipe in `refs/pbi-modeling-mcp.md`. This also catches **silently mis-modeled source measures** (e.g. time-intel over an inactive date relationship returns a flat total in Power BI) that a SQL oracle wouldn't flag.
 - **Finalize (both paths):** `ruby scripts/phase6-parity-pbi.rb --finalize --plan plan.json --actuals parity-actuals.json --out-dir <dir>` → writes `parity-final.json` (`source` records which oracle was used).
-- Hard gate: `ruby scripts/assert-phase6-ran.rb --workdir <dir> --workbook-id <wb>` — incl. layout lint (6), **control lint (7**: dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape; see `refs/control-parity.md`**)**, and the MEASURED bars wired in Phase 5e: **gate 13 (source-anchor values** — arms when a source PNG is on disk; needs `source-anchors.json` ≥5 + a passing `anchors-verdict.json`; `--skip-anchors-gate "<reason>"`**)** and **gate 14 (visual-similarity floor** — `visual-similarity.json`; `--skip-visual-similarity "<reason>"`**)**. No source PNG on disk → both self-SKIP (stated), never a silent pass.
+- Hard gate: `ruby scripts/assert-powerbi-terminal.rb --workdir <dir> --workbook-id <wb>` — the plugin-local wrapper runs the byte-identical shared `assert-phase6-ran.rb`, then refreshes and verifies Power BI's strict-parity census, report, ledger, and canonical marker (`refs/terminal-handoff.md`). Shared gates include layout lint (6), **control lint (7**: dead controls / ghost targets / partial same-page reach / `control-scope.json` coverage; `--skip-control-lint` escape; see `refs/control-parity.md`**)**, and the MEASURED bars wired in Phase 5e: **gate 13 (source-anchor values** — arms when a source PNG is on disk; needs `source-anchors.json` ≥5 + a passing `anchors-verdict.json`; `--skip-anchors-gate "<reason>"`**)** and **gate 14 (visual-similarity floor** — `visual-similarity.json`; `--skip-visual-similarity "<reason>"`**)**. No source PNG on disk → both self-SKIP (stated), never a silent pass. Waiver-budget overflow exits 19 unless explicitly accepted with `--accept-waiver-budget-exceeded "<reason>"`; acceptance is recorded and can produce only a terminal YELLOW after every other gate passes.
 - Optional flip test when the report has slicers→controls: `ruby scripts/probe-controls.rb --workbook-id <wb> --check-out-of-closure` — runtime proof a control actually filters (in-closure export changes under a non-default `parameters` value, out-of-closure doesn't). MCP query can NOT flip controls (defaults only) — export API `parameters` is the only mechanism.
 
 ## Phase 7 — Bookmarks → per-bookmark workbooks (optional)

@@ -1258,6 +1258,16 @@
       ]
     },
     {
+      "canonical": "shared/lib/terminal_outcome.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lib/terminal_outcome.rb",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lib/terminal_outcome.rb",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lib/terminal_outcome.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/terminal_outcome.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/terminal_outcome.rb"
+      ]
+    },
+    {
       "canonical": "shared/scripts/build-migration-report.rb",
       "targets": [
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/build-migration-report.rb",

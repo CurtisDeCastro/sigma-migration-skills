@@ -27,7 +27,8 @@ residues, exit 22; waiver `--accept-manual-residues "<calc,...>"`,
 budget-counted), `4` = DM posted but the workbook layer needs an agent-authored
 spec — re-enter with `--reuse-dm <id> --wb-spec <path>` (never hand-POST),
 `3` = a gate failed, `14` = migration GREEN + Phase E proposals pending,
-`0` = ALL gates green (only reachable via `--finalize`),
+`0` = terminal complete (`STATUS: GREEN` or `STATUS: YELLOW`; only reachable
+via `--finalize` after every hard gate passes),
 `18` = the Phase-1d dashboard-read WAIT-GATE deadline passed — `png-read.json`
 still missing/unverified/stale after `SIGMA_PNG_READ_TIMEOUT_S` (default 480s;
 headless/CI callers with nobody to write the read: set it to `0` for the
@@ -82,11 +83,11 @@ Exits 0 only when ALL pass. Full prose per gate: `refs/script-map.md` +
 | 8 | layout lint | `lib/layout_lint.rb` / `--skip-layout-lint` |
 | 9 | control lint | `lib/control_lint.rb`, `control-scope.json` / `--skip-control-lint` |
 | 10 | visual render | no `sigma-render.png` or `screenshots/_manifest.json` / `--skip-visual-gate "<reason>"` |
-| 13 | visual verdict | unrecorded or self-attested pass — needs sha-bound `blind_grade` (PR-9) or recorded `--no-vision-waiver` / `--skip-visual-comparison "<reason>"` |
+| 13 | visual verdict | unrecorded or self-attested pass — needs sha-bound `blind_grade` (PR-9) or recorded `--no-vision-waiver` / `--skip-visual-comparison "<reason>"`; shared gate 8b records explicit `divergent`, then the Tableau migration report render check makes the terminal verdict RED/nonzero, regardless of budget acceptance |
 | 14 | layout fill | `layout-census.json` dropped tile or `grid_fill_pct < --min-grid-fill` / `--skip-layout-fill "<reason>"` |
 | 15 | 8d RCF ledger | unresolved spec-fixable deltas (`--require-fidelity-ledger`, default-on at `--finalize`); `--accept-residuals id,id` — data-class NEVER |
 | 18 | 13 anchors | `source-anchors.json` <5 anchors or failing `anchors-verdict.json`; also `--skip-parity-gate` without passing anchors / `--skip-anchors-gate "<reason>"` |
-| 19 | waiver budget | >2 quality waivers → YELLOW cap; no escape flag |
+| 19 | waiver budget | >2 quality waivers → decision required; fix waivers or explicitly accept with `migrate-tableau.rb --accept-waiver-budget-exceeded "<reason>"`, which can stamp YELLOW/complete only after every other gate passes |
 | 20 | 14 visual similarity | `visual-similarity.py` floor fail / `--skip-visual-similarity "<reason>"` |
 | 21 | 7b control flip | control doesn't filter live (`probe-controls.rb`), or no evidence on an enforced run / `--skip-flip-test "<reason>"` → `--skip-control-flip` (budget-counted) |
 | 22 | 15 manual residues | `manual-residues.json` still `unbuilt` / `--accept-manual-residues "<calc,...>"` (budget-counted) |
@@ -121,18 +122,22 @@ MUST call this gate as their final step.
 > `--skip-*` / `--allow-*` / `--accept-*` / `--min-pass-rate <1` flag attests a
 > verification could NOT run — not a lever to turn a red gate green. The gate
 > stamps `waivers` + `waiver_count` into `parity-final.json`; **more than 2
-> quality waivers caps the migration at YELLOW** (exit 19; the sanctioned
+> quality waivers requires an explicit decision** (exit 19; the sanctioned
 > builder→verifier `--skip-visual-comparison` is a policy exclusion), and
 > **data-class fidelity residuals can never be waived**.
-> Reaching for a third waiver means: stop and fix.
+> Reaching for a third waiver means: stop and fix, or obtain a named acceptance
+> and rerun with `--accept-waiver-budget-exceeded "<reason>"`; accepted
+> overflow remains YELLOW and never bypasses any other gate.
 
-## Verdict model (PR-14) — GREEN / YELLOW / PARTIAL (relocated from SKILL.md — E9 diet)
+## Terminal verdict model — GREEN / YELLOW (relocated from SKILL.md — E9 diet)
 
-> **Verdict model (PR-14) — GREEN / YELLOW / PARTIAL.** Every gate run derives
+> **Terminal verdict model — GREEN / YELLOW.** Every gate run derives
 > `degradation-ledger.json` from the artifacts (`lib/degradation_ledger.rb` —
 > mechanical, never self-reported) and prints ONE verdict with the ledger
 > inline. **GREEN requires an EMPTY ledger.** Any non-scope-cut entry (or
-> exceeded budget) → **YELLOW**. **Any scope cut caps at PARTIAL.** Stamped into
+> accepted exceeded budget) → **YELLOW**. Any explicit scope cut, skip, or
+> approximation is also a complete **YELLOW**, never GREEN or a third terminal
+> label. Stamped into
 > `phase6-success.json` + `parity-final.json`; `verify-complete.rb` re-derives
 > offline and **fails (exit 6) if your report contradicts it** — quote the
 > ledger verbatim, never a verdict it doesn't support. **Wave-2 label (W2.3):**

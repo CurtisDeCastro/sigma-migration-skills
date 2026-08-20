@@ -75,7 +75,8 @@ def command(*args)
   [status.exitstatus, out + err]
 end
 
-def seed_workdir(dir, route_pass: true)
+def seed_workdir(dir, route_status: 'routed', emit_route: true, route_parity: true,
+                 divergence: false, marker_gates: 'all-pass')
   raw = JSON.parse(File.read(MODEL_FIXTURE))
   source_table = raw.dig('model', 'tables').find { |table| table['name'] == 'ABSENCE_RECORDS' }
   source_table = JSON.parse(JSON.generate(source_table))
@@ -126,7 +127,10 @@ def seed_workdir(dir, route_pass: true)
              'pages' => [{ 'id' => 'dm-page', 'elements' => [dm_element] }])
   write_json(File.join(dir, 'conv-meta.json'), 'model' => dm_spec, 'warnings' => [], 'stats' => {})
 
-  elements = signals['pages'][0]['visuals'].map do |visual|
+  emitted_visuals = signals['pages'][0]['visuals'].reject do |visual|
+    visual['visual_id'] == 'ti-route' && !emit_route
+  end
+  elements = emitted_visuals.map do |visual|
     {
       'id' => "el-#{short_id(visual['visual_id'])}",
       'name' => visual_name(visual),
@@ -165,30 +169,42 @@ def seed_workdir(dir, route_pass: true)
              'unbound' => [])
   write_json(File.join(dir, 'time-intelligence-routing.json'),
              'schema_version' => 1,
-             'summary' => { 'routed' => 1, 'needs_review' => 0, 'parity_required' => true },
+             'summary' => {
+               'routed' => %w[routed emitted].include?(route_status) ? 1 : 0,
+               'needs_review' => route_status == 'needs-review' ? 1 : 0,
+               'parity_required' => %w[routed emitted].include?(route_status)
+             },
              'routes' => [{
                'source_measure' => {
                  'table' => 'ABSENCE_RECORDS', 'name' => 'YTD Absence Hours',
                  'query_ref' => 'ABSENCE_RECORDS.YTD Absence Hours'
                },
-               'dax_shape' => 'ytd', 'status' => 'routed',
-               'reason' => 'same-fact-supported-shape', 'parity_required' => true,
+               'dax_shape' => 'ytd', 'status' => route_status,
+               'reason' => route_status == 'needs-review' ? 'explicit-review-disposition' : 'same-fact-supported-shape',
+               'parity_required' => %w[routed emitted].include?(route_status),
                'target_element' => { 'id' => 'dm-absence', 'name' => 'ABSENCE_RECORDS' },
                'target_column' => { 'id' => 'metric-ytdabsencehours', 'name' => 'YTD Absence Hours' }
              }])
 
-  data_names = signals['pages'][0]['visuals'].select do |visual|
+  data_names = emitted_visuals.select do |visual|
     visual['sigma_kind'] != 'control' && visual['sigma_kind'] != 'navigation'
   end.map { |visual| visual_name(visual) }
-  data_names.delete('YTD Absence Trend') unless route_pass
+  data_names.delete('YTD Absence Trend') unless route_parity
+  failed = divergence ? 1 : 0
+  passed = [data_names.length - failed, 0].max
+  classifications = data_names.to_h { |name| [name, 'MATCH'] }
+  classifications[data_names.first] = 'DIVERGENT' if divergence && data_names.first
   write_json(File.join(dir, 'parity-final.json'),
-             'workbook_id' => 'wb-fixture', 'mode' => 'strict', 'status' => 'PASS',
-             'charts_total' => data_names.length, 'charts_pass' => data_names.length,
-             'charts_fail' => 0, 'pass_names' => data_names,
-             'classifications' => data_names.to_h { |name| [name, 'MATCH'] })
+             'workbook_id' => 'wb-fixture', 'mode' => 'strict',
+             'status' => divergence ? 'FAIL' : 'PASS',
+             'charts_total' => data_names.length, 'charts_pass' => passed,
+             'charts_fail' => failed, 'pass_names' => data_names.drop(failed),
+             'classifications' => classifications)
   write_json(File.join(dir, 'phase6-success.json'),
-             'workbookId' => 'wb-fixture', 'chartCount' => data_names.length,
-             'gates' => 'resolution-pass', 'generatedAt' => '2026-08-20T00:00:00Z')
+             'workbookId' => 'wb-fixture', 'chartCount' => [data_names.length, 1].max,
+             'gates' => marker_gates,
+             'verdict' => route_status == 'routed' ? 'GREEN' : 'YELLOW',
+             'generatedAt' => '2026-08-20T00:00:00Z')
   write_json(File.join(dir, 'visual-similarity.json'),
              'status' => 'PASS',
              'source_health' => { 'path' => 'source.png', 'status' => 'PASS', 'reasons' => [] },
@@ -228,6 +244,14 @@ Dir.mktmpdir('pbi-accounting-success') do |dir|
   check(condition, "verify-complete accepts complete non-RED fresh report" \
                    "#{condition ? '' : " [exit=#{code}; #{output.strip}]"}")
 
+  marker = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
+  marker['verdict'] = 'YELLOW'
+  write_json(File.join(dir, 'phase6-success.json'), marker)
+  code, = command(RbConfig.ruby, VERIFY, '--workdir', dir)
+  check(code == 6, 'terminal marker verdict must exactly match the canonical report verdict')
+  marker['verdict'] = 'GREEN'
+  write_json(File.join(dir, 'phase6-success.json'), marker)
+
   census['summary']['complete'] = false
   write_json(File.join(dir, 'source-object-census.json'), census)
   code, = command(RbConfig.ruby, VERIFY, '--workdir', dir)
@@ -242,15 +266,52 @@ Dir.mktmpdir('pbi-accounting-success') do |dir|
   check(code == 6, 'unaccounted visual is rejected with accounting exit 6')
 end
 
-puts 'missing route parity'
-Dir.mktmpdir('pbi-accounting-route') do |dir|
-  seed_workdir(dir, route_pass: false)
+puts 'terminal-accounted non-emitted time-intelligence route'
+Dir.mktmpdir('pbi-accounting-route-yellow') do |dir|
+  seed_workdir(dir, route_status: 'needs-review', emit_route: false)
   code, = command(RbConfig.ruby, FINALIZER, '--workdir', dir)
-  check(code.zero?, 'needs-review route produces a non-RED diagnostic report')
+  result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
+  check(code.zero? && result['verdict'] == 'YELLOW' &&
+        result['completion_status'] == 'complete',
+        'terminal-accounted needs-review route produces complete YELLOW')
   code, output = command(RbConfig.ruby, VERIFY, '--workdir', dir)
-  condition = code == 7 && output.include?('time-intelligence')
-  check(condition, "missing route chart PASS is rejected with exit 7" \
+  condition = code.zero? && output.include?('COMPLETE - YELLOW') && !output.include?('GREEN')
+  check(condition, "non-emitted needs-review route is a YELLOW exit-0 handoff" \
                    "#{condition ? '' : " [exit=#{code}; #{output.strip}]"}")
+  check(%w[MIGRATION_REPORT.md source-object-census.json degradation-ledger.json].all? do |name|
+          File.file?(File.join(dir, name))
+        end,
+        'YELLOW handoff includes report, census, and degradation ledger')
+  proof = JSON.parse(File.read(File.join(dir, 'source-object-census.json')))
+              .dig('time_intelligence', 'routes').first
+  check(proof['terminal_accounted'] == true && proof['emitted'] == false &&
+        proof['parity_required'] == false && proof['parity_proven'] == false &&
+        proof['pass_charts'] == [],
+        'needs-review route is terminal-accounted but never emitted as a proven route')
+end
+
+puts 'emitted time-intelligence route missing parity'
+Dir.mktmpdir('pbi-accounting-route-red') do |dir|
+  seed_workdir(dir, route_status: 'routed', emit_route: true, route_parity: false)
+  code, output = command(RbConfig.ruby, FINALIZER, '--workdir', dir)
+  result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
+  check(code.nonzero? && result['verdict'] != 'GREEN' &&
+        output.include?('emitted/in-scope charts lack strict parity'),
+        'emitted route without strict chart parity is nonterminal/nonzero')
+  code, = command(RbConfig.ruby, VERIFY, '--workdir', dir)
+  check(code.nonzero?, 'verify-complete rejects emitted route missing parity')
+end
+
+puts 'proven parity divergence'
+Dir.mktmpdir('pbi-accounting-divergence') do |dir|
+  seed_workdir(dir, divergence: true)
+  code, = command(RbConfig.ruby, FINALIZER, '--workdir', dir)
+  result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
+  check(code.nonzero? && result['verdict'] == 'RED' &&
+        result['completion_status'] == 'blocked',
+        'proven divergence remains RED/nonzero')
+  code, = command(RbConfig.ruby, VERIFY, '--workdir', dir)
+  check(code.nonzero?, 'verify-complete rejects proven divergence')
 end
 
 puts 'unaccounted measure and report contradiction'

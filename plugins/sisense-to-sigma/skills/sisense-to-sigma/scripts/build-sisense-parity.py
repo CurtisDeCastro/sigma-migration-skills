@@ -59,6 +59,67 @@ def datasource_name(widget, dashboard, fallback):
     return fallback
 
 
+def folded(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def workbook_elements(workbook):
+    root = workbook.get("document", workbook) if isinstance(workbook, dict) else {}
+    rows = [row for row in root.get("elements") or [] if isinstance(row, dict)]
+    for page in root.get("pages") or []:
+        if isinstance(page, dict):
+            rows.extend(row for row in page.get("elements") or [] if isinstance(row, dict))
+    return rows
+
+
+def emitted_widget_keys(workbook):
+    """Return a one-use name census for emitted visualization elements."""
+    result = {}
+    for element in workbook_elements(workbook):
+        if element.get("visibleAsSource") is False:
+            continue
+        if element.get("kind") in ("control", "container", "divider", "image", "text"):
+            continue
+        if element.get("controlType") or element.get("id") == "master":
+            continue
+        key = folded(element.get("name") or element.get("title"))
+        if key:
+            result[key] = result.get(key, 0) + 1
+    return result
+
+
+def gap_widget_policy(gap):
+    """Map source widget ids to explicit pre-conversion gap dispositions."""
+    policies = {}
+    if not isinstance(gap, dict):
+        return policies
+    categories = {}
+    for row in gap.get("gaps") or []:
+        if isinstance(row, dict) and row.get("object_type") == "widget":
+            categories.setdefault(str(row.get("object_id")), set()).add(
+                str(row.get("category") or "")
+            )
+    for row in gap.get("objects") or []:
+        if not isinstance(row, dict) or row.get("type") != "widget":
+            continue
+        widget_id = str(row.get("id"))
+        scan_status = str(row.get("status") or "")
+        row_categories = categories.get(widget_id, set())
+        if scan_status == "not-applicable":
+            disposition = "not-applicable"
+        elif scan_status in ("manual", "unhandled") or row_categories.intersection(
+                {"manual", "unhandled", "flagged"}):
+            disposition = "skipped"
+        else:
+            disposition = None
+        policies[widget_id] = {
+            "scan_status": scan_status,
+            "gap_categories": sorted(row_categories),
+            "omitted_disposition": disposition,
+        }
+    return policies
+
+
 def model_tables(model):
     result = {}
     for dataset in model.get("datasets") or []:
@@ -130,11 +191,11 @@ def simple_check(widget, dashboard, model, cube, database, schema):
     }, None
 
 
-def tile_census(widgets, checks):
-    """Reconcile checks to source widgets without counting an override blindly."""
+def tile_census(source_widgets, required_widgets, omitted_widgets, checks):
+    """Reconcile checks to emitted scope while retaining the full source census."""
     remaining = list(checks)
     unmatched = []
-    for widget in widgets:
+    for widget in required_widgets:
         matched_index = None
         for index, check in enumerate(remaining):
             widget_id = str(widget.get("id") or "")
@@ -150,17 +211,24 @@ def tile_census(widgets, checks):
             remaining.pop(matched_index)
     return {
         # Canonical shared assert-phase6-ran.rb contract.
-        "zones_total": len(widgets),
-        "charts_built": len(widgets) - len(unmatched),
+        "zones_total": len(required_widgets),
+        "charts_built": len(required_widgets) - len(unmatched),
         "zones_unmatched": len(unmatched),
         "unmatched_zone_names": [row["name"] for row in unmatched],
         # Sisense-specific detail retained for accounting/report consumers.
-        "source_tiles": len(widgets),
+        "source_tiles": len(source_widgets),
+        "emitted_tiles": len(required_widgets),
+        "omitted_tiles": len(omitted_widgets),
+        "unexpected_omissions": sum(
+            row.get("disposition") == "missing" for row in omitted_widgets
+        ),
         "planned_tiles": len(checks),
         "needs_review_tiles": len(unmatched),
         "extra_checks": len(remaining),
         "unmatched_tiles": unmatched,
-        "source": widgets,
+        "source": source_widgets,
+        "required": required_widgets,
+        "omitted": omitted_widgets,
     }
 
 
@@ -168,13 +236,46 @@ def build(args):
     dashboards = read_json(args.dashboards)
     dashboards = dashboards if isinstance(dashboards, list) else [dashboards]
     model = read_json(args.model)
-    checks, review, widgets = [], [], []
+    workbook = read_json(args.workbook) if args.workbook else None
+    gap = read_json(args.gap_report) if args.gap_report else None
+    emitted_names = emitted_widget_keys(workbook) if workbook is not None else None
+    policies = gap_widget_policy(gap)
+    checks, review, widgets, required, omitted = [], [], [], [], []
     for dashboard in dashboards:
         for widget in dashboard.get("widgets") or []:
             widget_id = widget.get("_id") or widget.get("oid") or widget.get("title")
             name = widget.get("title") or str(widget_id)
-            widgets.append({"id": widget_id, "name": name,
-                            "dashboard": dashboard.get("title")})
+            source_row = {
+                "id": widget_id, "name": name,
+                "dashboard": dashboard.get("title"),
+            }
+            widgets.append(source_row)
+            emitted = True
+            if emitted_names is not None:
+                key = folded(name)
+                emitted = emitted_names.get(key, 0) > 0
+                if emitted:
+                    emitted_names[key] -= 1
+            policy = policies.get(str(widget_id), {})
+            if not emitted:
+                disposition = policy.get("omitted_disposition")
+                omitted_row = {
+                    **source_row,
+                    "disposition": disposition or "missing",
+                    "scan_status": policy.get("scan_status"),
+                    "gap_categories": policy.get("gap_categories") or [],
+                }
+                omitted.append(omitted_row)
+                if disposition in ("skipped", "not-applicable"):
+                    continue
+                review.append({
+                    "widget_id": widget_id, "name": name,
+                    "status": "missing",
+                    "reason": "in-scope widget was not emitted and has no explicit skip/not-applicable disposition",
+                    "sql_generated": False,
+                })
+                continue
+            required.append(source_row)
             check, reason = simple_check(
                 widget, dashboard, model, args.cube,
                 args.database, args.schema,
@@ -194,9 +295,12 @@ def build(args):
         if not isinstance(override, list):
             raise ValueError("--parity-checks must be a JSON array")
         checks = override
-    census = tile_census(widgets, checks)
+    census = tile_census(widgets, required, omitted, checks)
     unmatched_ids = {str(row.get("id")) for row in census["unmatched_tiles"]}
-    review = [row for row in review if str(row.get("widget_id")) in unmatched_ids]
+    review = [
+        row for row in review
+        if str(row.get("widget_id")) in unmatched_ids
+    ]
     plan = {
         "schema_version": 1,
         "source": "sisense",
@@ -208,13 +312,34 @@ def build(args):
         ],
         "needs_review": review,
         "tile_census": census,
+        "scope_policy": {
+            "source_widgets": len(widgets),
+            "required_emitted_widgets": len(required),
+            "explicitly_omitted_widgets": len(omitted) - sum(
+                row["disposition"] == "missing" for row in omitted
+            ),
+            "unexpected_omissions": sum(
+                row["disposition"] == "missing" for row in omitted
+            ),
+        },
     }
     write_json(args.checks_out, checks)
     write_json(args.plan_out, plan)
-    print("Sisense parity plan: %d check(s), %d needs-review widget(s)" %
-          (len(checks), len(review)))
-    if not checks:
-        print("RED: zero executable parity checks", file=sys.stderr)
+    print(
+        "Sisense parity plan: %d/%d emitted widget check(s), "
+        "%d explicitly omitted, %d needs-review" %
+        (len(checks), len(required),
+         plan["scope_policy"]["explicitly_omitted_widgets"], len(review))
+    )
+    if (not checks or census["zones_unmatched"] or census["extra_checks"] or
+            plan["scope_policy"]["unexpected_omissions"]):
+        print(
+            "RED: emitted parity scope is incomplete "
+            "(required=%d checks=%d unmatched=%d extra=%d)" %
+            (len(required), len(checks), census["zones_unmatched"],
+             census["extra_checks"]),
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -253,6 +378,7 @@ def normalize(args):
         int(census.get("zones_total") or 0) > 0
         and int(census.get("zones_unmatched") or 0) == 0
         and int(census.get("extra_checks") or 0) == 0
+        and int(census.get("unexpected_omissions") or 0) == 0
     )
     status = (
         "PASS"
@@ -289,6 +415,10 @@ def main(argv=None):
     make.add_argument("--database", required=True)
     make.add_argument("--schema", required=True)
     make.add_argument("--parity-checks")
+    make.add_argument("--workbook",
+                      help="converted/read-back workbook used to define emitted scope")
+    make.add_argument("--gap-report",
+                      help="structured source census with explicit omitted gaps")
     make.add_argument("--checks-out", required=True)
     make.add_argument("--plan-out", required=True)
     finish = sub.add_parser("normalize")

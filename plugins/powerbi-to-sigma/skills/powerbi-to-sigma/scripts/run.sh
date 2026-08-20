@@ -27,6 +27,7 @@
 #     --ref-dm <referenceDataModelId> \
 #     --master-map /tmp/pbir/master-map.json \
 #     --name "My Report (from Power BI)" \
+#     [--accept-waiver-budget-exceeded "reviewed exception"] \
 #     [--from extract|convert|post-dm|build|post-wb|layout|parity]
 #
 # All artifacts land in --work-dir; each stage is idempotent.
@@ -36,6 +37,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK=/tmp/pbir; FROM=extract
 WS=""; REPORT=""; DATASET=""; BIM=""; CONN=""; DB=""; SCHEMA=""
 REF_DM=""; MMAP=""; NAME=""; CVT_OUT=""; FOLDER=""
+WAIVER_BUDGET_REASON=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --work-dir) WORK="$2"; shift 2;;
   --workspace) WS="$2"; shift 2;;
@@ -50,11 +52,16 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --name) NAME="$2"; shift 2;;
   --folder-id) FOLDER="$2"; shift 2;;
   --converter-out) CVT_OUT="$2"; shift 2;;
+  --accept-waiver-budget-exceeded) WAIVER_BUDGET_REASON="$2"; shift 2;;
   --from) FROM="$2"; shift 2;;
   *) echo "unknown arg $1" >&2; exit 1;;
 esac; done
 mkdir -p "$WORK"
 CVT_OUT="${CVT_OUT:-$WORK/dm-raw.json}"
+ASSERT_BUDGET_ARGS=()
+if [[ -n "$WAIVER_BUDGET_REASON" ]]; then
+  ASSERT_BUDGET_ARGS=(--accept-waiver-budget-exceeded "$WAIVER_BUDGET_REASON")
+fi
 
 # ---- Python resolution + venv bootstrap (bead 7o01) -------------------------
 # The extract/auth scripts need msal + requests + truststore (scripts/
@@ -180,8 +187,8 @@ if [[ $START -le 6 ]]; then
   if [[ -n "$WB_ID" && -f "$WORK/layout.xml" ]]; then
     ruby "$HERE/put-layout.rb" --workbook "$WB_ID" --layout "$WORK/layout.xml"
     # Re-assert the layout actually stuck (catches a silent wipe).
-    if ruby "$HERE/assert-phase6-ran.rb" --tableau "$WORK" --workbook-id "$WB_ID" \
-         --skip-orphan-check --skip-column-check 2>/dev/null \
+    if ruby "$HERE/assert-powerbi-terminal.rb" --tableau "$WORK" --workbook-id "$WB_ID" \
+         --skip-orphan-check --skip-column-check "${ASSERT_BUDGET_ARGS[@]}" 2>/dev/null \
        | grep -q 'gate 4/4: layout XML applied'; then
       echo "  layout-survives check: OK"
     else
@@ -218,20 +225,26 @@ if [[ $START -le 7 ]]; then
   fi
 fi
 
-# ---- FINAL GATE: assert-phase6-ran (bead 148 flags: --tableau + --workbook-id) ----
-# The shared hard gate proves Phase 6 ran, no orphan workbooks, no type=error
-# columns, AND the layout survived (gate 4/4 — bead 16i). It needs the
-# per-conversion dir via --tableau (NOT --workdir) and --workbook-id.
+# ---- FINAL GATE: Power BI wrapper around shared assert-phase6-ran ----
+# The wrapper preserves the shared gate byte-for-byte, then refreshes and checks
+# Power BI's report/census/ledger and canonical terminal marker.
 WB_ID=$(grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$WORK/wb-post.txt" 2>/dev/null | head -1 || true)
 if [[ -f "$WORK/parity-final.json" && -n "$WB_ID" ]]; then
-  echo "== FINAL GATE: assert-phase6-ran =="
-  ruby "$HERE/assert-phase6-ran.rb" --tableau "$WORK" --workbook-id "$WB_ID" || {
-    echo "  >>> GATE FAILED — fix the reported issue before declaring done."; exit 1;
-  }
+  echo "== FINAL GATE: assert-powerbi-terminal =="
+  set +e
+  ruby "$HERE/assert-powerbi-terminal.rb" --tableau "$WORK" --workbook-id "$WB_ID" \
+    "${ASSERT_BUDGET_ARGS[@]}"
+  GATE_RC=$?
+  set -e
+  if [[ $GATE_RC -ne 0 ]]; then
+    echo "  >>> GATE STOPPED (exit $GATE_RC) — preserve the decision/failure code; do not declare done."
+    exit "$GATE_RC"
+  fi
 elif [[ -n "$WB_ID" ]]; then
-  echo "== FINAL GATE (layout + columns only; parity-final.json not yet present) =="
-  ruby "$HERE/assert-phase6-ran.rb" --tableau "$WORK" --workbook-id "$WB_ID" \
-    --skip-orphan-check 2>&1 | grep -E 'gate [34]/4' || true
-  echo "  (run the parity --finalize MCP gate to complete gate 1/4)"
+  echo "== ROUTING REQUIRED (layout + columns only; strict parity pending) =="
+  ruby "$HERE/assert-powerbi-terminal.rb" --tableau "$WORK" --workbook-id "$WB_ID" \
+    --skip-orphan-check "${ASSERT_BUDGET_ARGS[@]}" 2>&1 | grep -E 'gate [34]/4' || true
+  echo "  (run the parity --finalize MCP gate, then resume; this is not terminal GREEN/YELLOW)"
+  exit 10
 fi
-echo "== run.sh done (resume any stage with --from <stage>) =="
+echo "== run.sh terminal gate complete (resume any stage with --from <stage>) =="

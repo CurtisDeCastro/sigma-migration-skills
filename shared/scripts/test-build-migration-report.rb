@@ -79,6 +79,8 @@ Dir.mktmpdir('migration-report-full') do |dir|
   result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
   markdown = File.read(File.join(dir, 'MIGRATION_REPORT.md'))
   ok('full accounting is GREEN', result['verdict'] == 'GREEN')
+  ok('GREEN accounting has complete completion_status',
+     result['completion_status'] == 'complete')
   ok('all four objects accounted as migrated',
      result.dig('summary', 'total') == 4 &&
        result.dig('summary', 'accounted') == 4 &&
@@ -138,6 +140,7 @@ Dir.mktmpdir('migration-report-omitted') do |dir|
   omitted = result['source_objects'].find { |object| object['id'] == 'd2' }
   ok('omitted object exits 1', status.exitstatus == 1)
   ok('omitted object makes verdict RED', result['verdict'] == 'RED')
+  ok('omitted object is blocked', result['completion_status'] == 'blocked')
   ok('omitted object is explicit in canonical accounting', omitted['status'] == 'missing')
   ok('omitted object fails source-accounting check',
      result['checks'].any? { |check| check['name'] == 'source-accounting' && check['status'] == 'FAIL' })
@@ -182,7 +185,52 @@ Dir.mktmpdir('migration-report-yellow') do |dir|
   result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
   ok('approximated full accounting exits 0', status.exitstatus == 0)
   ok('approximated full accounting is YELLOW', result['verdict'] == 'YELLOW')
+  ok('approximated full accounting is a complete handoff',
+     result['completion_status'] == 'complete')
   ok('approximated accounting remains complete', result.dig('summary', 'complete') == true)
+end
+
+# needs-review and skipped are explicit terminal handoffs: accounted, YELLOW,
+# complete, and exit 0 rather than being confused with missing accounting.
+%w[needs-review skipped].each do |terminal_status|
+  Dir.mktmpdir("migration-report-#{terminal_status}") do |dir|
+    write_json(File.join(dir, 'inventory.json'),
+               'objects' => [
+                 { 'type' => 'chart', 'id' => 'c1', 'name' => 'Named decision',
+                   'status' => terminal_status }
+               ])
+    write_health_artifacts(dir)
+    _stdout, _stderr, status = run_builder(dir)
+    result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
+    ok("#{terminal_status} full accounting exits 0", status.exitstatus == 0)
+    ok("#{terminal_status} full accounting is YELLOW", result['verdict'] == 'YELLOW')
+    ok("#{terminal_status} full accounting is complete",
+       result['completion_status'] == 'complete' &&
+         result.dig('summary', 'accounted') == 1 &&
+         result.dig('summary', 'complete') == true)
+  end
+end
+
+# A degradation ledger entry alone caps faithful accounting at YELLOW.
+Dir.mktmpdir('migration-report-ledger-yellow') do |dir|
+  write_json(File.join(dir, 'inventory.json'),
+             'objects' => [
+               { 'type' => 'dashboard', 'id' => 'd1', 'name' => 'Sales',
+                 'status' => 'migrated' }
+             ])
+  write_health_artifacts(dir)
+  write_json(File.join(dir, 'degradation-ledger.json'),
+             'version' => 1,
+             'counts' => { 'quality-waiver' => 1 },
+             'entries' => [
+               { 'class' => 'quality-waiver', 'item' => 'named degradation',
+                 'reason' => 'accepted for handoff' }
+             ])
+  _stdout, _stderr, status = run_builder(dir)
+  result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
+  ok('ledger-only degradation exits 0', status.exitstatus == 0)
+  ok('ledger-only degradation is YELLOW', result['verdict'] == 'YELLOW')
+  ok('ledger-only YELLOW handoff is complete', result['completion_status'] == 'complete')
 end
 
 # Hard verification evidence dominates complete source accounting.
@@ -200,6 +248,7 @@ Dir.mktmpdir('migration-report-render-failure') do |dir|
   result = JSON.parse(File.read(File.join(dir, 'migration-result.json')))
   ok('failed render/blank risk exits 1', status.exitstatus == 1)
   ok('failed render/blank risk makes verdict RED', result['verdict'] == 'RED')
+  ok('failed render/blank risk is blocked', result['completion_status'] == 'blocked')
   ok('render and blank-risk checks both fail',
      %w[render-health blank-risk].all? do |name|
        result['checks'].any? { |check| check['name'] == name && check['status'] == 'FAIL' }

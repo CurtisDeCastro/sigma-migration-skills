@@ -104,6 +104,23 @@ ok('Sisense assert-phase6 hard gate is manifest-registered with its full shared 
   missing_sisense_closure.empty?
 end
 
+# The terminal outcome policy and report builder are one atomic closure in the
+# five report-adopting converters. A missing helper would either crash the
+# report or invite a plugin-local verdict fork.
+report_plugins = %w[tableau looker powerbi qlik sisense]
+missing_report_closure = report_plugins.flat_map do |tool|
+  scripts = "plugins/#{tool}-to-sigma/skills/#{tool}-to-sigma/scripts"
+  {
+    'shared/scripts/build-migration-report.rb' => "#{scripts}/build-migration-report.rb",
+    'shared/lib/terminal_outcome.rb' => "#{scripts}/lib/terminal_outcome.rb"
+  }.reject { |canonical, target| ENTRIES.fetch(canonical, []).include?(target) }
+   .map { |canonical, target| "#{canonical} -> #{target}" }
+end
+ok('migration report and terminal outcome helper are manifest-registered together') do
+  missing_report_closure.each { |entry| warn "    MISSING REGISTRATION #{entry}" }
+  missing_report_closure.empty?
+end
+
 # ── 2. Gate remedies ship with their gate. Parses `scripts/<name>.rb` out of a
 #       shared assert-* gate's own operator-facing text and requires that any
 #       such script which is ITSELF shared exists in every plugin the gate ships
