@@ -376,6 +376,48 @@ ok('router does not duplicate converter/restructure elements',
      artifact['routes'].count { |route| route['status'] == 'routed' } == 3)
 ok('router does not add duplicate masters', patched['masters'].length == MASTER_MAP['masters'].length)
 
+# Live KitchenSink shape: the synthesized element groups a denormalized
+# `[SALES View/Date]` column while source DAX names `DATE_DIM[Date]`. The route
+# is safe because the fact already matches and the underlying date-column leaf
+# matches; comparing `Month`/`Year` display names to source `Date` is too strict.
+live_dm = JSON.parse(JSON.generate(DM_SPEC))
+live_dm.dig('pages', 0, 'elements').each do |element|
+  Array(element['columns']).each do |column|
+    column['formula'] = column['formula'].to_s.gsub('Full Date (DATE_DIM)', 'Date')
+  end
+end
+live_artifact, live_patched = R.route_all(
+  measures: measures,
+  dm_spec: live_dm,
+  dm_readback: DM_READBACK,
+  master_map: MASTER_MAP
+)
+live_routes = live_artifact['routes'].to_h { |route| [route.dig('source_measure', 'query_ref'), route] }
+ok('denormalized Date leaf routes source DATE_DIM[Date] SPLY/YTD',
+   live_routes.dig('SALES.Revenue PY', 'status') == 'routed' &&
+     live_routes.dig('SALES.Revenue YTD', 'status') == 'routed')
+ok('denormalized date route co-routes DATE_DIM period refs',
+   live_patched.dig('field_map', 'DATE_DIM.Month', 'alts').any? do |alt|
+     alt['master'] == 'Revenue YTD' && alt['ref'] == '[master-ytd/Month]'
+   end)
+
+wrong_date_model = JSON.parse(JSON.generate(MODEL))
+wrong_date_model.dig('model', 'tables', 0, 'measures')
+                .find { |measure| measure['name'] == 'Revenue PY' }['expression'] =
+  'CALCULATE([Revenue], SAMEPERIODLASTYEAR(DATE_DIM[Posting Date]))'
+wrong_artifact, = R.route_all(
+  measures: R.measures_from_model(wrong_date_model),
+  dm_spec: live_dm,
+  dm_readback: DM_READBACK,
+  master_map: MASTER_MAP
+)
+wrong_route = wrong_artifact['routes'].find do |route|
+  route.dig('source_measure', 'query_ref') == 'SALES.Revenue PY'
+end
+ok('different underlying date-column leaf still fails closed',
+   wrong_route['status'] == 'needs-review' &&
+     wrong_route['reason'] == 'date-semantics-mismatch')
+
 Dir.mktmpdir('pbi-timeintel-route') do |dir|
   model_path = File.join(dir, 'model.json')
   dm_path = File.join(dir, 'dm.json')

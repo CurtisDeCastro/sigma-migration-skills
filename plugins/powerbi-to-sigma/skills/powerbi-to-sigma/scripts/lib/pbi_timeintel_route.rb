@@ -256,7 +256,8 @@ module PbiTimeIntelRoute
         'master_id' => master_id,
         'base_column' => base_column,
         'period_columns' => selected['period_columns'],
-        'date_signature' => selected['date_signature']
+        'date_signature' => selected['date_signature'],
+        'source_date_ref' => date_refs.first
       }
     )
   end
@@ -312,6 +313,7 @@ module PbiTimeIntelRoute
         'columns' => columns,
         'date_column' => date_result['column'],
         'date_signature' => date_result['signature'],
+        'date_source_column' => date_result['source_column'],
         'period_columns' => candidate_period_columns(element)
       }
     end.sort_by { |candidate| [norm(candidate['fact']), norm(candidate['name']), candidate['id'].to_s] }
@@ -343,10 +345,14 @@ module PbiTimeIntelRoute
     grouping = Array(element['groupings']).reverse.find { |group| Array(group['groupBy']).any? }
     grouped = Array(grouping && grouping['groupBy']).filter_map { |id| by_id[id] }
     grouped = columns.select { |column| date_column?(column) } if grouped.empty?
-    return { 'column' => nil, 'signature' => nil } unless grouped.length == 1
+    return { 'column' => nil, 'signature' => nil, 'source_column' => nil } unless grouped.length == 1
 
     column = grouped.first
-    { 'column' => column, 'signature' => date_signature(column['formula'], column['name']) }
+    {
+      'column' => column,
+      'signature' => date_signature(column['formula'], column['name']),
+      'source_column' => date_source_column(column['formula'])
+    }
   end
 
   def candidate_period_columns(element)
@@ -357,7 +363,10 @@ module PbiTimeIntelRoute
       .select { |column| date_column?(column) }
       .uniq { |column| column['id'] }
       .map do |column|
-        column.merge('date_signature' => date_signature(column['formula'], column['name']))
+        column.merge(
+          'date_signature' => date_signature(column['formula'], column['name']),
+          'source_column' => date_source_column(column['formula'])
+        )
       end
   end
 
@@ -390,9 +399,18 @@ module PbiTimeIntelRoute
     signature = candidate['date_signature'].to_s
     return false if signature.empty?
     return true if signature == "table:#{norm(source_ref['table'])}"
+    return true if semantic_date_name(candidate['date_source_column']) ==
+                   semantic_date_name(source_ref['column'])
 
     candidate['date_column'] &&
       semantic_date_name(candidate['date_column']['name']) == semantic_date_name(source_ref['column'])
+  end
+
+  def date_source_column(formula)
+    path = formula.to_s.scan(/\[([^\]]+\/[^\]]+)\]/).flatten.first
+    return nil unless path
+
+    path.split('/').last.to_s.sub(/\s*\([^)]*\)\s*$/, '')
   end
 
   def semantic_date_name(value)
@@ -487,7 +505,10 @@ module PbiTimeIntelRoute
       fields.keys.sort_by { |query_ref| norm(query_ref) }.each do |query_ref|
         field = fields[query_ref]
         next unless field.is_a?(Hash)
-        next unless matching_period_query_ref?(query_ref, field, period_column['name'], signature)
+        next unless matching_period_query_ref?(
+          query_ref, field, period_column['name'], signature,
+          route_context['source_date_ref'], period_column['source_column']
+        )
 
         alt = {
           'master' => master,
@@ -562,12 +583,19 @@ module PbiTimeIntelRoute
       key.split('.', 2).first.to_s
   end
 
-  def matching_period_query_ref?(query_ref, field, period_name, signature)
+  def matching_period_query_ref?(query_ref, field, period_name, signature,
+                                 source_date_ref = nil, source_column = nil)
     expected_table = signature.to_s[/\Atable:(.+)\z/, 1]
-    return false unless expected_table
 
     parts = query_ref.to_s.split('.')
-    return false if parts.length < 2 || norm(parts.first) != expected_table
+    return false if parts.length < 2
+
+    table_matches = expected_table && norm(parts.first) == expected_table
+    table_matches ||= source_date_ref &&
+                      norm(parts.first) == norm(source_date_ref['table']) &&
+                      semantic_date_name(source_column) ==
+                        semantic_date_name(source_date_ref['column'])
+    return false unless table_matches
 
     query_leaf = parts.last
     ref_leaf = bracket_leaf(field['ref'])
