@@ -468,7 +468,7 @@ class UpliftContracts(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             rows = json.loads((Path(td) / "source-object-census.json").read_text())["objects"]
             self.assertEqual({row["id"]: row["status"] for row in rows},
-                             {"t": "migrated", "w": "needs-review",
+                             {"t": "migrated", "w": "skipped",
                               "d": "not-applicable"})
             bad = json.loads(gap.read_text())
             bad["objects"][0]["evidence"] = []
@@ -534,9 +534,248 @@ class UpliftContracts(unittest.TestCase):
         self.assertIn('HERE / "record-visual-check.rb"', source)
         self.assertLess(
             source.index('HERE / "assert-phase6-ran.rb"'),
-            source.index('phase("10", "post-gate accounting and final report")'),
+            source.index('phase("10", "final report from reconciled accounting")'),
         )
         self.assertEqual(len(list(SCRIPTS.glob("assert-phase6-ran.rb"))), 1)
+
+    def test_budget_overflow_requires_decision_and_accepted_path_requires_assert_zero(self):
+        module = load_orchestrator()
+        self.assertEqual(module.shared_gate_outcome(19), 10)
+        self.assertEqual(module.shared_gate_outcome(19, "risk accepted"), 2)
+        self.assertEqual(module.shared_gate_outcome(0, "risk accepted"), 0)
+        help_result = command(SCRIPTS / "migrate-sisense.py", "--help")
+        self.assertIn("--accept-waiver-budget-exceeded REASON", help_result.stdout)
+        source = (SCRIPTS / "migrate-sisense.py").read_text()
+        self.assertIn("DECISION REQUIRED: shared waiver budget exceeded", source)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dump(root / "source-object-census.json", {
+                "summary": {"total": 1, "accounted": 1, "complete": True},
+                "objects": [{"type": "widget", "id": "w", "name": "W",
+                             "status": "migrated"}],
+            })
+            dump(root / "parity-final.json", {
+                "status": "PASS", "strict_complete": True,
+                "charts_total": 1, "charts_pass": 1, "charts_fail": 0,
+            })
+            dump(root / "render-health.json", {"status": "PASS"})
+            dump(root / "waivers.json", [{
+                "flag": "--accept-waiver-budget-exceeded",
+                "reason": "operator accepted cumulative risk",
+            }])
+            accepted = command(
+                SCRIPTS / "build-migration-report.rb",
+                "--workdir", root, "--inventory", root / "source-object-census.json",
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            report = json.loads((root / "migration-result.json").read_text())
+            self.assertEqual(report["verdict"], "YELLOW")
+            self.assertEqual(report["completion_status"], "complete")
+
+    def test_emitted_parity_scope_excludes_explicit_omission_but_divergence_is_red(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            dashboards = root / "dashboards.json"
+            model = root / "model.json"
+            workbook = root / "workbook.json"
+            gap = root / "gap.json"
+            override = root / "checks-override.json"
+            checks = root / "checks.json"
+            plan = root / "plan.json"
+            results = root / "results.json"
+            final = root / "parity-final.json"
+            widgets = []
+            for widget_id, title in (("auto", "Auto"), ("approx", "Approx"), ("manual", "Manual")):
+                widgets.append({
+                    "_id": widget_id, "title": title, "type": "indicator",
+                    "metadata": {"panels": [{"name": "value", "items": [{
+                        "jaql": {"dim": "[Fact.Value]", "agg": "sum", "title": title}
+                    }]}]},
+                })
+            dump(dashboards, [{"title": "D", "widgets": widgets, "filters": []}])
+            dump(model, {"datasets": [{"schema": {"tables": [{
+                "name": "Fact", "columns": [{"name": "Value"}]
+            }]}}]})
+            dump(workbook, {"document": {"elements": [
+                {"id": "master", "name": "Master", "kind": "table"},
+                {"id": "a", "name": "Auto", "kind": "kpi"},
+                {"id": "b", "name": "Approx", "kind": "kpi"},
+            ]}})
+            gap_objects = [
+                {"type": "widget", "id": "auto", "name": "Auto", "status": "auto"},
+                {"type": "widget", "id": "approx", "name": "Approx", "status": "hint"},
+                {"type": "widget", "id": "manual", "name": "Manual", "status": "manual"},
+            ]
+            dump(gap, {
+                "objects": gap_objects,
+                "gaps": [{
+                    "object_type": "widget", "object_id": "manual",
+                    "category": "manual",
+                }],
+            })
+            dump(override, [
+                {"label": "Auto", "widget_id": "auto"},
+                {"label": "Approx", "widget_id": "approx"},
+            ])
+            built = command(
+                SCRIPTS / "build-sisense-parity.py", "build",
+                "--dashboards", dashboards, "--model", model, "--cube", "Cube",
+                "--database", "DB", "--schema", "SCHEMA",
+                "--workbook", workbook, "--gap-report", gap,
+                "--parity-checks", override, "--checks-out", checks,
+                "--plan-out", plan,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            census = json.loads(plan.read_text())["tile_census"]
+            self.assertEqual(census["source_tiles"], 3)
+            self.assertEqual(census["emitted_tiles"], 2)
+            self.assertEqual(census["omitted"][0]["disposition"], "skipped")
+            dump(results, [
+                {"label": "Auto", "verdict": "GREEN"},
+                {"label": "Approx", "verdict": "RED"},
+            ])
+            normalized = command(
+                SCRIPTS / "build-sisense-parity.py", "normalize",
+                "--plan", plan, "--results", results, "--out", final,
+            )
+            self.assertEqual(normalized.returncode, 1)
+            self.assertEqual(json.loads(final.read_text())["status"], "FAIL")
+
+            missing_workbook = json.loads(workbook.read_text())
+            missing_workbook["document"]["elements"] = missing_workbook["document"]["elements"][:1]
+            dump(workbook, missing_workbook)
+            omitted_auto = command(
+                SCRIPTS / "build-sisense-parity.py", "build",
+                "--dashboards", dashboards, "--model", model, "--cube", "Cube",
+                "--database", "DB", "--schema", "SCHEMA",
+                "--workbook", workbook, "--gap-report", gap,
+                "--parity-checks", override, "--checks-out", checks,
+                "--plan-out", plan,
+            )
+            self.assertNotEqual(omitted_auto.returncode, 0)
+            self.assertIn("RED:", omitted_auto.stderr)
+
+    def test_complete_56_object_fixture_is_yellow_usable_handoff(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scan = command(
+                SCRIPTS / "scan_gaps.py", FIXTURES / "dashboards.json",
+                "--model", FIXTURES / "model_ecommerce.json",
+                "--out", root / "gap-report.json",
+                "--rules", root / "learned-rules.json",
+            )
+            self.assertEqual(scan.returncode, 0, scan.stderr)
+            converted_model = command(
+                SCRIPTS / "convert.py", "model", FIXTURES / "model_ecommerce.json",
+                "connection", "SCHEMA", "DB", "--dashboards", FIXTURES / "dashboards.json",
+                cwd=root,
+            )
+            self.assertEqual(converted_model.returncode, 0, converted_model.stderr)
+            converted_wb = command(
+                SCRIPTS / "convert.py", "dashboard", FIXTURES / "dashboards.json",
+                FIXTURES / "model_ecommerce.json", "dm", "fact", "Commerce",
+                "--dm-spec", root / "sigma_dm_spec.json",
+                cwd=root,
+            )
+            self.assertEqual(converted_wb.returncode, 0, converted_wb.stderr)
+            source = json.loads((FIXTURES / "dashboards.json").read_text())
+            source_by_name = {
+                widget["title"]: widget
+                for dashboard in source for widget in dashboard.get("widgets") or []
+            }
+            workbook = json.loads((root / "sigma_workbook_spec.json").read_text())
+            elements = (workbook.get("document") or {}).get("elements") or []
+            emitted_names = [
+                row["name"] for row in elements
+                if row.get("id") != "master" and row.get("kind") != "control"
+            ]
+            overrides = [{
+                "label": name,
+                "widget_id": source_by_name[name].get("_id") or source_by_name[name].get("oid"),
+            } for name in emitted_names]
+            dump(root / "override.json", overrides)
+            planned = command(
+                SCRIPTS / "build-sisense-parity.py", "build",
+                "--dashboards", FIXTURES / "dashboards.json",
+                "--model", FIXTURES / "model_ecommerce.json",
+                "--cube", "Sample ECommerce", "--database", "DB", "--schema", "SCHEMA",
+                "--workbook", root / "sigma_workbook_spec.json",
+                "--gap-report", root / "gap-report.json",
+                "--parity-checks", root / "override.json",
+                "--checks-out", root / "parity-checks.json",
+                "--plan-out", root / "parity-plan.json",
+            )
+            self.assertEqual(planned.returncode, 0, planned.stdout + planned.stderr)
+            plan = json.loads((root / "parity-plan.json").read_text())
+            dump(root / "parity_keys.json", [
+                {"label": row["chart"], "verdict": "GREEN"}
+                for row in plan["charts"]
+            ])
+            normalized = command(
+                SCRIPTS / "build-sisense-parity.py", "normalize",
+                "--plan", root / "parity-plan.json",
+                "--results", root / "parity_keys.json",
+                "--out", root / "parity-final.json",
+            )
+            self.assertEqual(normalized.returncode, 0, normalized.stderr)
+            accounted = command(
+                SCRIPTS / "build-sisense-accounting.py",
+                "--workdir", root, "--gap-report", root / "gap-report.json",
+                "--model", FIXTURES / "model_ecommerce.json",
+                "--dashboards", FIXTURES / "dashboards.json",
+                "--dm-spec", root / "sigma_dm_spec.json",
+                "--wb-spec", root / "sigma_workbook_spec.json",
+                "--parity-final", root / "parity-final.json",
+                "--jaql-mapping", root / "parity-plan.json",
+            )
+            self.assertEqual(accounted.returncode, 0, accounted.stdout + accounted.stderr)
+            gap_gate = command(
+                SCRIPTS / "check-accounted-gaps.py",
+                "--gap-report", root / "gap-report.json",
+                "--census", root / "source-object-census.json",
+                "--parity", root / "parity-final.json",
+                "--out", root / "accounted-gap-result.json",
+            )
+            self.assertEqual(gap_gate.returncode, 0, gap_gate.stdout + gap_gate.stderr)
+            census = json.loads((root / "source-object-census.json").read_text())
+            self.assertEqual(census["summary"]["total"], 56)
+            self.assertTrue(census["summary"]["complete"])
+
+            time.sleep(0.01)
+            dump(root / "render-health.json", {"status": "PASS", "images": []})
+            dump(root / "blank-risk.json", {"status": "PASS"})
+            ledger = subprocess.run([
+                "ruby", "-I", str(SCRIPTS / "lib"), "-rdegradation_ledger", "-e",
+                "e=DegradationLedger.derive(ARGV[0]); DegradationLedger.write(ARGV[0],e)",
+                str(root),
+            ], capture_output=True, text=True)
+            self.assertEqual(ledger.returncode, 0, ledger.stderr)
+            time.sleep(0.01)
+            report_result = command(
+                SCRIPTS / "build-migration-report.rb",
+                "--workdir", root, "--inventory", root / "source-object-census.json",
+            )
+            self.assertEqual(report_result.returncode, 0, report_result.stderr)
+            report = json.loads((root / "migration-result.json").read_text())
+            self.assertEqual(report["verdict"], "YELLOW")
+            self.assertEqual(report["completion_status"], "complete")
+            self.assertIn("migration report: YELLOW", report_result.stdout)
+            dump(root / "run-state.json", {
+                "mode": "live", "complete": True, "post_complete": True,
+                "parity_complete": True, "render_complete": True,
+            })
+            time.sleep(0.01)
+            dump(root / "sisense-report-finalization.json", {"status": "PASS"})
+            dump(root / "phase6-success.json", {
+                "gates": "all-pass", "workbookId": "wb", "chartCount": len(plan["charts"]),
+                "verdict": "YELLOW", "completion_status": "complete",
+            })
+            verified = command(
+                SCRIPTS / "verify-complete.rb",
+                "--workdir", root, "--workbook-id", "wb",
+            )
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+            self.assertIn("VERDICT: YELLOW (complete)", verified.stdout)
 
     def test_complete_fixture_passes_terminal_verifier(self):
         with tempfile.TemporaryDirectory() as td:
@@ -561,6 +800,7 @@ class UpliftContracts(unittest.TestCase):
             time.sleep(0.01)
             dump(root / "migration-result.json", {
                 "verdict": "GREEN",
+                "completion_status": "complete",
                 "summary": {"total": 1, "accounted": 1, "complete": True},
                 "source_objects": [obj],
             })

@@ -21,7 +21,10 @@
   Apply the source's dashboard/widget filters so aggregates run over the same
   **population** — otherwise ratios/averages drift even when formulas are "right."
 - **Rebuild every source viz** (indicators, trends, pivots). If a viz has no standalone
-  data export, reconstruct it from the model. **Never silently drop a tile.**
+  data export, reconstruct it from the model. **Never silently drop a tile.** A
+  capability-gap omission must stay in the source census with an explicit
+  `skipped`/`not-applicable` terminal disposition; that is a YELLOW handoff,
+  not faithful GREEN.
 
 ## Verify — don't assume (this is what keeps you on the rails)
 - After every write, GET the spec back. A rejected PUT is **atomic** — read the 400.
@@ -40,6 +43,10 @@
 - If you've retried the same failing step ~2×, change approach or surface it — never grind.
 
 ## Done means
-- 0 error columns; every page rendered and visually matching the source; every KPI's
-  number matching the source (or the delta explained); controls present and wired; no
-  silently dropped tiles. Anything short of that is **reported, not hidden.**
+- 0 error columns; every emitted page rendered; every emitted KPI/chart value
+  matching the source; controls present and wired; and every source object
+  accounted exactly once. GREEN means faithful reproduction. YELLOW is a
+  complete, usable handoff with explicit approximated/needs-review/skipped
+  rows or named waivers. Missing/contradictory accounting, emitted divergence,
+  or any failed hard gate is RED. Anything short of GREEN is **reported, not
+  hidden.**

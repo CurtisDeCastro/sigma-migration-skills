@@ -48,10 +48,13 @@ widgets) — never emit confidently-wrong logic.
 >   empty "placeholder" pages.** Post only the specs `convert.py` produces. If you
 >   can't reach Sisense (no host/token), **STOP and tell the user to
 >   authenticate** — do not build a shell.
-> - **Both verify gates must be GREEN with REAL elements before you're done.**
+> - **Both verify gates must pass with REAL emitted elements before a terminal
+>   handoff.**
 >   `verify_parity.py` and `verify_layout.py` now **refuse a vacuous pass** — a
 >   workbook with zero widgets/checks is RED, not "0/0 GREEN". A migration with
->   nothing to verify is not done.
+>   nothing to verify is not done. Final reporting is GREEN only for a fully
+>   faithful run, YELLOW/exit 0 for a usable but explicitly degraded handoff,
+>   and RED for failed gates or missing/contradictory accounting.
 >
 > **READ FIRST — `refs/operating-contract.md`**: the fidelity guardrails (render + value-check EVERY page against the source; never ship empty or silently drop a tile; don't spin — surface blockers).
 > **Modeling strategy — `refs/modeling-strategy.md`**: faithful reproduction of the source model is the DEFAULT (parity is the gate); an upstream OBT or Sigma-native materialization is an OPT-IN optimization for hot, join-heavy dashboards, re-verified against the same parity oracle. The converter never auto-flattens.
@@ -106,9 +109,11 @@ python3 scripts/migrate-sisense.py --from-discovery <dir> \
 ```
 
 It retains every phase artifact, requires explicit RLS and visual-waiver
-decisions, and declares completion only after strict JAQL parity, readback,
-render health, shared hard gates, and the census-backed migration report are
-GREEN. Exit 10 is an unresolved RLS decision; exit 2 is a failed migration.
+decisions, and declares completion only after emitted-scope JAQL parity,
+readback, render health, shared hard gates, and census-backed accounting
+reconcile. GREEN and YELLOW are complete exit-0 handoffs; RED is blocked.
+Exit 10 means an unresolved RLS or waiver-budget decision; exit 2 is a failed
+migration.
 
 ### Core scripts
 
@@ -119,8 +124,8 @@ GREEN. Exit 10 is an unresolved RLS decision; exit 2 is a failed migration.
 | `scan_gaps.py` | Human coverage report plus deterministic structured object/gap census. |
 | `convert.py` | Convert model (`model`) and dashboards (`dashboard`). |
 | `post-sisense-spec.py` | Idempotent Sigma DM/workbook POST-or-readback helper; writes authoritative IDs/readbacks and tracks posted workbooks. |
-| `build-sisense-parity.py` | Build grounded JAQL/warehouse checks and normalize `verify_parity.py` output into `parity-final.json`; zero executable checks is RED. |
-| `build-sisense-accounting.py` / `build-sisense-control-scope.py` | Reconcile every model/dashboard object and source filter into the census, coverage, control census, and static control-scope contracts. |
+| `build-sisense-parity.py` | Build grounded JAQL/warehouse checks for every emitted widget and normalize `verify_parity.py` output into `parity-final.json`; zero executable checks, an emitted widget without parity, or proven divergence is RED. Explicitly skipped/not-applicable omissions remain in the source census but are excluded from required chart parity. |
+| `build-sisense-accounting.py` / `check-accounted-gaps.py` / `build-sisense-control-scope.py` | Reconcile every model/dashboard object and source filter into the census, accept only explicit terminal gap dispositions, and build control census/scope contracts. |
 | `finalize-sisense-report.py` / `verify-complete.rb` | All-page PNG health + tile-aware similarity, degradation/report freshness, and final all-pass completion verification. |
 | `verify_parity.py` | Data-value parity gate. |
 | `verify_layout.py` | Structural layout parity gate. |
@@ -136,9 +141,13 @@ every source model table/column/relation/transformation plus every
 dashboard/widget/filter. The deterministic report contains stable object ids,
 status, evidence, provenance, summary counts, and unresolved gaps; the existing
 human stdout and `learned-rules.json` append ledger remain available. It is the
-**flag-never-fake gate**: run it at convert time and again at the shared
-done-gate (`--strict` exits non-zero while any MANUAL/UNHANDLED/flagged gap is
-unresolved). For a gap with no clean Sigma translation, `escalate-gap.py`
+**flag-never-fake census**: run it before conversion. `--strict` is a raw
+pre-accounting diagnostic and therefore still exits non-zero for every
+MANUAL/UNHANDLED/flagged source gap. The orchestrated done-gate instead runs
+`build-sisense-accounting.py` followed by `check-accounted-gaps.py`: a fully
+accounted `approximated`, `needs-review`, or `skipped` disposition is a YELLOW
+handoff, while missing, unaccounted, contradictory, or failed emitted parity is
+RED. For a gap with no clean Sigma translation, `escalate-gap.py`
 (opt-in, dry-run by default) drafts a tracking issue — file it only on `--yes`.
 Durable support boundaries and evidence requirements live in
 `refs/open-items.md`.
@@ -237,10 +246,13 @@ arrangement (no separate post-hoc layout PUT needed; CREATE preserves the ids
 the layout references). See `refs/design-notes.md` ("Layout").
 
 ## Phase 4 — Verify parity  ✅ live-validated
-Two gates, both must be **GREEN** before claiming done:
+Both hard gates must pass before a GREEN or YELLOW terminal handoff:
 - **Data** — `verify_parity.py` runs each widget's JAQL (`POST
   /api/datasources/{ds}/jaql`) and compares to the warehouse SQL Sigma compiles
-  to (+ a Sigma `query` spot-check). Proves the numbers match.
+  to (+ a Sigma `query` spot-check). Every emitted widget—including an
+  approximation—must pass. Explicitly skipped/not-applicable omitted widgets
+  are excluded from required chart parity but remain in `gap-report.json`,
+  `source-object-census.json`, and the final report. Proven divergence is RED.
 - **Layout** — `verify_layout.py <dashboards.json> <sigma_workbook_spec.json>`
   proves the arrangement came over: every mapped widget placed exactly once, no
   orphan refs, inside the 24-col grid, no overlaps, reading order preserved,
@@ -249,11 +261,16 @@ Two gates, both must be **GREEN** before claiming done:
 - **Visual QA** — structural-green is not visually-correct. Render each page with
   `sigma-export-png.py` and read it against `refs/layout-visual-qa.md` (compare
   to the Sisense source PNG). Declare done on a clean render, not an HTTP 200.
-- **Gap scout** — re-run `scan_gaps.py <dashboards.json> --model <model.json>
-  --out gap-report.json --strict`; no unresolved MANUAL/UNHANDLED/flagged gap
-  may remain unaccounted-for. Preserve `gap-report.json` and the other phase
-  artifacts; the forthcoming one-command wrapper must use the same shared
-  hard-gate completion contract rather than a parallel success path.
+- **Accounted-gap gate** — after parity, run source accounting and
+  `check-accounted-gaps.py`. Every source object must have exactly one terminal
+  status. Manual/unhandled/flagged objects may produce an honest YELLOW
+  disposition; omissions or contradictions remain RED.
+
+The orchestrator order is gap census → conversion/POST → emitted-scope parity →
+accounting → accounted-gap gate → shared assert → final report/verification.
+`--accept-waiver-budget-exceeded REASON` passes the named decision to the shared
+assert only after all prior gates pass. Without acceptance, shared exit 19
+becomes decision-required exit 10; accepted overflow is YELLOW/exit 0.
 
 ## Phase 5 — Repoint + enhance
 Wire workbook → DM. Layout is already ported by `convert.py dashboard` (Phase 3)

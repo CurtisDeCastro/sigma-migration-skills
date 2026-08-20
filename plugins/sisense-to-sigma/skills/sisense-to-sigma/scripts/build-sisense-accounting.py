@@ -95,6 +95,13 @@ class Accountant:
         if not self.parity_pass:
             self.parity_pass = {folded(name) for name in parity.get("pass_names") or []}
         self.mapping_text = folded(json.dumps(docs.get("jaql") or {}, sort_keys=True))
+        self.gap_categories = {}
+        for row in (docs.get("gap") or {}).get("gaps") or []:
+            if isinstance(row, dict):
+                self.gap_categories.setdefault(
+                    (str(row.get("object_type") or ""), str(row.get("object_id") or "")),
+                    set(),
+                ).add(str(row.get("category") or ""))
 
     def validate_scan(self):
         scan = self.docs["gap"]
@@ -267,15 +274,30 @@ class Accountant:
         if scan_status == "not-applicable":
             return "not-applicable"
         if scan_status == "unhandled":
-            return "skipped" if kind == "widget" else "needs-review"
+            return "needs-review" if built else ("skipped" if kind == "widget" else "needs-review")
         if scan_status == "manual":
-            return "needs-review"
+            return "skipped" if kind == "widget" and not built else "needs-review"
         if scan_status == "hint":
+            categories = self.gap_categories.get(
+                (str(kind), str(source.get("id") or "")), set()
+            )
+            if kind == "widget" and not built and categories.intersection(
+                    {"manual", "unhandled", "flagged"}):
+                return "skipped"
             if built and (kind not in ("widget", "filter") or self.parity_for(source)):
                 return "approximated"
             return "needs-review"
         if scan_status == "auto":
             if not built:
+                # Static/widget-local filter rows are source logic evidence, not
+                # necessarily standalone controls. Their terminal needs-review
+                # disposition is honest accounting; emitted widget scope is
+                # policed separately by build-sisense-parity.py.
+                if kind != "filter":
+                    self.errors.append(
+                        "%s:%s is in scope but no matching target object was found" %
+                        (kind, source.get("id"))
+                    )
                 return "needs-review"
             if kind == "widget" and not self.parity_for(source):
                 return "needs-review"
