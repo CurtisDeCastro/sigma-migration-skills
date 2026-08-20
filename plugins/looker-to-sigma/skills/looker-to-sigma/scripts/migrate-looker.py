@@ -80,6 +80,12 @@ import scout_gate
 import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 from build_workbook import build_field_index, parse_join_aliases, disp, leaf
 from looker_filter_expr import matches_filter_expr
+from safe_workbook_io import (
+    fingerprint,
+    list_entries,
+    remote_drifted,
+    validate_workbook_refs,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T0 = time.time()
@@ -486,6 +492,11 @@ def main():
     ap.add_argument("--reuse-dm")
     ap.add_argument("--skip-dm-reuse-check", action="store_true")
     ap.add_argument("--folder")
+    ap.add_argument("--update-workbook",
+                    help="PUT an existing workbook instead of POSTing a new one; "
+                         "uses a version+hash drift guard")
+    ap.add_argument("--force-overwrite", action="store_true",
+                    help="override a detected concurrent workbook edit (recorded loudly)")
     ap.add_argument("--source-swap", action="append", default=[],
                     help="FROM_DB.FROM_SCHEMA=TO_DB.TO_SCHEMA — repoint warehouse "
                          "source paths when the LookML sql_table_name differs from "
@@ -1040,12 +1051,66 @@ console.error('stats:', JSON.stringify(res.stats));
         )
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
+    preflight_rc, _ = run(
+        ["ruby", os.path.join(HERE, "lib", "preflight_lint.rb"), wb_spec_path],
+        check=False,
+    )
+    if preflight_rc:
+        sys.exit("FATAL: workbook preflight failed; no workbook write attempted")
+
+    try:
+        dm_columns = list_entries(
+            lambda path: json.loads(sigma("GET", path)),
+            f"/v2/dataModels/{dm}/columns",
+        )
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"FATAL: could not paginate live DM columns for pre-write ref check: {exc}")
+    ref_failures = validate_workbook_refs(
+        wspec,
+        {"pages": [{"elements": els}]},
+        dm_columns,
+    )
+    if ref_failures:
+        print("\n================ WORKBOOK REFERENCE GATE ================", file=sys.stderr)
+        for failure in ref_failures[:30]:
+            print(" - " + failure, file=sys.stderr)
+        sys.exit(
+            f"FATAL: {len(ref_failures)} workbook reference(s) are stale or unresolved; "
+            "no workbook write attempted"
+        )
+
+    write_base_path = os.path.join(wd, "wb-write-base.json")
     try:
         # Builder output is already a current workbook envelope. Re-wrapping via
         # CodeRep is deliberate: it tolerates legacy local artifacts while
         # preserving outer metadata and the full current document collections.
         post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
-        resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
+        if a.update_workbook:
+            remote = json.loads(sigma("GET", f"/v2/workbooks/{a.update_workbook}/spec"))
+            saved_base = (json.load(open(write_base_path))
+                          if os.path.exists(write_base_path) else None)
+            if remote_drifted(saved_base, remote) and not a.force_overwrite:
+                sys.exit(
+                    "FATAL: concurrent-edit guard: the live workbook changed since the "
+                    "last readback. Pull/reconcile it or pass --force-overwrite explicitly."
+                )
+            if remote_drifted(saved_base, remote) and a.force_overwrite:
+                with open(os.path.join(wd, "write-conflicts.jsonl"), "a") as handle:
+                    handle.write(json.dumps({
+                        "workbookId": a.update_workbook,
+                        "saved": saved_base,
+                        "remote": fingerprint(remote),
+                        "resolution": "force-overwrite",
+                    }) + "\n")
+            json.dump(fingerprint(remote), open(write_base_path, "w"), indent=2)
+            resp = sigma("PUT", f"/v2/workbooks/{a.update_workbook}/spec", post_body)
+            wb = a.update_workbook
+        else:
+            resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
+            match = re.search(r"workbookId[\"'\s:]+([0-9a-f-]{36})", resp)
+            if not match:
+                sys.exit("FATAL: workbook POST: " + resp[:300])
+            wb = match.group(1)
     except RuntimeError as e:
         msg = str(e)
         dep = re.search(r"Dependency not found: '([^']+)'", msg)
@@ -1057,17 +1122,37 @@ console.error('stats:', JSON.stringify(res.stats));
                 f"onto the explore element). Inspect the spec at {wb_spec_path} and the DM "
                 f"element columns; the offending tile field should be dropped or the converter "
                 f"gap fixed — never POST past it.")
-        sys.exit(f"FATAL: workbook POST failed: {msg[:400]}")
-    m = re.search(r"workbookId[\"'\s:]+([0-9a-f-]{36})", resp)
-    if not m:
-        sys.exit("FATAL: workbook POST: " + resp[:300])
-    wb = m.group(1)
-    with open(os.path.join(wd, "posted-workbooks.jsonl"), "a") as f:
-        f.write(json.dumps({"id": wb, "name": wspec["name"]}) + "\n")
+        sys.exit(f"FATAL: workbook write failed: {msg[:400]}")
+    if not a.update_workbook:
+        with open(os.path.join(wd, "posted-workbooks.jsonl"), "a") as f:
+            f.write(json.dumps({"id": wb, "name": wspec["name"]}) + "\n")
+    with open(os.path.join(wd, "workbook-writes.jsonl"), "a") as handle:
+        handle.write(json.dumps({
+            "id": wb,
+            "name": wspec["name"],
+            "method": "PUT" if a.update_workbook else "POST",
+        }) + "\n")
     json.dump({"workbookId": wb}, open(os.path.join(wd, "wb-ids.json"), "w"))
-    cols = json.loads(sigma("GET", f"/v2/workbooks/{wb}/columns"))
-    entries = cols.get("entries") or []
+    readback = json.loads(sigma("GET", f"/v2/workbooks/{wb}/spec"))
+    json.dump(readback, open(os.path.join(wd, "wb-readback.json"), "w"), indent=2)
+    json.dump(fingerprint(readback), open(write_base_path, "w"), indent=2)
+    entries = list_entries(
+        lambda path: json.loads(sigma("GET", path)),
+        f"/v2/workbooks/{wb}/columns",
+    )
     errs = [c for c in entries if (c.get("type") or {}).get("type") == "error"]
+    post_ref_failures = validate_workbook_refs(
+        readback,
+        {"pages": [{"elements": els}]},
+        dm_columns,
+    )
+    if post_ref_failures:
+        for failure in post_ref_failures[:30]:
+            print("     stale readback ref: " + failure)
+        sys.exit(
+            f"FATAL: post-write readback introduced {len(post_ref_failures)} stale "
+            "reference(s); inspect wb-readback.json before any further PUT"
+        )
     print(f"   workbook {wb} '{wspec['name']}' · {len(entries) - len(errs)}/{len(entries)} columns resolve"
           + (f" — {len(errs)} ERROR-typed" if errs else ""))
     for c in errs[:6]:
@@ -1088,7 +1173,7 @@ console.error('stats:', JSON.stringify(res.stats));
         gid = lambda c: "errcol:%s/%s" % (c.get("elementId"), c.get("label"))
         gap_ids = list(dict.fromkeys(gid(c) for c in errs))
         bk = scout_gate.classify(wd, gap_ids)
-        if bk["unscouted"] and not args.yes:
+        if bk["unscouted"] and not a.yes:
             print("\n==================== GAP-SCOUT REQUIRED ====================")
             print("%d of %d ERROR-typed column(s) have NOT been scouted — the gap-scout must"
                   % (len(bk["unscouted"]), len(gap_ids)))
