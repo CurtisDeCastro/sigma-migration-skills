@@ -90,7 +90,8 @@ def freshness_banner
   end
   if sd && sd >= 1
     puts "⚠ source is ~#{sd.ceil} day(s) stale — Sigma reads the LIVE warehouse and is"
-    puts '  EXPECTED to show more data; staleness-shaped deltas classify as STALE-EXPLAINED.'
+    puts '  EXPECTED to show different data. Shape-safe deltas may report STALE-EXPLAINED,'
+    puts '  but the run stays non-GREEN until Power BI refreshes and strict parity passes.'
   end
   puts
 end
