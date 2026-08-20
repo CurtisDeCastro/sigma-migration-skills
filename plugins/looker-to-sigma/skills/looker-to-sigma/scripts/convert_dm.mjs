@@ -62,6 +62,8 @@ const res = convertLookMLToSigma(files, {
 });
 fs.writeFileSync(out, JSON.stringify(res.model, null, 2));   // NOTE: return prop is `.model`, not `.sigmaDataModel`
 fs.writeFileSync(out.replace(/\.json$/, '') + '-warnings.json', JSON.stringify(res.warnings, null, 2));
+fs.writeFileSync(out.replace(/\.json$/, '') + '-dynamic-parameters.json',
+  JSON.stringify({ version: 1, parameters: res.dynamicParameters || [] }, null, 2));
 console.error(`explore=${explore || '(view-only)'} -> ${out}`);
 console.error('stats:', JSON.stringify(res.stats));
 console.error('warnings:', res.warnings.length);

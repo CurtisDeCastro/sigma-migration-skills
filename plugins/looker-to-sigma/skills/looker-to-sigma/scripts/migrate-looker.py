@@ -80,6 +80,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import scout_gate
 import code_rep  # workbook code-rep document-wrapper adapter (nested POST shape)
 from build_workbook import build_field_index, parse_join_aliases, disp, leaf
+from looker_filter_expr import matches_filter_expr
+from safe_workbook_io import (
+    fingerprint,
+    list_entries,
+    remote_drifted,
+    validate_workbook_refs,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T0 = time.time()
@@ -515,8 +522,9 @@ def expected_offline(el, ev, rows):
         i = ev.idx.get(d)
         if i is None:
             continue
-        wanted = {v.strip().casefold() for v in str(val).split(",") if v.strip()}
-        data = [r for r in data if str(r[i]).casefold() in wanted]
+        verdicts = [matches_filter_expr(r[i], val) for r in data]
+        if all(verdict is not None for verdict in verdicts):
+            data = [row for row, keep in zip(data, verdicts) if keep]
     if el.get("tileType") == "looker_scatter" and len(ms) >= 2:
         groups = {None: data}
         if ds:
@@ -600,6 +608,11 @@ def main():
     ap.add_argument("--reuse-dm")
     ap.add_argument("--skip-dm-reuse-check", action="store_true")
     ap.add_argument("--folder")
+    ap.add_argument("--update-workbook",
+                    help="PUT an existing workbook instead of POSTing a new one; "
+                         "uses a version+hash drift guard")
+    ap.add_argument("--force-overwrite", action="store_true",
+                    help="override a detected concurrent workbook edit (recorded loudly)")
     ap.add_argument("--source-swap", action="append", default=[],
                     help="FROM_DB.FROM_SCHEMA=TO_DB.TO_SCHEMA — repoint warehouse "
                          "source paths when the LookML sql_table_name differs from "
@@ -836,6 +849,7 @@ def main():
     # ── Phase 3 — Convert (local build / patched source / MCP request) ────────
     hdr(3, TOTAL, "Convert")
     dm_spec_path = os.path.join(wd, "dm-spec.json")
+    dynamic_params_path = os.path.join(wd, "dm-spec-dynamic-parameters.json")
     conn = os.environ.get("SIGMA_CONNECTION_ID", "PLACEHOLDER_CONNECTION_ID")
     if a.reuse_dm:
         print(f"   --reuse-dm {a.reuse_dm} — converter skipped")
@@ -843,6 +857,8 @@ def main():
         conv = json.load(open(a.converted))
         spec = conv.get("model") or conv.get("sigmaDataModel") or conv
         json.dump(spec, open(dm_spec_path, "w"), indent=2)
+        json.dump({"version": 1, "parameters": conv.get("dynamicParameters") or []},
+                  open(dynamic_params_path, "w"), indent=2)
         print(f"   using MCP converter output {a.converted} -> {dm_spec_path}")
     else:
         # Converter resolution (issue #227): the pinned VENDORED bundle is the
@@ -917,6 +933,7 @@ const res = convertLookMLToSigma(files, {{ connectionId: {json.dumps(conn)},
   exploreName: {json.dumps(explore)}, joinStrategy: 'relationships' }});
 writeFileSync({json.dumps(dm_spec_path)}, JSON.stringify(res.model, null, 2));
 writeFileSync({json.dumps(os.path.join(wd, "dm-spec-warnings.json"))}, JSON.stringify(res.warnings || [], null, 2));
+writeFileSync({json.dumps(dynamic_params_path)}, JSON.stringify({{ version: 1, parameters: res.dynamicParameters || [] }}, null, 2));
 console.error('stats:', JSON.stringify(res.stats));
 (res.warnings || []).forEach(w => console.error('  WARN ' + w));
 """)
@@ -998,8 +1015,22 @@ console.error('stats:', JSON.stringify(res.stats));
 
     if a.dry_run:
         wb_spec = os.path.join(wd, "wb-spec.json")
-        run([sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
-             "--views", views_dir, "--out", wb_spec])
+        wb_args = [sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
+                   "--views", views_dir, "--out", wb_spec]
+        if os.path.exists(dynamic_params_path):
+            wb_args += ["--dynamic-parameters", dynamic_params_path]
+        run(wb_args)
+        hazard_rc, _ = run(
+            [sys.executable, os.path.join(HERE, "detect_modeling_hazards.py"),
+             "--workdir", wd, "--contract", contract_path,
+             "--dm-spec", dm_spec_path, "--wb-spec", wb_spec],
+            check=False,
+        )
+        if hazard_rc:
+            sys.exit(
+                "modeling-hazard gate blocked the dry run; inspect modeling-hazards.json "
+                "and rebuild at an explicit grain before posting"
+            )
         print("\n================ RESULT (dry run) ================")
         print(f"artifacts   : {wd}  (contract, dm-spec/convert-request, wb-spec — no Sigma objects created)")
         print("==================================================")
@@ -1161,18 +1192,92 @@ console.error('stats:', JSON.stringify(res.stats));
                for e in els], open(dm_els_path, "w"))
     # Use --flag=value for ids: Sigma-reassigned element ids can start with '-'
     # (e.g. "-BGy34L4Yj"), which argparse otherwise mis-reads as a flag.
-    run([sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
-         "--views", views_dir, f"--dm-id={dm}", f"--element-id={denorm['id']}",
-         f"--dm-element-name={denorm_name}", f"--dm-elements={dm_els_path}",
-         f"--folder-id={folder}", f"--out={wb_spec_path}"])
+    wb_args = [sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
+               "--views", views_dir, f"--dm-id={dm}", f"--element-id={denorm['id']}",
+               f"--dm-element-name={denorm_name}", f"--dm-elements={dm_els_path}",
+               f"--folder-id={folder}", f"--out={wb_spec_path}"]
+    if os.path.exists(dynamic_params_path):
+        wb_args += ["--dynamic-parameters", dynamic_params_path]
+    run(wb_args)
+    hazard_rc, _ = run(
+        [sys.executable, os.path.join(HERE, "detect_modeling_hazards.py"),
+         "--workdir", wd, "--contract", contract_path,
+         "--dm-spec", dm_spec_path, "--wb-spec", wb_spec_path],
+        check=False,
+    )
+    if hazard_rc:
+        sys.exit(
+            "FATAL: modeling-hazard gate blocked workbook POST. Inspect "
+            f"{os.path.join(wd, 'modeling-hazards.json')}; replace unsafe aggregate "
+            "relationships/windows with an explicit-grain or Custom SQL implementation, "
+            "or record a justified resolution with detect_modeling_hazards.py --resolve."
+        )
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
+    preflight_rc, _ = run(
+        ["ruby", os.path.join(HERE, "lib", "preflight_lint.rb"), wb_spec_path],
+        check=False,
+    )
+    if preflight_rc:
+        sys.exit("FATAL: workbook preflight failed; no workbook write attempted")
+
+    try:
+        dm_columns = list_entries(
+            lambda path: json.loads(sigma("GET", path)),
+            f"/v2/dataModels/{dm}/columns",
+        )
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"FATAL: could not paginate live DM columns for pre-write ref check: {exc}")
+    ref_failures = validate_workbook_refs(
+        wspec,
+        {"pages": [{"elements": els}]},
+        dm_columns,
+    )
+    if ref_failures:
+        print("\n================ WORKBOOK REFERENCE GATE ================", file=sys.stderr)
+        for failure in ref_failures[:30]:
+            print(" - " + failure, file=sys.stderr)
+        sys.exit(
+            f"FATAL: {len(ref_failures)} workbook reference(s) are stale or unresolved; "
+            "no workbook write attempted"
+        )
+
+    write_base_path = os.path.join(wd, "wb-write-base.json")
     try:
         # Builder output is already a current workbook envelope. Re-wrapping via
         # CodeRep is deliberate: it tolerates legacy local artifacts while
         # preserving outer metadata and the full current document collections.
         post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
-        resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
+        if a.update_workbook:
+            remote = json.loads(sigma("GET", f"/v2/workbooks/{a.update_workbook}/spec"))
+            saved_base = (json.load(open(write_base_path))
+                          if os.path.exists(write_base_path) else None)
+            if remote_drifted(saved_base, remote) and not a.force_overwrite:
+                sys.exit(
+                    "FATAL: concurrent-edit guard: the live workbook changed since the "
+                    "last readback. Pull/reconcile it or pass --force-overwrite explicitly."
+                )
+            if remote_drifted(saved_base, remote) and a.force_overwrite:
+                with open(os.path.join(wd, "write-conflicts.jsonl"), "a") as handle:
+                    handle.write(json.dumps({
+                        "workbookId": a.update_workbook,
+                        "saved": saved_base,
+                        "remote": fingerprint(remote),
+                        "resolution": "force-overwrite",
+                    }) + "\n")
+            json.dump(fingerprint(remote), open(write_base_path, "w"), indent=2)
+            resp = sigma("PUT", f"/v2/workbooks/{a.update_workbook}/spec", post_body)
+            wb = a.update_workbook
+        else:
+            # Keep the create payload wrapped immediately at the call site. The
+            # update branch above performs extra drift checks, but both writes
+            # must send the current document envelope.
+            post_body = code_rep.wrap(code_rep.document(wspec), code_rep.metadata(wspec))
+            resp = sigma("POST", "/v2/workbooks/spec", post_body)   # responds in YAML
+            match = re.search(r"workbookId[\"'\s:]+([0-9a-f-]{36})", resp)
+            if not match:
+                sys.exit("FATAL: workbook POST: " + resp[:300])
+            wb = match.group(1)
     except RuntimeError as e:
         msg = str(e)
         dep = re.search(r"Dependency not found: '([^']+)'", msg)
@@ -1184,17 +1289,37 @@ console.error('stats:', JSON.stringify(res.stats));
                 f"onto the explore element). Inspect the spec at {wb_spec_path} and the DM "
                 f"element columns; the offending tile field should be dropped or the converter "
                 f"gap fixed — never POST past it.")
-        sys.exit(f"FATAL: workbook POST failed: {msg[:400]}")
-    m = re.search(r"workbookId[\"'\s:]+([0-9a-f-]{36})", resp)
-    if not m:
-        sys.exit("FATAL: workbook POST: " + resp[:300])
-    wb = m.group(1)
-    with open(os.path.join(wd, "posted-workbooks.jsonl"), "a") as f:
-        f.write(json.dumps({"id": wb, "name": wspec["name"]}) + "\n")
+        sys.exit(f"FATAL: workbook write failed: {msg[:400]}")
+    if not a.update_workbook:
+        with open(os.path.join(wd, "posted-workbooks.jsonl"), "a") as f:
+            f.write(json.dumps({"id": wb, "name": wspec["name"]}) + "\n")
+    with open(os.path.join(wd, "workbook-writes.jsonl"), "a") as handle:
+        handle.write(json.dumps({
+            "id": wb,
+            "name": wspec["name"],
+            "method": "PUT" if a.update_workbook else "POST",
+        }) + "\n")
     json.dump({"workbookId": wb}, open(os.path.join(wd, "wb-ids.json"), "w"))
-    cols = json.loads(sigma("GET", f"/v2/workbooks/{wb}/columns"))
-    entries = cols.get("entries") or []
+    readback = json.loads(sigma("GET", f"/v2/workbooks/{wb}/spec"))
+    json.dump(readback, open(os.path.join(wd, "wb-readback.json"), "w"), indent=2)
+    json.dump(fingerprint(readback), open(write_base_path, "w"), indent=2)
+    entries = list_entries(
+        lambda path: json.loads(sigma("GET", path)),
+        f"/v2/workbooks/{wb}/columns",
+    )
     errs = [c for c in entries if (c.get("type") or {}).get("type") == "error"]
+    post_ref_failures = validate_workbook_refs(
+        readback,
+        {"pages": [{"elements": els}]},
+        dm_columns,
+    )
+    if post_ref_failures:
+        for failure in post_ref_failures[:30]:
+            print("     stale readback ref: " + failure)
+        sys.exit(
+            f"FATAL: post-write readback introduced {len(post_ref_failures)} stale "
+            "reference(s); inspect wb-readback.json before any further PUT"
+        )
     print(f"   workbook {wb} '{wspec['name']}' · {len(entries) - len(errs)}/{len(entries)} columns resolve"
           + (f" — {len(errs)} ERROR-typed" if errs else ""))
     for c in errs[:6]:
