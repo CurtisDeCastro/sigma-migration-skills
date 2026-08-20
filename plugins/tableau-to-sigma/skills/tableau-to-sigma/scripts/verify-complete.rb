@@ -23,7 +23,7 @@
 # This script RE-DERIVES the degradation ledger from the workdir's artifacts
 # (lib/degradation_ledger.rb — scope cuts, quality waivers, recorded escapes,
 # fidelity residuals, waived resolutions; deterministic, never self-reported),
-# prints the verdict (GREEN / YELLOW / PARTIAL / PARTIAL+YELLOW) with every
+# prints the terminal verdict (GREEN / YELLOW) with every
 # ledger entry inline, and FAILS (exit 6) when the run's own reports contradict
 # the derivation — a phase6-success.json / parity-final.json claiming a verdict
 # or waiver census the artifacts don't support, or a degradation-ledger.json
@@ -57,10 +57,7 @@ require 'json'
 require 'optparse'
 require_relative 'lib/offramp'
 require_relative 'lib/degradation_ledger'
-
-TERMINAL_SOURCE_STATUSES = %w[
-  migrated approximated needs-review skipped not-applicable
-].freeze
+require_relative 'lib/terminal_outcome'
 
 # Print the off-ramp trail + any gate waivers for this workdir — the "where did
 # this run leave the golden path" readout. Advisory; shown under every verdict.
@@ -101,7 +98,7 @@ if File.exist?(pending)
   warn '⛔ NOT DONE — still at PASS 1 (parity + hard gates have not run).'
   warn "   workbook: #{pj['workbookId'] || '?'}   stage: #{pj['stage'] || '?'}"
   warn '   Collect parity actuals, then run the --finalize command PASS 1 printed,'
-  warn '   which runs assert-phase6-ran.rb (the only path to GREEN).'
+  warn '   which runs assert-phase6-ran.rb (the only path to terminal completion).'
   print_offramps(wd)
   exit 3
 end
@@ -176,7 +173,9 @@ end
 if result.is_a?(Hash)
   verdict = result['verdict'].to_s.upcase
   accounting_errors << "migration-result.json verdict is #{verdict.empty? ? 'missing' : verdict} (must be non-RED)" \
-    unless %w[GREEN YELLOW].include?(verdict)
+    unless TerminalOutcome::COMPLETE_VERDICTS.include?(verdict)
+  accounting_errors << 'migration-result.json completion_status is not complete' \
+    unless result['completion_status'] == 'complete'
   summary = result['summary']
   result_objects = result['source_objects']
   unless summary.is_a?(Hash) && result_objects.is_a?(Array)
@@ -190,7 +189,7 @@ if result.is_a?(Hash)
       unless accounted.to_i == total.to_i
     accounting_errors << 'migration-result.json summary.complete is not true' unless summary['complete'] == true
     bad = result_objects.reject do |object|
-      object.is_a?(Hash) && TERMINAL_SOURCE_STATUSES.include?(object['status'].to_s)
+      object.is_a?(Hash) && TerminalOutcome::TERMINAL_STATUSES.include?(object['status'].to_s)
     end
     accounting_errors << "#{bad.length} migration-result source object(s) lack exactly one terminal status" unless bad.empty?
   end
@@ -210,7 +209,7 @@ if census_doc.is_a?(Hash)
     accounting_errors << 'source-object-census.json summary.complete is not true' unless summary['complete'] == true
     bad = census_objects.reject do |object|
       object.is_a?(Hash) &&
-        TERMINAL_SOURCE_STATUSES.include?(object['status'].to_s) &&
+        TerminalOutcome::TERMINAL_STATUSES.include?(object['status'].to_s) &&
         object['evidence'].is_a?(Array) && !object['evidence'].empty?
     end
     accounting_errors << "#{bad.length} census object(s) lack one terminal status and evidence" unless bad.empty?
@@ -237,7 +236,7 @@ if census_doc.is_a?(Hash)
                              "#{extra.length} extra, #{drift.length} status drift"
       end
 
-      expected_counts = TERMINAL_SOURCE_STATUSES.to_h do |status|
+      expected_counts = TerminalOutcome::TERMINAL_STATUSES.to_h do |status|
         [status, census_objects.count { |object| object['status'].to_s == status }]
       end
       [census_doc, result].each do |doc|
@@ -272,9 +271,13 @@ end
 # them; an EXPLICIT contradicting claim is exit 6.
 # ---------------------------------------------------------------------------
 deg_entries = DegradationLedger.derive(wd)
-derived_verdict = DegradationLedger.verdict(deg_entries)
+terminal_rows = result.is_a?(Hash) ? result['source_objects'] : []
+derived_verdict = TerminalOutcome.expected_report_verdict(terminal_rows, deg_entries)
 pf = load(File.join(wd, 'parity-final.json'))
 contradictions = []
+
+contradictions << 'phase6-success.json completion_status is not complete' \
+  unless sj['completion_status'] == 'complete'
 
 # W2.3 — the labeled factory verdict. On a Tier-S factory run (migrate-state
 # tier 'S', lane A) that ends GREEN with verdict_by 'builder-self-attested',
@@ -324,7 +327,11 @@ end
 # a Tier-S self-attested GREEN claim must carry the suffix (the bare string
 # is the exact laundering W2.3 forbids), and the suffix without the factory
 # basis is equally a lie.
-{ 'phase6-success.json' => sj['verdict'], 'parity-final.json' => pf['verdict'] }.each do |src, claim|
+if result['verdict'].to_s != derived_verdict
+  contradictions << "migration-result.json claims verdict #{result['verdict']} but the artifacts derive #{derived_verdict}"
+end
+{ 'phase6-success.json' => sj['verdict'],
+  'parity-final.json' => pf['verdict'] }.each do |src, claim|
   next if claim.to_s.empty?
   next if claim.to_s == expected_verdict
   contradictions << if factory_green && claim.to_s == derived_verdict
@@ -375,6 +382,8 @@ if contradictions.any?
 end
 
 puts "✅ DONE — assert-phase6-ran.rb passed all gates for this run. VERDICT: #{expected_verdict}"
+puts "STATUS: #{derived_verdict}"
+puts 'COMPLETION: complete'
 if factory_green
   puts '   attested : builder-self-attested (Tier-S factory — the label above is part of the verdict'
   puts '              string; quote it verbatim. A verifier countersignature + gate re-run yields bare GREEN.)'
@@ -391,9 +400,6 @@ if deg_entries.empty?
 else
   puts "   ledger   : #{deg_entries.length} degradation(s) — GREEN requires an empty ledger:"
   DegradationLedger.report_lines(deg_entries).each { |l| puts "   #{l}" }
-  if derived_verdict.start_with?('PARTIAL')
-    puts '   PARTIAL: a scope cut shipped — the delivered workbook is a SUBSET of the source.'
-  end
 end
 puts '   Quote this marker (workbook + run id + verdict) and the ledger in your completion report.'
 print_offramps(wd) # even a DONE run can carry waivers/degradations — surface them
