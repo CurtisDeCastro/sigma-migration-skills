@@ -102,7 +102,17 @@ Dir.mktmpdir('migration-report-full') do |dir|
   )
   ok('--check accepts current deterministic outputs', check_status.exitstatus == 0)
 
+  # Cross-platform freshness is semantic for JSON and line-ending-neutral for
+  # Markdown. Windows text-mode tools may reserialize JSON or write CRLF without
+  # changing the report contract.
+  File.binwrite(File.join(dir, 'migration-result.json'), JSON.generate(result))
   report_path = File.join(dir, 'MIGRATION_REPORT.md')
+  File.binwrite(report_path, markdown.gsub("\n", "\r\n"))
+  _stdout, _stderr, portable_status = run_builder(
+    dir, '--check', env: { 'SOURCE_DATE_EPOCH' => '0' }
+  )
+  ok('--check accepts semantic JSON and CRLF Markdown', portable_status.exitstatus == 0)
+
   File.open(report_path, 'a') { |file| file.write("manual edit\n") }
   before = File.binread(report_path)
   _stdout, stale_stderr, stale_status = run_builder(
