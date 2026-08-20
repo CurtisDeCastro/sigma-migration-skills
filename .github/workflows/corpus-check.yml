@@ -423,6 +423,8 @@ jobs:
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_modeling_hazards.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_safe_workbook_io.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_course_performance_fixture.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_build_looker_accounting.py
+            plugins/looker-to-sigma/skills/looker-to-sigma/scripts/test_migrate_looker_post_workbook_coderep.py
             shared/lib/test_metric_binding.py
             # powerbi-to-sigma uses HYPHENATED test-*.py names, which is why these were
             # never picked up by the test_*.py convention above. Listed explicitly.

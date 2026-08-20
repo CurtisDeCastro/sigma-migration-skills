@@ -59,6 +59,39 @@ all_post_sites = [m.start() for m in re.finditer(r'sigma\("POST",\s*"/v2/workboo
 check(len(all_post_sites) == 1,
       f"exactly one /v2/workbooks/spec POST call site in the file (got {len(all_post_sites)})")
 
+# Readiness/accounting/report orchestration contract. These source-level checks
+# guard ordering in the monolithic main() without live Looker/Sigma credentials.
+main_src = SRC[SRC.find("def main():"):]
+audit_idx = main_src.find('"audit-lookml-readiness.mjs"')
+allow_idx = main_src.find("SIGMA_POSTS_ALLOWED = True")
+folder_idx = main_src.find("folder = resolve_folder")
+check(audit_idx >= 0, "orchestrator invokes the LookML readiness audit")
+check(all(name in main_src for name in (
+    "lookml-readiness.json", "lookml-field-census.json", "formula-mapping.json"
+)), "readiness audit writes all three mandatory artifacts")
+check(0 <= audit_idx < allow_idx < folder_idx,
+      "readiness passes before Sigma POSTs are enabled or a folder can be created")
+check("Sigma POST {path} refused before the LookML readiness gate passed" in SRC,
+      "sigma() enforces no POST before readiness at runtime")
+check("return READINESS_BLOCKED_EXIT" in main_src and
+      main_src.find("return READINESS_BLOCKED_EXIT") < allow_idx,
+      "blocked readiness exits distinctly without enabling POSTs")
+
+prelim_idx = main_src.find("preliminary_accounting_rc = run_looker_accounting")
+gate_idx = main_src.find("grc, _ = run(gate_cmd")
+final_idx = main_src.find("final_accounting_rc = run_looker_accounting")
+report_idx = main_src.find('"build-migration-report.rb"')
+result_idx = main_src.rfind('print("\\n================ RESULT')
+check(0 <= prelim_idx < gate_idx < final_idx < report_idx < result_idx,
+      "preliminary accounting, gate, final accounting, report, RESULT are ordered")
+check('"visual-similarity.json"' in SRC and '"render-health.json"' in SRC and
+      '"png_health.py"' in SRC,
+      "render health derives from similarity evidence or a Sigma PNG")
+check("report_rc == 0" in main_src and 'report_verdict != "RED"' in main_src,
+      "failed or RED completion report prevents migration success")
+check("args.yes" not in SRC and "not a.yes" in SRC,
+      "gap-scout gate uses parsed namespace a.yes")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILURE(S):")
