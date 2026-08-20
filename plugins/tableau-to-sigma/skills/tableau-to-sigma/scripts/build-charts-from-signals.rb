@@ -249,6 +249,34 @@ rescue StandardError
   {}
 end
 
+# Optional source-image-confirmed small-multiple/facet signal. Keep `title` as
+# the Tableau worksheet caption; operators may add `worksheet` explicitly when
+# the rendered title differs. String form means one column facet; object form
+# can choose rows/cols/grid:
+#   {"title":"Sheet 2","trellis":"Department"}
+#   {"worksheet":"Sheet 2","trellis":{"field":"Department","orientation":"cols"}}
+PNG_TRELLIS = begin
+  pr = (JSON.parse(File.read(DashboardRead.path(opts[:tab]))) rescue nil)
+  if pr.is_a?(Hash) && pr['verified'] != false && pr['tiles'].is_a?(Array)
+    pr['tiles'].each_with_object({}) do |tile, out|
+      next unless tile.is_a?(Hash) && tile['trellis']
+      key = (tile['worksheet'] || tile['title']).to_s.downcase.strip
+      next if key.empty?
+      raw = tile['trellis']
+      out[key] =
+        if raw.is_a?(Hash)
+          { 'field' => raw['field'] || raw['column'], 'orientation' => raw['orientation'] || 'cols' }
+        else
+          { 'field' => raw.to_s, 'orientation' => 'cols' }
+        end
+    end
+  else
+    {}
+  end
+rescue StandardError
+  {}
+end
+
 # ---- chart_kind → Sigma element kind ----
 SIGMA_KIND = {
   'bar'           => 'bar-chart',
@@ -8716,6 +8744,52 @@ if $threshold_halo_records.any?
     warnings << "threshold-halo sidecar error (halo coverage unrecorded): #{e.message}"
   end
 end
+
+# ---- Source-image-confirmed single-chart trellis ---------------------------
+# Existing native-trellis collapse below handles N repeated worksheet members.
+# Some Tableau sheets encode one pane-per-value inside ONE worksheet (Workforce:
+# Department panes, Role x-axis). The shelf parser sees the second dimension but
+# cannot distinguish pane vs implicit color, while the source PNG can. Apply the
+# operator-verified png-read signal to that one chart; no signal = byte-identical.
+def apply_verified_trellis!(elements, specs, warnings)
+  norm = ->(value) { value.to_s.downcase.strip }
+  specs.each do |worksheet, spec|
+    field = spec['field'].to_s
+    next if field.empty?
+    element = elements.find do |candidate|
+      norm.call(candidate['_worksheet']) == norm.call(worksheet) ||
+        norm.call(candidate['name']) == norm.call(worksheet)
+    end
+    unless element
+      warnings << "png-read trellis: worksheet #{worksheet.inspect} has no emitted chart — left flat"
+      next
+    end
+    matches = Array(element['columns']).select { |column| norm.call(column['name']) == norm.call(field) }
+    unless matches.one?
+      warnings << "png-read trellis: '#{worksheet}' field '#{field}' matched #{matches.size} columns — " \
+                  'refusing ambiguous facet'
+      next
+    end
+    facet_id = matches.first['id']
+    result = TrellisEmit.apply(
+      element,
+      facet_column_id: facet_id,
+      orientation: spec['orientation'] || 'cols'
+    )
+    unless %i[trellised fallback_donut].include?(result)
+      warnings << "png-read trellis: '#{worksheet}' kind #{element['kind']} does not support native trellis " \
+                  "(#{result}) — left flat"
+      next
+    end
+    # A pane field is structural, not a second color encoding. Keeping both
+    # creates a redundant legend and one color per panel, unlike Tableau.
+    element.delete('color') if element.dig('color', 'column') == facet_id
+    warnings << "NOTE png-read trellis: '#{worksheet}' faceted by '#{field}' " \
+                "(#{spec['orientation'] || 'cols'}; #{result})"
+  end
+end
+
+apply_verified_trellis!(elements, PNG_TRELLIS, warnings) unless PNG_TRELLIS.empty?
 
 # ---- Native trellis collapse (fix/native-trellis, SUPERSEDES #451 B1) --------
 # parse-twb-layout flags a dashboard that repeats one viz across a categorical
