@@ -63,8 +63,8 @@ never guesses.
 
 > ## ⛔ THE ONE PATH (do not improvise a workbook)
 > `migrate-qlik.rb` is the single entry point — it discovers the Qlik app, builds
-> the DM + workbook, and **only exits 0 when parity/layout/control pass with real
-> elements built**. Rules:
+> the DM + workbook, and **only exits 0 for a complete GREEN or YELLOW handoff
+> after parity/layout/control/render pass with real elements built**. Rules:
 > - **NEVER hand-drive the per-phase scripts, hand-author a DM/workbook JSON, or
 >   `curl`-POST to `/v2/workbooks` / lay out empty "placeholder" pages.** That
 >   bypasses parity + the element guard and ships an EMPTY workbook — the #1 way a
@@ -88,7 +88,8 @@ eval "$(scripts/vendor/get-token.sh)"          # SIGMA_BASE_URL + SIGMA_API_TOKE
 ruby scripts/migrate-qlik.rb \
   --app <qlikAppId> --connection <SIGMA_CONNECTION_ID> \
   --database <DB> --schema <SCHEMA> --context <qlik-cli ctx> \
-  [--folder <SIGMA_FOLDER_ID>] [--name '<prefix>'] [--yes]
+  [--folder <SIGMA_FOLDER_ID>] [--name '<prefix>'] [--yes] \
+  [--accept-waiver-budget-exceeded '<named reason>']
 ```
 
 **Offline corectl export:** when a customer cannot grant live Qlik access, accept
@@ -106,9 +107,10 @@ empty app. Inline chart hypercubes still become `charts.json` and workbook tiles
 
 discover → convert → data model → workbook → layout → parity, for ANY app, driven
 entirely by the discovery artifacts (no app-specific edits). Exit 10 = genuine human
-decisions printed as an OPEN QUESTIONS block (re-run with `--yes` or `--answers`);
-exit 0 = PARITY GREEN; exit 3 = built but parity RED. Each phase below is also an
-independently runnable script if you need to intervene mid-pipeline.
+decision required, including an unaccepted waiver-budget overflow (re-run that case
+with `--accept-waiver-budget-exceeded REASON`); exit 0 = complete GREEN or YELLOW;
+exit 3 = RED after build. Each phase below is also an independently runnable script
+if you need to intervene mid-pipeline.
 
 **Offline smoke (no tenant/org/network):** `ruby scripts/migrate-qlik.rb
 --from-discovery fixtures/retail-orders --connection 0000… --dry-run --yes --out /tmp/smoke`
@@ -486,13 +488,36 @@ ruby scripts/build-migration-report.rb --workdir <WORK> --check
 ruby scripts/verify-complete.rb --workdir <WORK> --workbook-id <workbookId>
 ```
 
-All four commands must exit 0. The finalizer refreshes PNG health, visual
+All four commands must exit 0. `migrate-qlik.rb` invokes this sequence itself,
+including `verify-complete.rb` immediately before its terminal banner. The
+finalizer refreshes PNG health, visual
 similarity, full-app accounting, the degradation ledger, `MIGRATION_REPORT.md`,
 and `migration-result.json`. `assert-phase6-ran.rb` is the shared,
 converter-neutral gate over `parity-final.json`, live readback, layout/control,
 render, visual, tile, and waiver evidence. The inline
 `phase6-success.json` marker does not replace either the shared gate or the
 complete census/report.
+
+Terminal policy:
+
+- **GREEN (exit 0):** complete accounting contains only `migrated` /
+  `not-applicable`, with no degradation or waiver.
+- **YELLOW (exit 0):** every object is terminal-accounted and every hard gate
+  passes, but an `approximated`, `needs-review`, or `skipped` object, degradation,
+  or waiver is reported. An explicitly `skipped`/`not-applicable` source visual
+  may leave required build/parity scope; an approximated emitted visual may not
+  and still requires strict measured parity.
+- **RED (nonzero):** true parity divergence, broken layout/control/render,
+  missing or contradictory accounting, stale reports/ledger, or any other hard
+  gate failure.
+
+Waiver-budget exit 19 from the shared assert is a decision-required exit 10 at
+the one-command boundary. Supplying
+`--accept-waiver-budget-exceeded REASON` passes the named reason to the assert;
+only after every other gate passes can it produce a complete YELLOW exit-0
+handoff. The final line is always the report-derived `TERMINAL: GREEN`,
+`TERMINAL: YELLOW`, or `TERMINAL: RED`; it is never inferred from a success
+boolean.
 
 ---
 
@@ -526,7 +551,8 @@ complete census/report.
 | `scripts/build-qlik-accounting.py` | 6 | Reconcile the complete Qlik app inventory, formula mapping, DM/workbook outputs, controls, layout, tiles, and parity into `source-object-census.json`, `coverage.json`, and Qlik control/layout evidence; fails closed on unaccounted objects. |
 | `scripts/finalize-qlik-report.py` | 6 | Read-only completion finalizer: refresh Qlik accounting, source/target PNG health, visual similarity, degradation evidence, `MIGRATION_REPORT.md`, and `migration-result.json`; attempts every producer and exits nonzero if any contract fails. |
 | `scripts/build-migration-report.rb` | 6 | Consume the complete source-object census and gate artifacts; write `MIGRATION_REPORT.md` + `migration-result.json`. `--check` rejects stale or inconsistent output. |
-| `scripts/verify-complete.rb` | 6 | Additional Qlik empty-build/workbook-id sentinel check. It is supporting evidence and does not replace `assert-phase6-ran.rb` or the migration report. |
+| `scripts/check-migration-report.rb` | 6 | Qlik-local UTF-8-safe `--check` adapter around the byte-identical shared report builder; used by the finalizer/verifier for YELLOW reports containing degradation bullets. |
+| `scripts/verify-complete.rb` | 6 | Final offline completion contract: uses shared `TerminalOutcome`, requires `completion_status=complete`, and rechecks strict parity, accounting/report/ledger agreement, render health, and workbook identity before printing `TERMINAL: GREEN\|YELLOW`. |
 | `refs/control-parity.md` | 5 | The control-parity contract: lint + sidecar schema + the MCP/export-API answer (export `parameters` is the only way to set a control value). |
 | `refs/example-converter-input.json` | 1–2 | The exact convert_qlik_to_sigma input from the first migration. |
 | `fixtures/retail-orders/` | — | Complete offline discovery+converter input set (sanitized demo app) — see `fixtures/README.md` for the offline smoke path. |

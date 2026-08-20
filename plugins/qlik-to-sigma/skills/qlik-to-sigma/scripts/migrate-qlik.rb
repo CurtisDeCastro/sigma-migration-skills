@@ -50,8 +50,9 @@
 #     [--dry-run]              # offline: no Sigma POSTs, no qlik-cli needed with --from-discovery;
 #                              # emits dm-spec.json / wb-spec.json / layout.xml and stops
 #
-# Exit codes: 0 = done (PARITY GREEN); 10 = decisions needed (OPEN QUESTIONS printed,
-# no Sigma objects created); 3 = built but PARITY RED; other = error.
+# Exit codes: 0 = complete GREEN or YELLOW handoff; 10 = decisions needed
+# (including an unaccepted waiver-budget overflow); 3 = built but RED; other =
+# an earlier pipeline error.
 require 'json'
 require 'optparse'
 require 'fileutils'
@@ -59,6 +60,7 @@ require 'open3'
 require 'time'
 require_relative 'lib/scout_gate'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
+require_relative 'lib/terminal_outcome'
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 
 $stdout.sync = true # lane/foreground progress lines interleave correctly
@@ -142,10 +144,19 @@ OptionParser.new do |o|
   o.on('--skip-visual-comparison REASON') { |v| opts[:skip_visual_comparison] = v }
   o.on('--skip-visual-similarity REASON') { |v| opts[:skip_visual_similarity] = v }
   o.on('--skip-anchors-gate REASON') { |v| opts[:skip_anchors_gate] = v }
+  o.on('--accept-waiver-budget-exceeded REASON',
+       'accept waiver-budget overflow after every other gate passes; records a named YELLOW handoff') do |v|
+    opts[:accept_waiver_budget_exceeded] = v
+  end
   # Resolve + print which converter would run (vendored vs explicit dev build), then
   # exit 0 — no creds/args needed. Used by the converter-default regression test.
   o.on('--print-converter')   {     opts[:print_converter] = true }
 end.parse!
+
+if opts.key?(:accept_waiver_budget_exceeded) &&
+   opts[:accept_waiver_budget_exceeded].to_s.strip.empty?
+  abort 'FATAL: --accept-waiver-budget-exceeded requires a non-empty REASON'
+end
 
 abort 'FATAL: choose only one of --unbuild, --prj, or --from-discovery' \
   if [opts[:unbuild], opts[:prj], opts[:from]].compact.size > 1
@@ -1221,11 +1232,11 @@ puts "CONTROL-FLIP: #{flip_ok ? 'GREEN' : 'RED'} — gate 7b runtime flip proof#
 puts "freshness   : Qlik last reload #{app_meta['lastReloadTime'] || '?'} (#{stale_days} days ago)" if stale_days
 puts "warnings    : #{conv_warnings.size} converter, #{(wb_res['warnings'] || []).size} workbook-build" if conv_warnings.any? || (wb_res['warnings'] || []).any?
 # Empty-workbook guard. Completion is minted only by the shared hard gate below;
-# the orchestrator must never hand-write phase6-success.json.
+# the orchestrator must never hand-write phase6-success.json. The finalized
+# source census may later exclude explicitly skipped/not-applicable omissions
+# from required build scope; approximated visuals are emitted and stay in parity.
 n_elements = wb_res['elements'].to_i
 n_queryable = wb_res['queryableElements'].to_i
-mechanical_ok = parity_ok && layout_ok && control_ok && flip_ok &&
-                n_queryable.positive? && wb_res['unbuiltSourceVisuals'].to_a.empty?
 puts 'ELEMENTS    : 0 queryable workbook elements built — Data-only workbook, NOT done.' if n_queryable.zero?
 
 run_terminal = lambda do |label, command|
@@ -1234,17 +1245,18 @@ run_terminal = lambda do |label, command|
   output, status = Open3.capture2e(*command)
   output.each_line { |line| puts "   #{line.rstrip}" } unless output.strip.empty?
   puts "   exit=#{status.exitstatus}"
-  status.success?
+  status
 end
 
 # Cleanup is a real gate input, not best-effort bookkeeping. It runs on both
 # GREEN and RED parity paths so a failed migration does not leave retry
 # workbooks behind.
-cleanup_ok = run_terminal.call(
+cleanup_status = run_terminal.call(
   'Orphan workbook cleanup',
   ['ruby', File.join(HERE, 'cleanup-orphan-workbooks.rb'),
    '--workdir', WORK, '--keep', WB_ID]
 )
+cleanup_ok = cleanup_status.success?
 
 finalizer_cmd = [*PyResolve.argv, File.join(HERE, 'finalize-qlik-report.py'),
                  '--workdir', WORK]
@@ -1259,8 +1271,39 @@ finalizer_cmd += ['--skip-visual-similarity', opts[:skip_visual_similarity]] \
 
 # The first pass materializes accounting/coverage/layout/PNG/similarity inputs
 # consumed by the shared assert. It intentionally runs even when parity is RED.
-pre_finalizer_ok = run_terminal.call('Qlik accounting and report finalization (pre-gate)',
-                                     finalizer_cmd)
+pre_finalizer_status = run_terminal.call('Qlik accounting and report finalization (pre-gate)',
+                                         finalizer_cmd)
+pre_finalizer_ok = pre_finalizer_status.success?
+
+# Only terminal-accounted omissions leave required build/parity scope. Match
+# census visual ids against builder ids without accepting name-only guesses:
+# Qlik census ids are `visual:<objectId>`, while wb-result stores `<objectId>`.
+unbuilt_source_visuals = Array(wb_res['unbuiltSourceVisuals']).map(&:to_s).uniq
+census = begin
+  JSON.parse(File.read(File.join(WORK, 'source-object-census.json')))
+rescue StandardError
+  {}
+end
+census_rows = Array(census['objects'] || census['source_objects'])
+accounted_omissions = census_rows.map do |row|
+  next unless row.is_a?(Hash) && row['type'].to_s == 'inline-visual'
+  next unless %w[skipped not-applicable].include?(row['status'].to_s)
+  next unless row['evidence'].is_a?(Array) && !row['evidence'].empty?
+
+  source_id = row['id'].to_s.sub(/\Avisual:/, '')
+  source_id if unbuilt_source_visuals.include?(source_id)
+end.compact.uniq
+required_unbuilt_visuals = unbuilt_source_visuals - accounted_omissions
+mechanical_ok = parity_ok && layout_ok && control_ok && flip_ok &&
+                n_queryable.positive? && required_unbuilt_visuals.empty?
+if accounted_omissions.any?
+  puts "ACCOUNTING  : #{accounted_omissions.length} terminal-accounted visual omission(s) " \
+       "excluded from required build/parity scope: #{accounted_omissions.join(', ')}"
+end
+if required_unbuilt_visuals.any?
+  puts "ELEMENTS    : #{required_unbuilt_visuals.length} unbuilt source visual(s) lack a skipped/" \
+       "not-applicable terminal disposition: #{required_unbuilt_visuals.join(', ')}"
+end
 
 assert_cmd = ['ruby', File.join(HERE, 'assert-phase6-ran.rb'),
               '--workdir', WORK, '--workbook-id', WB_ID,
@@ -1279,22 +1322,59 @@ assert_cmd += ['--skip-visual-similarity', opts[:skip_visual_similarity]] \
   if opts[:skip_visual_similarity]
 assert_cmd += ['--skip-anchors-gate', opts[:skip_anchors_gate]] \
   if opts[:skip_anchors_gate]
+assert_cmd += ['--accept-waiver-budget-exceeded',
+               opts[:accept_waiver_budget_exceeded].to_s.strip] \
+  if opts[:accept_waiver_budget_exceeded]
 
 # This is the only command allowed to stamp phase6-success.json. Its exit code
-# participates directly in built_ok.
-assert_ok = run_terminal.call('Shared Phase 6 hard gate', assert_cmd)
+# participates directly in the terminal hard-gate result.
+assert_status = run_terminal.call('Shared Phase 6 hard gate', assert_cmd)
+assert_ok = assert_status.success?
 
 # assert-phase6-ran stamps the final waiver census, verdict, and degradation
 # ledger. Re-run the accounting/report finalizer after it on BOTH terminal paths
 # so migration-result.json and the report exactly reflect the terminal state.
-post_finalizer_ok = run_terminal.call('Qlik accounting and report finalization (terminal)',
-                                      finalizer_cmd)
+post_finalizer_status = run_terminal.call('Qlik accounting and report finalization (terminal)',
+                                          finalizer_cmd)
+post_finalizer_ok = post_finalizer_status.success?
 
-built_ok = mechanical_ok && cleanup_ok && pre_finalizer_ok && assert_ok &&
-           post_finalizer_ok
-puts "TERMINAL    : #{built_ok ? 'GREEN' : 'RED'} — accounting/report " \
+# The verifier is the final completion contract, never an optional diagnostic.
+# It re-derives strict parity, complete accounting, report freshness, render
+# health, and the degradation ledger before any terminal verdict is printed.
+verify_status = run_terminal.call(
+  'Qlik completion verification',
+  ['ruby', File.join(HERE, 'verify-complete.rb'),
+   '--workdir', WORK, '--workbook-id', WB_ID]
+)
+verify_ok = verify_status.success?
+
+hard_gates_ok = mechanical_ok && cleanup_ok && pre_finalizer_ok && assert_ok &&
+                post_finalizer_ok && verify_ok
+report = begin
+  JSON.parse(File.read(File.join(WORK, 'migration-result.json')))
+rescue StandardError
+  {}
+end
+reported_verdict = report['verdict'].to_s.upcase
+terminal_verdict = if hard_gates_ok &&
+                      report['completion_status'] == 'complete' &&
+                      TerminalOutcome::COMPLETE_VERDICTS.include?(reported_verdict)
+                     reported_verdict
+                   else
+                     'RED'
+                   end
+puts "TERMINAL: #{terminal_verdict} — accounting/report " \
      "#{post_finalizer_ok ? 'current' : 'failed'}, shared assert " \
-     "#{assert_ok ? 'passed' : 'failed'}"
+     "#{assert_ok ? 'passed' : 'failed'}, verify-complete " \
+     "#{verify_ok ? 'passed' : 'failed'}"
 puts '======================================='
 phase_summary
-exit(built_ok ? 0 : 3)
+
+if assert_status.exitstatus == 19 && !opts[:accept_waiver_budget_exceeded]
+  warn 'DECISION REQUIRED: waiver budget exceeded. Re-run with ' \
+       '--accept-waiver-budget-exceeded REASON to accept a YELLOW handoff.'
+  exit 10
+end
+
+exit(TerminalOutcome.report_exit(terminal_verdict)) if hard_gates_ok
+exit 3

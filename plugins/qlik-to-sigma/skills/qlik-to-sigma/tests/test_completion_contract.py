@@ -151,6 +151,24 @@ class CompletionContractTest(unittest.TestCase):
             "waivers": [], "generatedAt": "2026-08-20T00:00:00Z",
         })
 
+    def add_accounted_skipped_visual(self):
+        charts = json.loads((self.workdir / "charts.json").read_text())
+        charts.append({
+            "id": "chart-skipped", "title": "Unsupported extension",
+            "vizType": "extension", "dimensions": ["Country"],
+            "measures": ["ExtensionValue(Country)"],
+        })
+        write_json(self.workdir / "charts.json", charts)
+        coverage = json.loads((self.workdir / "workbook-coverage.json").read_text())
+        coverage.update({
+            "sourceVisuals": 2,
+            "sourceVisualIds": ["chart-1", "chart-skipped"],
+            "builtSourceVisualIds": ["chart-1"],
+            "unbuiltSourceVisualIds": ["chart-skipped"],
+            "status": "FAIL",
+        })
+        write_json(self.workdir / "workbook-coverage.json", coverage)
+
     def test_unaccounted_source_object_fails_closed(self):
         dm = json.loads((self.workdir / "dm-spec.json").read_text())
         dm["pages"][0]["elements"][0]["columns"] = []
@@ -242,17 +260,88 @@ class CompletionContractTest(unittest.TestCase):
         terminal_report = text.index(
             "Qlik accounting and report finalization (terminal)"
         )
+        verify_complete = text.index("Qlik completion verification")
+        terminal_banner = text.index('puts "TERMINAL: #{terminal_verdict}')
         self.assertLess(normalize, lint)
         self.assertLess(lint, post)
         self.assertLess(post, parity)
         self.assertLess(parity, cleanup)
         self.assertLess(cleanup, shared_assert)
         self.assertLess(shared_assert, terminal_report)
+        self.assertLess(terminal_report, verify_complete)
+        self.assertLess(verify_complete, terminal_banner)
         self.assertNotRegex(
             text, r"File\.write\([^)]*phase6-success\.json"
         )
-        self.assertIn("assert_ok = run_terminal.call", text)
+        self.assertIn("assert_status = run_terminal.call", text)
         self.assertIn("mechanical_ok && cleanup_ok && pre_finalizer_ok && assert_ok", text)
+        self.assertNotIn("built_ok ? 'GREEN'", text)
+
+    def test_accounted_skipped_visual_is_yellow_and_complete(self):
+        self.add_accounted_skipped_visual()
+        final = self.finalize()
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+        report = json.loads((self.workdir / "migration-result.json").read_text())
+        skipped = [
+            row for row in report["source_objects"]
+            if row["type"] == "inline-visual" and row["id"] == "visual:chart-skipped"
+        ]
+        self.assertEqual([row["status"] for row in skipped], ["skipped"])
+        self.assertEqual(report["verdict"], "YELLOW")
+        self.assertEqual(report["completion_status"], "complete")
+
+        self.stamp_shared_gate_success()
+        result = self.run_script(
+            "verify-complete.rb", "--workdir", self.workdir,
+            "--workbook-id", "wb-1",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("TERMINAL: YELLOW", result.stdout)
+
+    def test_approximated_emitted_visual_divergence_is_red(self):
+        write_json(self.workdir / "formula-mapping.json", {
+            "formulas": [{
+                "objectId": "chart-1", "status": "approximated",
+                "source": "Sum(Sales)", "target": "Sum([Sales])",
+            }],
+        })
+        final = self.finalize()
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+        report = json.loads((self.workdir / "migration-result.json").read_text())
+        visual = next(
+            row for row in report["source_objects"]
+            if row["type"] == "inline-visual" and row["id"] == "visual:chart-1"
+        )
+        self.assertEqual(visual["status"], "approximated")
+        self.assertEqual(report["verdict"], "YELLOW")
+
+        parity = json.loads((self.workdir / "parity-final.json").read_text())
+        parity.update({
+            "status": "FAIL", "charts_pass": 0, "charts_fail": 1,
+            "fail_names": ["Sales"], "divergent": True,
+            "per_chart": [{
+                "chart": "Sales", "source_object_id": "chart-1",
+                "status": "DIVERGENT", "pass": False,
+            }],
+        })
+        write_json(self.workdir / "parity-final.json", parity)
+        self.stamp_shared_gate_success()
+        result = self.run_script(
+            "verify-complete.rb", "--workdir", self.workdir,
+            "--workbook-id", "wb-1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parity is not strict", result.stderr)
+
+    def test_budget_overflow_flag_is_wired_as_decision_or_yellow_acceptance(self):
+        text = (SCRIPTS / "migrate-qlik.rb").read_text(encoding="utf-8")
+        self.assertIn("o.on('--accept-waiver-budget-exceeded REASON'", text)
+        self.assertIn(
+            "assert_cmd += ['--accept-waiver-budget-exceeded'", text
+        )
+        self.assertIn("assert_status.exitstatus == 19", text)
+        self.assertIn("exit 10", text)
+        self.assertIn("TerminalOutcome::COMPLETE_VERDICTS", text)
 
     def test_report_contradiction_fails_completion(self):
         final = self.finalize()
@@ -268,6 +357,20 @@ class CompletionContractTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CONTRADICTION", result.stderr)
 
+    def test_verify_complete_requires_complete_completion_status(self):
+        final = self.finalize()
+        self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
+        self.stamp_shared_gate_success()
+        report = json.loads((self.workdir / "migration-result.json").read_text())
+        report["completion_status"] = "blocked"
+        write_json(self.workdir / "migration-result.json", report)
+        result = self.run_script(
+            "verify-complete.rb", "--workdir", self.workdir,
+            "--workbook-id", "wb-1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("completion_status", result.stderr)
+
     def test_complete_success(self):
         final = self.finalize()
         self.assertEqual(final.returncode, 0, final.stdout + final.stderr)
@@ -278,6 +381,7 @@ class CompletionContractTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("strict parity", result.stdout)
+        self.assertIn("TERMINAL: GREEN", result.stdout)
         census = json.loads((self.workdir / "source-object-census.json").read_text())
         self.assertTrue(census["summary"]["complete"])
         self.assertTrue(all(

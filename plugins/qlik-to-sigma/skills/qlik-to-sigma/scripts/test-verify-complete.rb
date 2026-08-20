@@ -50,17 +50,29 @@ Dir.mktmpdir do |wd|
   check(code == 4, "workbook mismatch => exit 4 (got #{code})", fails)
 end
 
-# 5) the orchestrator wires the empty-workbook guard + shared gate.
+# 5) the orchestrator wires the empty-workbook guard, census-scoped omissions,
+# shared gate, and final verifier.
 mt = File.read(File.join(DIR, 'migrate-qlik.rb'))
 check(mt.include?('mechanical_ok = parity_ok && layout_ok && control_ok && flip_ok') &&
-      mt.include?("wb_res['unbuiltSourceVisuals'].to_a.empty?") &&
-      mt.include?('built_ok = mechanical_ok && cleanup_ok && pre_finalizer_ok && assert_ok'),
-      'orchestrator requires queryable elements and complete source coverage for a green', fails)
+      mt.include?('required_unbuilt_visuals.empty?') &&
+      mt.include?('%w[skipped not-applicable]') &&
+      mt.include?('hard_gates_ok = mechanical_ok && cleanup_ok && pre_finalizer_ok && assert_ok'),
+      'orchestrator excludes only terminal-accounted omissions from required build scope', fails)
 check(mt.include?("require 'flip_gate'") && mt.include?('FlipGate.decide'),
       'orchestrator runs gate 7b (runtime control-flip proof) before a green', fails)
 check(mt.include?("'assert-phase6-ran.rb'") &&
       !mt.match?(/File\.write\([^)]*phase6-success\.json/),
       'orchestrator delegates the success sentinel exclusively to the shared gate', fails)
+check(mt.include?("'verify-complete.rb'") &&
+      mt.index('Qlik completion verification') < mt.index('puts "TERMINAL: #{terminal_verdict}'),
+      'orchestrator invokes verify-complete before its honest terminal banner', fails)
+check(mt.include?("'--accept-waiver-budget-exceeded'") &&
+      mt.include?('assert_status.exitstatus == 19') &&
+      mt.include?('exit 10'),
+      'orchestrator passes waiver-budget acceptance and maps unaccepted exit 19 to decision exit 10', fails)
+check(!mt.include?("built_ok ? 'GREEN'") &&
+      mt.include?('TerminalOutcome::COMPLETE_VERDICTS.include?(reported_verdict)'),
+      'orchestrator derives GREEN/YELLOW from the completed report, never a boolean', fails)
 # 6) SKILL carries THE ONE PATH / no-hand-drive directive.
 sk = File.read(File.join(DIR, '..', 'SKILL.md'))
 check(sk.include?('THE ONE PATH') && sk.downcase.include?('never hand-drive'),
