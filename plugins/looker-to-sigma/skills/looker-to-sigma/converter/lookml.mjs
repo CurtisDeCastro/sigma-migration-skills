@@ -1612,7 +1612,7 @@ function lookCollectDynamicParameters(views) {
           const substituted = lookResolveParamSubst(branchSql, values);
           if (substituted.resolved)
             branchSql = substituted.sql;
-          if (!/\{%|\{\{|\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(branchSql))
+          if (!/\{%|\{\{|\$\{(?!TABLE\})[A-Za-z_][A-Za-z0-9_]*\}/i.test(branchSql))
             branches[allowed.value] = branchSql.replace(/\s+/g, " ").trim();
         }
         affectedFields.push({
