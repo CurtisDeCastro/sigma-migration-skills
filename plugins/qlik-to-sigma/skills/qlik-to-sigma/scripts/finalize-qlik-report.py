@@ -428,7 +428,10 @@ def main(argv=None):
     report_rc = run(report_command)
     if report_rc:
         failures.append("migration report exited %d" % report_rc)
-    report_check_rc = run(report_command + ["--check"])
+    report_check_rc = run([
+        "ruby", HERE / "check-migration-report.rb", "--workdir", workdir,
+        "--inventory", workdir / "source-object-census.json", "--check",
+    ])
     if report_check_rc:
         failures.append("migration report --check exited %d" % report_check_rc)
 
