@@ -2,7 +2,7 @@
 
 Source: Power BI/Fabric `Workforce KitchenSink (complex DAX test)` semantic
 model and `Workforce KitchenSink Report`. Target: a fresh Sigma data model and
-workbook over `CSA.TJ` warehouse tables. Source values came from
+workbook over its configured warehouse tables. Source values came from
 `executeQueries`; target values came from Sigma data-model queries against the
 converter-emitted grouped elements.
 
