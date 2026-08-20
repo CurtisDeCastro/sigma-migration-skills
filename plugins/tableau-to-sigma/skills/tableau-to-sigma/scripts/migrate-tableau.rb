@@ -1625,7 +1625,7 @@ if opts[:finalize]
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
-  accounting_ok = census_st.success? && report_st.success? &&
+  accounting_ok = census_st.success? && report_st.success? && report_verdict != 'RED' &&
                   TerminalOutcome::COMPLETE_VERDICTS.include?(report_verdict) &&
                   report_completion == 'complete'
   sentinel_ok = success_complete && success_verdict == report_verdict

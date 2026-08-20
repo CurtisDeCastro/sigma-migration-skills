@@ -114,6 +114,39 @@ Dir.mktmpdir do |wd|
   check(out.include?('VERDICT: GREEN'), 'legacy marker still gets the derived verdict printed', fails)
 end
 
+# Legacy GREEN artifacts minted before completion_status derive completion from
+# the verdict. An explicit current value remains authoritative.
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN')
+  %w[phase6-success.json migration-result.json].each do |name|
+    path = File.join(wd, name)
+    doc = JSON.parse(File.read(path))
+    doc.delete('completion_status')
+    File.write(path, JSON.generate(doc))
+  end
+  code, = run_vc(VC, wd)
+  check(code == 0, "legacy GREEN without completion_status => exit 0 (got #{code})", fails)
+end
+
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN')
+  result = JSON.parse(File.read(File.join(wd, 'migration-result.json')))
+  result['completion_status'] = 'blocked'
+  File.write(File.join(wd, 'migration-result.json'), JSON.generate(result))
+  code, out = run_vc(VC, wd)
+  check(code == 7, "explicit blocked GREEN report remains invalid (got #{code})", fails)
+  check(out.include?('completion_status is not complete'),
+        'explicit report completion status is enforced', fails)
+end
+
+Dir.mktmpdir do |wd|
+  success_marker(wd, 'verdict' => 'GREEN', 'completion_status' => 'blocked')
+  code, out = run_vc(VC, wd)
+  check(code == 6, "explicit blocked GREEN success marker remains invalid (got #{code})", fails)
+  check(out.include?('phase6-success.json completion_status is not complete'),
+        'explicit marker completion status is enforced', fails)
+end
+
 # Scope cut (coverage.json dropped tile) is explicit skipped scope and therefore
 # a complete YELLOW handoff, never the obsolete PARTIAL terminal label.
 Dir.mktmpdir do |wd|

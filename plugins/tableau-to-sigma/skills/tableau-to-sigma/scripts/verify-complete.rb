@@ -174,8 +174,16 @@ if result.is_a?(Hash)
   verdict = result['verdict'].to_s.upcase
   accounting_errors << "migration-result.json verdict is #{verdict.empty? ? 'missing' : verdict} (must be non-RED)" \
     unless TerminalOutcome::COMPLETE_VERDICTS.include?(verdict)
+  # Backward compatibility: reports minted before completion_status existed
+  # derive it from their terminal verdict. Once the field is present it is
+  # authoritative, so a current GREEN/YELLOW report stamped blocked still fails.
+  result_completion = if result.key?('completion_status')
+                        result['completion_status']
+                      else
+                        TerminalOutcome.completion_status(verdict)
+                      end
   accounting_errors << 'migration-result.json completion_status is not complete' \
-    unless result['completion_status'] == 'complete'
+    unless result_completion == 'complete'
   summary = result['summary']
   result_objects = result['source_objects']
   unless summary.is_a?(Hash) && result_objects.is_a?(Array)
@@ -276,8 +284,15 @@ derived_verdict = TerminalOutcome.expected_report_verdict(terminal_rows, deg_ent
 pf = load(File.join(wd, 'parity-final.json'))
 contradictions = []
 
+success_claim = sj['verdict'].to_s.sub(/\s+\(factory, self-attested\)\z/, '')
+success_claim = result['verdict'].to_s if success_claim.empty?
+success_completion = if sj.key?('completion_status')
+                       sj['completion_status']
+                     else
+                       TerminalOutcome.completion_status(success_claim)
+                     end
 contradictions << 'phase6-success.json completion_status is not complete' \
-  unless sj['completion_status'] == 'complete'
+  unless success_completion == 'complete'
 
 # W2.3 — the labeled factory verdict. On a Tier-S factory run (migrate-state
 # tier 'S', lane A) that ends GREEN with verdict_by 'builder-self-attested',
