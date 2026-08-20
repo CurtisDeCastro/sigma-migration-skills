@@ -850,6 +850,17 @@ console.error('stats:', JSON.stringify(res.stats));
         if os.path.exists(dynamic_params_path):
             wb_args += ["--dynamic-parameters", dynamic_params_path]
         run(wb_args)
+        hazard_rc, _ = run(
+            [sys.executable, os.path.join(HERE, "detect_modeling_hazards.py"),
+             "--workdir", wd, "--contract", contract_path,
+             "--dm-spec", dm_spec_path, "--wb-spec", wb_spec],
+            check=False,
+        )
+        if hazard_rc:
+            sys.exit(
+                "modeling-hazard gate blocked the dry run; inspect modeling-hazards.json "
+                "and rebuild at an explicit grain before posting"
+            )
         print("\n================ RESULT (dry run) ================")
         print(f"artifacts   : {wd}  (contract, dm-spec/convert-request, wb-spec — no Sigma objects created)")
         print("==================================================")
@@ -1014,6 +1025,19 @@ console.error('stats:', JSON.stringify(res.stats));
     if os.path.exists(dynamic_params_path):
         wb_args += ["--dynamic-parameters", dynamic_params_path]
     run(wb_args)
+    hazard_rc, _ = run(
+        [sys.executable, os.path.join(HERE, "detect_modeling_hazards.py"),
+         "--workdir", wd, "--contract", contract_path,
+         "--dm-spec", dm_spec_path, "--wb-spec", wb_spec_path],
+        check=False,
+    )
+    if hazard_rc:
+        sys.exit(
+            "FATAL: modeling-hazard gate blocked workbook POST. Inspect "
+            f"{os.path.join(wd, 'modeling-hazards.json')}; replace unsafe aggregate "
+            "relationships/windows with an explicit-grain or Custom SQL implementation, "
+            "or record a justified resolution with detect_modeling_hazards.py --resolve."
+        )
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
     try:
