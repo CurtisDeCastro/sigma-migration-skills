@@ -277,7 +277,7 @@ def main(argv=None):
 
     failures = []
     health_failures = []
-    print("── Qlik completion finalizer ──")
+    print("-- Qlik completion finalizer --")
     accounting_rc = run([sys.executable, HERE / "build-qlik-accounting.py", "--workdir", workdir])
     if accounting_rc:
         failures.append("accounting exited %d" % accounting_rc)
@@ -446,7 +446,7 @@ def main(argv=None):
         "failures": sorted(set(failures)),
     }
     write_json(workdir / "qlik-finalization.json", result)
-    print("   qlik finalization: %s · report=%s · %d issue(s)" % (
+    print("   qlik finalization: %s | report=%s | %d issue(s)" % (
         result["status"], result["report_verdict"] or "MISSING", len(result["failures"]),
     ))
     for failure in result["failures"]:

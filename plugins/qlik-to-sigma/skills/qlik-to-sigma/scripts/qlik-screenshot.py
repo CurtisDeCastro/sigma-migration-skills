@@ -33,13 +33,21 @@ def sheet_children(app, sheet):
     return out
 
 def export_png(app, viz, out_dir, w=900, h=600, zoom=2):
+    os.makedirs(out_dir, exist_ok=True)
     body = {"type":"sense-image-1.0",
             "senseImageTemplate":{"appId":app,"visualization":{"id":viz,"type":"visualization","widthPx":w,"heightPx":h},"selectionsByState":{}},
             "output":{"outputId":viz,"type":"image","imageOutput":{"outZoom":zoom,"outDpi":96,"outFormat":"png"}}}
-    bf = f"/tmp/_qshot_{viz}.json"
+    # Keep the request body beside the requested output. `/tmp` does not exist
+    # on native Windows runners, and a shared global filename races concurrent
+    # captures.
+    bf = os.path.join(out_dir, f"._qshot_{viz}.json")
     with open(bf, "w", encoding="utf-8") as handle:
         json.dump(body, handle)
     out, err = qlik("raw","post","v1/reports","--body-file",bf,"--verbose", raw_out=True)
+    try:
+        os.unlink(bf)
+    except OSError:
+        pass
     m = re.search(r'reports/([a-f0-9-]+)/status', err + out)
     if not m: return None, "no report id"
     rid = m.group(1)
