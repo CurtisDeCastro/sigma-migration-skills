@@ -2,9 +2,9 @@
 # frozen_string_literal: true
 # Regression test for the Power BI completion sentinel (2026-07-10).
 #
-# "Done" is a fact on disk: migrate-powerbi.rb stamps phase6-success.json
-# (workbookId + chartCount + parity-pass) only on a real, non-empty, parity-
-# passing build; verify-complete.rb greens ONLY on that. Guards the exact PBI
+# "Done" is a fact on disk: only assert-phase6-ran.rb stamps
+# phase6-success.json with gates=all-pass. The one-shot builder routes to parity
+# with parity-pending.json and exit 10. Guards the exact PBI
 # failure where a blocked agent ships empty placeholder pages and calls it done.
 #
 # Usage: ruby scripts/test-verify-complete.rb
@@ -29,13 +29,18 @@ Dir.mktmpdir do |wd|
   check(out.include?('NOT DONE') && out.include?('never hand-author'),
         'empty-workdir message warns against hand-authoring', fails)
 
-  # 2) resolution marker alone is not value parity → NOT DONE (5)
+  # 2) resolution marker alone is not a terminal marker → NOT DONE (5)
   File.write(File.join(wd, 'phase6-success.json'),
              JSON.generate('workbookId' => 'wb-1', 'chartCount' => 9, 'gates' => 'resolution-pass',
                            'generatedAt' => '2026-07-10T00:00:00Z'))
   code, out = run_vc(VC, wd)
-  check(code == 5, "success marker without value parity => exit 5 (got #{code})", fails)
-  check(out.include?('value parity was not run'), 'missing parity message names the required gate', fails)
+  check(code == 5, "resolution-only marker => exit 5 (got #{code})", fails)
+  check(out.include?('NOT DONE - phase6-success.json is resolution-only') &&
+        !out.include?('terminal handoff'),
+        'resolution-only marker is never called DONE', fails)
+  File.write(File.join(wd, 'phase6-success.json'),
+             JSON.generate('workbookId' => 'wb-1', 'chartCount' => 9, 'gates' => 'all-pass',
+                           'generatedAt' => '2026-07-10T00:00:00Z'))
 
   # 3) strict parity alone no longer proves completion: whole-source accounting
   # and the generated migration report are part of the final contract.
@@ -58,22 +63,42 @@ Dir.mktmpdir do |wd|
 
   # 5) marker present but 0 charts → NOT DONE (3) (empty workbook)
   File.write(File.join(wd, 'phase6-success.json'),
-             JSON.generate('workbookId' => 'wb-1', 'chartCount' => 0))
+             JSON.generate('workbookId' => 'wb-1', 'chartCount' => 0, 'gates' => 'all-pass'))
   code, = run_vc(VC, wd)
   check(code == 3, "0-chart marker => exit 3 empty (got #{code})", fails)
 
   # 6) workbook mismatch → exit 4
   File.write(File.join(wd, 'phase6-success.json'),
-             JSON.generate('workbookId' => 'wb-1', 'chartCount' => 9))
+             JSON.generate('workbookId' => 'wb-1', 'chartCount' => 9, 'gates' => 'all-pass'))
   code, = run_vc(VC, wd, wb: 'wb-OTHER')
   check(code == 4, "workbook mismatch => exit 4 (got #{code})", fails)
 end
 
-# 7) the orchestrator wires the empty-workbook guard + success stamp.
+# 7) the orchestrator wires the empty-workbook guard + nonterminal routing stamp.
 mt = File.read(File.join(DIR, 'migrate-powerbi.rb'))
-check(mt.include?('built_ok = parity_ok && chart_els.size.positive?'),
-      'orchestrator requires real elements for a green (no vacuous empty pass)', fails)
-check(mt.include?('phase6-success.json'), 'orchestrator stamps the success sentinel', fails)
+check(mt.include?('resolution_ready = parity_ok && chart_els.size.positive?'),
+      'orchestrator requires real elements before routing to parity', fails)
+check(mt.include?('parity-pending.json') && mt.include?('exit(resolution_ready ? 10 : 3)'),
+      'orchestrator stamps parity-pending and exits with routing code 10', fails)
+check(!mt.match?(/File\.write\(succ/),
+      'orchestrator never writes the terminal success sentinel', fails)
+run_sh = File.read(File.join(DIR, 'run.sh'))
+assert_src = File.read(File.join(DIR, 'assert-phase6-ran.rb'))
+wrapper_src = File.read(File.join(DIR, 'assert-powerbi-terminal.rb'))
+check(run_sh.include?('--accept-waiver-budget-exceeded') &&
+      run_sh.include?('"${ASSERT_BUDGET_ARGS[@]}"') &&
+      run_sh.scan('assert-powerbi-terminal.rb').length == 3 &&
+      run_sh.include?('exit "$GATE_RC"'),
+      'run.sh plumbs waiver-budget acceptance and preserves assert exit 19/10', fails)
+check(assert_src.include?("p.on('--accept-waiver-budget-exceeded REASON'") &&
+      assert_src.include?("final_verdict = 'YELLOW' if budget_exceeded_accepted"),
+      'assert exposes named budget acceptance as YELLOW only', fails)
+check(wrapper_src.include?('assert-phase6-ran.rb') &&
+      wrapper_src.include?('finalize-powerbi-report.rb') &&
+      wrapper_src.include?('completion_status') &&
+      wrapper_src.include?('TerminalOutcome.expected_report_verdict') &&
+      wrapper_src.include?('clear_terminal_marker'),
+      'plugin wrapper requires complete report/census/ledger and removes stale success', fails)
 # 8) missing-input aborts point at the device-code connect, not a bare "missing".
 check(mt.include?('fabric-extract.py') && mt.include?('microsoft.com/devicelogin'),
       'missing --tmsl/--pbir abort prompts device-code Power BI connect', fails)

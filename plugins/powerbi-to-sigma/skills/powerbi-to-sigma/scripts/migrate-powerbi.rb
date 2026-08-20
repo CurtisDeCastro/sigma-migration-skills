@@ -2004,8 +2004,16 @@ run!(['ruby', File.join(HERE, 'finalize-powerbi-report.rb'),
 # see enhance-scan.rb + enhance-apply.rb (the shared Phase-E engine).
 # ---------------------------------------------------------------------------
 enhance_line = nil
-if opts[:enhance] && !parity_ok
-  enhance_line = 'SKIPPED — parity not green (Phase E only clones a parity-verified workbook)'
+strict_parity = begin
+  doc = JSON.parse(File.read(File.join(WORK, 'parity-final.json')))
+  total = doc['charts_total'].to_i
+  doc['status'].to_s.upcase == 'PASS' && doc['mode'].to_s == 'strict' &&
+    total.positive? && doc['charts_pass'].to_i == total && doc['charts_fail'].to_i.zero?
+rescue StandardError
+  false
+end
+if opts[:enhance] && !strict_parity
+  enhance_line = 'SKIPPED — strict value parity pending (Phase E only clones a parity-verified workbook)'
 elsif opts[:enhance]
   puts
   puts '── Phase E (opt-in) · Enhance ──'
@@ -2086,13 +2094,15 @@ if fresh_ok
 end
 puts "ENHANCE     : #{enhance_line}" if enhance_line
 puts "CONTROL-FLIP: #{flip_line}" if flip_line
-# Empty-workbook guard + completion sentinel. parity_ok is VACUOUSLY true when no
+# Empty-workbook guard + routing marker. parity_ok is VACUOUSLY true when no
 # chart elements were built (0 cols, 0 divergent) — an empty/placeholder workbook
 # would otherwise exit 0 and look "done" (the exact PBI failure: pages, no
-# elements). Require real elements, and stamp a run-scoped success marker only on
-# a genuine pass so verify-complete.rb (the done-check the SKILL points at) can't
-# green an empty result.
-built_ok = parity_ok && chart_els.size.positive?
+# elements). A real resolution pass is still not terminal: this one-shot path
+# does not collect strict source parity, so it writes parity-pending.json and
+# exits with the established decision/routing code 10. Only the plugin-local
+# assert-powerbi-terminal.rb wrapper may retain phase6-success.json after the
+# shared gate and Power BI report checks pass.
+resolution_ready = parity_ok && chart_els.size.positive?
 if chart_els.size.zero?
   puts 'ELEMENTS    : 0 chart elements built — EMPTY workbook, NOT a complete migration.'
   puts '              Parity is vacuous with no elements. Do NOT report success: re-extract the'
@@ -2101,18 +2111,27 @@ if chart_els.size.zero?
 end
 begin
   succ = File.join(WORK, 'phase6-success.json')
-  if built_ok
-    # 'resolution-pass' (not 'parity-pass'): this marker records that the build
-    # resolved + freshness-matched, NOT that values were diffed against source.
-    # verify-complete.rb reports value parity separately (parity-final.json).
-    File.write(succ, JSON.pretty_generate('workbookId' => wb_id, 'chartCount' => chart_els.size,
-                                          'gates' => 'resolution-pass',
-                                          'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')))
-  elsif File.exist?(succ)
-    File.delete(succ) # a prior success marker is stale if this run isn't green
+  pending = File.join(WORK, 'parity-pending.json')
+  File.delete(succ) if File.exist?(succ)
+  if resolution_ready
+    File.write(pending, JSON.pretty_generate(
+      'workbookId' => wb_id,
+      'chartCount' => chart_els.size,
+      'status' => 'parity-pending',
+      'routing' => 'run strict parity, then assert-powerbi-terminal.rb',
+      'generatedAt' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+    ))
+  elsif File.exist?(pending)
+    File.delete(pending)
   end
 rescue StandardError
   nil # sentinel bookkeeping never fails the run
 end
+if resolution_ready
+  puts 'HANDOFF     : ROUTING REQUIRED — workbook is usable, but strict value parity is pending.'
+  puts '              This is not GREEN or YELLOW. Run Phase 6 parity and assert-powerbi-terminal.rb.'
+else
+  puts 'HANDOFF     : RED — resolution/build correctness failed.'
+end
 puts '======================================='
-exit(built_ok ? 0 : 3)
+exit(resolution_ready ? 10 : 3)

@@ -14,6 +14,7 @@ require 'pathname'
 require 'rbconfig'
 require_relative 'lib/degradation_ledger'
 require_relative 'lib/py_resolve'
+require_relative 'lib/terminal_outcome'
 
 class FinalizeError < StandardError; end
 
@@ -179,6 +180,27 @@ def aggregate_health(kind, records)
   }
 end
 
+def validate_powerbi_strict_parity!(workdir)
+  parity = read_json(File.join(workdir, 'parity-final.json')) || {}
+  census = read_json(File.join(workdir, 'source-object-census.json')) || {}
+  total = parity['charts_total'].to_i
+  errors = []
+  errors << "parity status is #{parity['status'] || 'missing'}" unless parity['status'].to_s.upcase == 'PASS'
+  errors << "parity mode is #{parity['mode'] || 'missing'}, expected strict" unless parity['mode'].to_s == 'strict'
+  errors << 'charts_total is zero' unless total.positive?
+  errors << "charts_pass #{parity['charts_pass']} != charts_total #{total}" unless parity['charts_pass'].to_i == total
+  errors << "charts_fail is #{parity['charts_fail'] || 'missing'}, expected 0" unless parity.key?('charts_fail') && parity['charts_fail'].to_i.zero?
+
+  emitted = Array(census['source_objects']).select do |row|
+    row['type'].to_s == 'visual' && row['emitted'] == true && row['parity_in_scope'] == true
+  end
+  unproven = emitted.reject { |row| row['parity_proven'] == true }
+  errors << "emitted/in-scope charts lack strict parity: #{unproven.map { |row| row['name'] }.join(', ')}" unless unproven.empty?
+  errors << 'source census does not declare strict_parity_complete=true' unless census.dig('summary', 'strict_parity_complete') == true
+
+  raise FinalizeError, errors.join('; ') unless errors.empty?
+end
+
 options = {}
 parser = OptionParser.new do |opts|
   opts.banner = 'Usage: finalize-powerbi-report.rb --workdir DIR [--preliminary]'
@@ -254,7 +276,19 @@ begin
   raise FinalizeError, "migration report freshness check failed (exit #{check_status.exitstatus})" unless check_status.success?
 
   result = read_json(File.join(workdir, 'migration-result.json')) || {}
-  raise FinalizeError, 'migration-result.json is RED' if result['verdict'].to_s == 'RED'
+  validate_powerbi_strict_parity!(workdir)
+  expected_verdict = TerminalOutcome.expected_report_verdict(
+    Array(result['source_objects']),
+    Array(result['degradations']) + Array(result['waivers'])
+  )
+  unless result['verdict'].to_s == expected_verdict
+    raise FinalizeError,
+          "migration-result.json verdict #{result['verdict'] || 'missing'} != expected #{expected_verdict}"
+  end
+  unless result['completion_status'].to_s == 'complete'
+    raise FinalizeError,
+          "migration-result.json completion_status is #{result['completion_status'] || 'missing'}, expected complete"
+  end
   puts "powerbi finalization: #{result['verdict']} — accounting/report/ledger/PNG health refreshed"
   exit 0
 rescue FinalizeError, OptionParser::ParseError => e
