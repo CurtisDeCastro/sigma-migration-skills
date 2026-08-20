@@ -24,7 +24,7 @@ NON_ADDITIVE_NAME = re.compile(
     re.I,
 )
 WINDOW_FN = re.compile(
-    r"\b(?:running_total|cumulative(?:sum)?|moving(?:avg|average|sum|stddev|variance)|rolling|offset|lag)\s*\(",
+    r"\b(?:running_total|cumulative(?:sum)?|moving_?(?:avg|average|sum|stddev|variance)|rolling|offset|lag)\s*\(",
     re.I,
 )
 DATE_NAME = re.compile(r"(?:date|day|week|month|quarter|year|period|time)", re.I)
