@@ -679,6 +679,7 @@ def main():
     # ── Phase 3 — Convert (local build / patched source / MCP request) ────────
     hdr(3, TOTAL, "Convert")
     dm_spec_path = os.path.join(wd, "dm-spec.json")
+    dynamic_params_path = os.path.join(wd, "dm-spec-dynamic-parameters.json")
     conn = os.environ.get("SIGMA_CONNECTION_ID", "PLACEHOLDER_CONNECTION_ID")
     if a.reuse_dm:
         print(f"   --reuse-dm {a.reuse_dm} — converter skipped")
@@ -686,6 +687,8 @@ def main():
         conv = json.load(open(a.converted))
         spec = conv.get("model") or conv.get("sigmaDataModel") or conv
         json.dump(spec, open(dm_spec_path, "w"), indent=2)
+        json.dump({"version": 1, "parameters": conv.get("dynamicParameters") or []},
+                  open(dynamic_params_path, "w"), indent=2)
         print(f"   using MCP converter output {a.converted} -> {dm_spec_path}")
     else:
         # Converter resolution (issue #227): the pinned VENDORED bundle is the
@@ -760,6 +763,7 @@ const res = convertLookMLToSigma(files, {{ connectionId: {json.dumps(conn)},
   exploreName: {json.dumps(explore)}, joinStrategy: 'relationships' }});
 writeFileSync({json.dumps(dm_spec_path)}, JSON.stringify(res.model, null, 2));
 writeFileSync({json.dumps(os.path.join(wd, "dm-spec-warnings.json"))}, JSON.stringify(res.warnings || [], null, 2));
+writeFileSync({json.dumps(dynamic_params_path)}, JSON.stringify({{ version: 1, parameters: res.dynamicParameters || [] }}, null, 2));
 console.error('stats:', JSON.stringify(res.stats));
 (res.warnings || []).forEach(w => console.error('  WARN ' + w));
 """)
@@ -841,8 +845,11 @@ console.error('stats:', JSON.stringify(res.stats));
 
     if a.dry_run:
         wb_spec = os.path.join(wd, "wb-spec.json")
-        run([sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
-             "--views", views_dir, "--out", wb_spec])
+        wb_args = [sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
+                   "--views", views_dir, "--out", wb_spec]
+        if os.path.exists(dynamic_params_path):
+            wb_args += ["--dynamic-parameters", dynamic_params_path]
+        run(wb_args)
         print("\n================ RESULT (dry run) ================")
         print(f"artifacts   : {wd}  (contract, dm-spec/convert-request, wb-spec — no Sigma objects created)")
         print("==================================================")
@@ -1000,10 +1007,13 @@ console.error('stats:', JSON.stringify(res.stats));
                for e in els], open(dm_els_path, "w"))
     # Use --flag=value for ids: Sigma-reassigned element ids can start with '-'
     # (e.g. "-BGy34L4Yj"), which argparse otherwise mis-reads as a flag.
-    run([sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
-         "--views", views_dir, f"--dm-id={dm}", f"--element-id={denorm['id']}",
-         f"--dm-element-name={denorm_name}", f"--dm-elements={dm_els_path}",
-         f"--folder-id={folder}", f"--out={wb_spec_path}"])
+    wb_args = [sys.executable, os.path.join(HERE, "build_workbook.py"), contract_path,
+               "--views", views_dir, f"--dm-id={dm}", f"--element-id={denorm['id']}",
+               f"--dm-element-name={denorm_name}", f"--dm-elements={dm_els_path}",
+               f"--folder-id={folder}", f"--out={wb_spec_path}"]
+    if os.path.exists(dynamic_params_path):
+        wb_args += ["--dynamic-parameters", dynamic_params_path]
+    run(wb_args)
     wspec = json.load(open(wb_spec_path))
     wspec["name"] = f"{prefix}{dash['title']} (from Looker)"
     try:

@@ -1570,6 +1570,74 @@ function lookResolveParamSubst(sql, paramDefaults) {
   });
   return { sql: out, resolved: changed };
 }
+function lookCollectDynamicParameters(views) {
+  const out = [];
+  for (const [viewName, view] of Object.entries(views)) {
+    const params = view.parameter ? Array.isArray(view.parameter) ? view.parameter : [view.parameter] : [];
+    const defaults = /* @__PURE__ */ new Map();
+    for (const p of params) {
+      if (p?._name && p.default_value != null)
+        defaults.set(p._name.toLowerCase(), String(p.default_value));
+    }
+    const fields = [];
+    for (const [kind, raw] of [["dimension", view.dimension], ["dimension_group", view.dimension_group], ["measure", view.measure]]) {
+      const entries = raw ? Array.isArray(raw) ? raw : [raw] : [];
+      for (const field of entries) {
+        if (field?._name && typeof field.sql === "string")
+          fields.push({ kind, field });
+      }
+    }
+    for (const p of params) {
+      if (!p?._name)
+        continue;
+      const allowedRaw = p.allowed_value ? Array.isArray(p.allowed_value) ? p.allowed_value : [p.allowed_value] : [];
+      const allowedValues = allowedRaw.map((entry) => ({
+        label: String(entry?.label ?? entry?.value ?? entry?._name ?? ""),
+        value: String(entry?.value ?? entry?._name ?? "")
+      })).filter((entry) => entry.value);
+      const affectedFields = [];
+      for (const { kind, field } of fields) {
+        const sourceSql = field.sql;
+        const escaped = p._name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const liquidRef = new RegExp(`\\b${escaped}(?:\\._parameter_value)?\\b`, "i");
+        const substRef = new RegExp(`\\$\\{${escaped}\\}`, "i");
+        if (!liquidRef.test(sourceSql) && !substRef.test(sourceSql))
+          continue;
+        const branches = {};
+        for (const allowed of allowedValues) {
+          const values = new Map(defaults);
+          values.set(p._name.toLowerCase(), allowed.value);
+          const liquid = lookResolveLiquidIf(sourceSql, values);
+          let branchSql = liquid.resolved ? liquid.sql : sourceSql;
+          const substituted = lookResolveParamSubst(branchSql, values);
+          if (substituted.resolved)
+            branchSql = substituted.sql;
+          if (!/\{%|\{\{|\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(branchSql))
+            branches[allowed.value] = branchSql.replace(/\s+/g, " ").trim();
+        }
+        affectedFields.push({
+          field: `${viewName}.${field._name}`,
+          label: field.label || sigmaDisplayName(field._name),
+          kind,
+          sourceSql,
+          branches,
+          deterministic: allowedValues.length > 0 && Object.keys(branches).length === allowedValues.length
+        });
+      }
+      if (affectedFields.length) {
+        out.push({
+          view: viewName,
+          name: p._name,
+          type: p.type || "string",
+          defaultValue: p.default_value != null ? String(p.default_value) : allowedValues[0]?.value,
+          allowedValues,
+          affectedFields
+        });
+      }
+    }
+  }
+  return out;
+}
 function lookConvertView(viewName, view, connectionId, warnings, sqlTableNameMap, ndtContext) {
   if (!view) {
     warnings.push(`\u26A0 View "${viewName}" not found \u2014 element will have no columns`);
@@ -2288,6 +2356,7 @@ function convertLookMLToSigma(files, options = {}) {
       throw new Error(`Parse error in ${file.name}: ${e.message}`);
     }
   }
+  const dynamicParameters = lookCollectDynamicParameters(views);
   let exploreName = options.exploreName;
   const exploreNames = Object.keys(explores);
   if (exploreNames.length === 0) {
@@ -2310,6 +2379,7 @@ function convertLookMLToSigma(files, options = {}) {
     return {
       model,
       warnings,
+      ...dynamicParameters.length ? { dynamicParameters } : {},
       ...security.length ? { security } : {},
       stats: {
         views: viewNames.length,
@@ -2645,6 +2715,7 @@ function convertLookMLToSigma(files, options = {}) {
   return {
     model: sigmaModel,
     warnings,
+    ...dynamicParameters.length ? { dynamicParameters } : {},
     ...security.length ? { security } : {},
     stats: {
       views: Object.keys(views).length,
