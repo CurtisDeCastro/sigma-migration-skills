@@ -6,7 +6,7 @@ Every documented source construct maps to a real, current Sigma target or a loud
 
 **`sigma_verified` legend:** ✅ y = the mapped Sigma target resolved at **query time** in a live migration (no `type=error` column) on the date shown; 🟡 n = target is documented but not yet query-verified.
 
-**Coverage:** 74 documented constructs across 6 dimensions; 3 live-verified.
+**Coverage:** 74 documented constructs across 6 dimensions; 5 live-verified.
 
 ## Visualization / chart kind
 
@@ -168,11 +168,11 @@ Authoritative source: <https://learn.microsoft.com/en-us/dax/dax-function-refere
 | | | | | _Self-lookups require an aliased element or self-join and are structural, not formula-only._ |
 | `DISTINCTCOUNT` | [doc](https://learn.microsoft.com/en-us/dax/distinctcount-function-dax) | `CountDistinct(...)` | 🟡 n | warn+drop |
 | `COUNTROWS` | [doc](https://learn.microsoft.com/en-us/dax/countrows-function-dax) | `Count()` | 🟡 n | warn+drop |
-| `SAMEPERIODLASTYEAR` | [doc](https://learn.microsoft.com/en-us/dax/sameperiodlastyear-function-dax) | `grouped DateLookback(value, period, 1, "year") element` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
-| | | | | _Support is structural and requires a discoverable fact value column plus date column on a derived view._ |
+| `SAMEPERIODLASTYEAR` | [doc](https://learn.microsoft.com/en-us/dax/sameperiodlastyear-function-dax) | `grouped DateLookback(value, period, 1, "year") element` | ✅ y · 2026-08-20 | warn+drop scalar metric; preserve/review grouped element |
+| | | | | _Support is structural and requires a discoverable fact value column plus date column on a derived view, and an active source date relationship (or explicit USERELATIONSHIP)._ |
 | `DATEADD (CALCULATE time shift)` | [doc](https://learn.microsoft.com/en-us/dax/dateadd-function-dax) | `grouped DateLookback(value, period, amount, unit) element` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
 | | | | | _This row covers DATEADD as a DAX filter-context time shift, not ordinary scalar date arithmetic._ |
-| `TOTALYTD` | [doc](https://learn.microsoft.com/en-us/dax/totalytd-function-dax) | `two-level grouped element with CumulativeSum(value), reset by year` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
+| `TOTALYTD` | [doc](https://learn.microsoft.com/en-us/dax/totalytd-function-dax) | `two-level grouped element with CumulativeSum(value), reset by year` | ✅ y · 2026-08-20 | warn+drop scalar metric; preserve/review grouped element |
 | | | | | _There is no scalar YTD formula equivalent; support means structural emission._ |
 | `DATESYTD` | [doc](https://learn.microsoft.com/en-us/dax/datesytd-function-dax) | `two-level grouped element with CumulativeSum(value), reset by year` | 🟡 n | warn+drop scalar metric; preserve/review grouped element |
 | `YoY computed chain` | [doc](https://learn.microsoft.com/en-us/power-bi/transform-model/quick-measures) | `(current - prior) / prior on the emitted prior-period element` | 🟡 n | warn+drop dangling source metric; use the emitted grouped chain |

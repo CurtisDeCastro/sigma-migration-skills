@@ -195,13 +195,13 @@
       "sigma": "grouped DateLookback(value, period, 1, \"year\") element",
       "doc_ref": "https://learn.microsoft.com/en-us/dax/sameperiodlastyear-function-dax",
       "sigma_target_ref": "https://help.\u0073igmacomputing.com/docs/datelookback",
-      "sigma_verified": {"status": "n"},
+      "sigma_verified": {"status": "y", "date": "2026-08-20", "method": "Live Power BI executeQueries vs Sigma data-model query: KitchenSink PY Absence Hours for 2026 matched exactly at 21,844 on an active same-fact date relationship; see refs/live-time-intelligence-validation-2026-08-20.md."},
       "support_status": "supported",
       "support_evidence": {"date": "2026-08-20", "basis": "converter-source+fixture-oracle", "detail": "classifyTimeIntel identifies prior-period DAX and emitTimeIntelElements emits a grouped DateLookback element."},
       "converter_evidence": {"symbol": "classifyTimeIntel", "behavior": "classify", "anchor": "if (/\\bSAMEPERIODLASTYEAR\\s*\\(/i.test(d))"},
       "fixture_oracle": {"file": "fixtures/MANIFEST.md", "row": "PY Absence Hours"},
       "on_unmapped": "warn+drop scalar metric; preserve/review grouped element",
-      "notes": "Support is structural and requires a discoverable fact value column plus date column on a derived view."
+      "notes": "Support is structural and requires a discoverable fact value column plus date column on a derived view, and an active source date relationship (or explicit USERELATIONSHIP)."
     },
     {
       "source": "DATEADD (CALCULATE time shift)",
@@ -221,7 +221,7 @@
       "sigma": "two-level grouped element with CumulativeSum(value), reset by year",
       "doc_ref": "https://learn.microsoft.com/en-us/dax/totalytd-function-dax",
       "sigma_target_ref": "https://help.\u0073igmacomputing.com/docs/cumulativesum",
-      "sigma_verified": {"status": "n"},
+      "sigma_verified": {"status": "y", "date": "2026-08-20", "method": "Live Power BI executeQueries vs Sigma data-model query: KitchenSink YTD Absence Hours matched exactly for 10 common, refreshed monthly periods across 2025-2026; later periods were excluded as documented Import-source freshness drift. See refs/live-time-intelligence-validation-2026-08-20.md."},
       "support_status": "supported",
       "support_evidence": {"date": "2026-08-20", "basis": "converter-source+fixture-oracle", "detail": "classifyTimeIntel identifies TOTALYTD and emitTimeIntelElements emits year/month grouping levels plus CumulativeSum."},
       "converter_evidence": {"symbol": "classifyTimeIntel", "behavior": "classify", "anchor": "if (/\\bTOTALYTD\\s*\\(|\\bDATESYTD\\s*\\(/i.test(d))"},
