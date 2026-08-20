@@ -2390,6 +2390,10 @@ function buildDerivedElements(elements, warnings) {
         }
         if (!dispName)
           continue;
+        const relatedSuffix = dispName.match(/\s+\(([^()]+)\s+\([^()]+\)\)\s*$/);
+        const targetBaseName = tgtEl.name || (tgtEl.source?.path || []).slice(-1)[0] || "";
+        if (relatedSuffix && relatedSuffix[1].toUpperCase() !== String(targetBaseName).toUpperCase())
+          continue;
         if (dispName.includes("/")) {
           warnSlash(dispName, `"${derivedName}" element (related column via ${rel.name})`);
           continue;
