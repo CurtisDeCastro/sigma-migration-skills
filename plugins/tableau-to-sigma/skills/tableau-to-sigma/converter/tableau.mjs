@@ -2367,16 +2367,6 @@ function buildDerivedElements(elements, warnings) {
           continue;
         if (!col.formula || col.formula.startsWith("/*"))
           continue;
-        // A target can itself carry columns synthesized through ANOTHER
-        // relationship (hub parent with multiple child facts). Pulling those
-        // transitive refs into this derived view makes child A reach sideways
-        // through the parent into child B — an invalid sibling-fact Lookup that
-        // either errors on readback or silently fans out. A grain-preserving
-        // child view inherits only the target's OWN columns (one path slash);
-        // sibling-child fields get their own routed grain/source.
-        const targetPath = col.formula.match(/^\[([^\]]+)\]$/)?.[1];
-        if (targetPath && targetPath.split("/").length > 2)
-          continue;
         let dispName;
         if (col.name) {
           dispName = String(col.name);
@@ -2390,6 +2380,12 @@ function buildDerivedElements(elements, warnings) {
         }
         if (!dispName)
           continue;
+        // A target can itself carry columns synthesized through ANOTHER
+        // relationship (hub parent with multiple child facts). Their captions
+        // carry the sibling table suffix. Pulling them into this derived view
+        // makes child A reach sideways through the parent into child B — an
+        // invalid sibling-fact Lookup. Do this after display-name recovery so a
+        // legitimate slash-named caption still reaches warnSlash below.
         const relatedSuffix = dispName.match(/\s+\(([^()]+)\s+\([^()]+\)\)\s*$/);
         const targetBaseName = tgtEl.name || (tgtEl.source?.path || []).slice(-1)[0] || "";
         if (relatedSuffix && relatedSuffix[1].toUpperCase() !== String(targetBaseName).toUpperCase())
