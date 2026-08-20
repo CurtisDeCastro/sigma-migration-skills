@@ -57,6 +57,13 @@ MODEL = {
           }
         ]
       }
+    ],
+    'relationships' => [
+      { 'name' => 'sales-date', 'fromTable' => 'SALES', 'toTable' => 'DATE_DIM' },
+      {
+        'name' => 'safety-date', 'fromTable' => 'SAFETY_INCIDENTS',
+        'toTable' => 'DATE_DIM', 'isActive' => false
+      }
     ]
   }
 }.freeze
@@ -229,7 +236,8 @@ artifact, patched = R.route_all(
   measures: measures,
   dm_spec: DM_SPEC,
   dm_readback: DM_READBACK,
-  master_map: MASTER_MAP
+  master_map: MASTER_MAP,
+  relationships: R.relationships_from_model(MODEL)
 )
 routes = artifact['routes'].to_h { |route| [route.dig('source_measure', 'query_ref'), route] }
 
@@ -243,6 +251,9 @@ ok('SPLY emits structured source, shape, target, status, and parity fields',
      sply['dax_shape'] == 'prior-year' &&
      sply['reason'] == 'same-fact-supported-shape' &&
      sply['parity_required'] == true)
+ok('SPLY records the active source date relationship',
+   sply.dig('date_relationship', 'mode') == 'active-model-relationship' &&
+     sply.dig('date_relationship', 'relationship') == 'sales-date')
 ok('SPLY latest-period headline is deterministic',
    sply['formula'] ==
      'Sum(If([master-prior/Year] = Max([master-prior/Year]), [master-prior/Revenue (Prior Year)], Null))')
@@ -261,10 +272,25 @@ ok('YoY routes through prior element to synthesized YoY column',
      yoy.dig('target_column', 'name') == 'Revenue YoY %')
 
 cross_fact = routes.fetch('SAFETY_INCIDENTS.PY Incident Count')
-ok('cross-fact route is rejected', cross_fact['status'] == 'needs-review' &&
-   cross_fact['reason'] == 'cross-fact-no-synthesized-element')
-ok('cross-fact rejection never fabricates field_map entry',
+ok('inactive source date relationship is rejected before synthesis',
+   cross_fact['status'] == 'needs-review' &&
+     cross_fact['reason'] == 'inactive-date-relationship')
+ok('inactive-relationship rejection never fabricates field_map entry',
    !patched['field_map'].key?('SAFETY_INCIDENTS.PY Incident Count'))
+
+activated = R.date_relationship(
+  'SAFETY_INCIDENTS', { 'table' => 'DATE_DIM', 'column' => 'Date' },
+  R.relationships_from_model(MODEL),
+  [{ 'expression' => 'CALCULATE([Incident Count], USERELATIONSHIP(SAFETY_INCIDENTS[Date], DATE_DIM[Date]))' }]
+)
+ok('explicit USERELATIONSHIP admits an inactive model edge',
+   activated['active'] == true && activated['mode'] == 'dax-userelationship')
+missing_relationship = R.date_relationship(
+  'SALES', { 'table' => 'DATE_DIM', 'column' => 'Date' }, nil, []
+)
+ok('missing relationship metadata fails closed',
+   missing_relationship['active'] == false &&
+     missing_relationship['reason'] == 'relationship-metadata-missing')
 
 ambiguous = routes.fetch('SALES.Ambiguous Revenue PY')
 ok('multiple source date semantics are rejected', ambiguous['status'] == 'needs-review' &&
@@ -338,7 +364,8 @@ _rerun_artifact, rerun_patched = R.route_all(
   measures: measures,
   dm_spec: DM_SPEC,
   dm_readback: DM_READBACK,
-  master_map: patched
+  master_map: patched,
+  relationships: R.relationships_from_model(MODEL)
 )
 ok('co-routed alternatives dedupe across routes and reruns',
    rerun_patched.dig('field_map', 'SALES.Revenue', 'alts')
@@ -362,7 +389,8 @@ _production_artifact, production_patched = R.route_all(
   measures: measures,
   dm_spec: DM_SPEC,
   dm_readback: DM_READBACK,
-  master_map: production_map
+  master_map: production_map,
+  relationships: R.relationships_from_model(MODEL)
 )
 ok('supported routes patch the production fields map',
    production_patched.dig('fields', 'SALES.Revenue PY', 'formula') == sply['formula'] &&
@@ -390,7 +418,8 @@ live_artifact, live_patched = R.route_all(
   measures: measures,
   dm_spec: live_dm,
   dm_readback: DM_READBACK,
-  master_map: MASTER_MAP
+  master_map: MASTER_MAP,
+  relationships: R.relationships_from_model(MODEL)
 )
 live_routes = live_artifact['routes'].to_h { |route| [route.dig('source_measure', 'query_ref'), route] }
 ok('denormalized Date leaf routes source DATE_DIM[Date] SPLY/YTD',
@@ -409,7 +438,8 @@ wrong_artifact, = R.route_all(
   measures: R.measures_from_model(wrong_date_model),
   dm_spec: live_dm,
   dm_readback: DM_READBACK,
-  master_map: MASTER_MAP
+  master_map: MASTER_MAP,
+  relationships: R.relationships_from_model(wrong_date_model)
 )
 wrong_route = wrong_artifact['routes'].find do |route|
   route.dig('source_measure', 'query_ref') == 'SALES.Revenue PY'

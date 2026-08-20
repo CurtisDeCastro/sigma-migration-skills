@@ -92,7 +92,7 @@ module PbiTimeIntelRoute
   # and supplies authoritative posted IDs. `master_map` must contain `masters`
   # and `fields` (legacy fixtures may use `field_map`), as consumed by
   # build-workbook-from-pbir.rb.
-  def route_all(measures:, dm_spec:, master_map:, dm_readback: nil)
+  def route_all(measures:, dm_spec:, master_map:, dm_readback: nil, relationships: nil)
     normalized = normalize_measures(measures)
     measure_index = build_measure_index(normalized)
     elements = extract_elements(dm_spec)
@@ -116,7 +116,8 @@ module PbiTimeIntelRoute
         shape: shape,
         measure_index: measure_index,
         candidates: candidates,
-        masters: patched['masters']
+        masters: patched['masters'],
+        relationships: relationships
       )
     end
     routes.sort_by! { |r| norm(r.dig('source_measure', 'query_ref')) }
@@ -167,6 +168,11 @@ module PbiTimeIntelRoute
     end
   end
 
+  def relationships_from_model(document)
+    model = locate_model(document)
+    Array(model && model['relationships'])
+  end
+
   # Stable JSON is used by the CLI and tests. Sorting object keys also makes the
   # bytes independent of input hash insertion order.
   def deterministic_json(object)
@@ -177,7 +183,7 @@ module PbiTimeIntelRoute
     File.write(path, deterministic_json(object))
   end
 
-  def route_one(measure:, shape:, measure_index:, candidates:, masters:)
+  def route_one(measure:, shape:, measure_index:, candidates:, masters:, relationships:)
     query_ref = "#{measure['table']}.#{measure['name']}"
     expanded = dependency_closure(measure, measure_index)
     base = route_record(measure, shape)
@@ -191,6 +197,15 @@ module PbiTimeIntelRoute
 
     fact_result = source_fact(measure, expanded, date_refs)
     return needs_review(base, fact_result['reason']) unless fact_result['fact']
+
+    if date_refs.first
+      relationship = date_relationship(
+        fact_result['fact'], date_refs.first, relationships, expanded
+      )
+      return needs_review(base, relationship['reason']) unless relationship['active']
+
+      base['date_relationship'] = relationship
+    end
 
     same_fact = candidates.select { |candidate| same_fact?(fact_result['fact'], candidate['fact']) }
     if same_fact.empty?
@@ -624,6 +639,57 @@ module PbiTimeIntelRoute
       'role' => role,
       'action' => action,
       'target' => alt
+    }
+  end
+
+  # A DAX date function only filters the fact when the semantic model has an
+  # active relationship to that date table, or the measure explicitly activates
+  # an inactive edge with USERELATIONSHIP. Synthesizing DateLookback against the
+  # fact's physical date when Power BI intentionally leaves the relationship
+  # inactive changes semantics.
+  def date_relationship(fact, date_ref, relationships, expanded)
+    date_table = date_ref['table'].to_s
+    if same_fact?(fact, date_table)
+      return {
+        'active' => true, 'mode' => 'same-table',
+        'fact' => fact, 'date_table' => date_table
+      }
+    end
+    return { 'active' => false, 'reason' => 'relationship-metadata-missing' } if relationships.nil?
+
+    direct = Array(relationships).select do |relationship|
+      endpoints = [relationship['fromTable'], relationship['toTable']]
+      endpoints.any? { |table| same_fact?(table, fact) } &&
+        endpoints.any? { |table| same_fact?(table, date_table) }
+    end
+    active = direct.find { |relationship| relationship['isActive'] != false }
+    if active
+      return {
+        'active' => true, 'mode' => 'active-model-relationship',
+        'fact' => fact, 'date_table' => date_table,
+        'relationship' => active['name']
+      }
+    end
+
+    activated = expanded.any? do |measure|
+      function_arguments(measure['expression'], 'USERELATIONSHIP').any? do |arguments|
+        tables = arguments.flat_map { |argument| column_references(argument) }
+                          .map { |ref| ref['table'] }
+        tables.any? { |table| same_fact?(table, fact) } &&
+          tables.any? { |table| same_fact?(table, date_table) }
+      end
+    end
+    if activated && direct.any?
+      return {
+        'active' => true, 'mode' => 'dax-userelationship',
+        'fact' => fact, 'date_table' => date_table,
+        'relationship' => direct.first['name']
+      }
+    end
+
+    {
+      'active' => false,
+      'reason' => direct.empty? ? 'missing-date-relationship' : 'inactive-date-relationship'
     }
   end
 

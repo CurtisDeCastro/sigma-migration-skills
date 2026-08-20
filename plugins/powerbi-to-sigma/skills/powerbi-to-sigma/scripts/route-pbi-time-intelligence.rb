@@ -48,6 +48,8 @@ begin
     input = JSON.parse(File.read(options[:input]))
     model_document = input['model'] || input['tmsl']
     measures = input['measures'] || PbiTimeIntelRoute.measures_from_model(model_document)
+    relationships = input['relationships'] ||
+                    PbiTimeIntelRoute.relationships_from_model(model_document)
     dm_spec = input.fetch('dm_spec')
     dm_readback = input['dm_readback']
     master_map = input.fetch('master_map')
@@ -55,7 +57,9 @@ begin
     missing = %i[model dm_spec master_map].reject { |key| options[key] }
     raise OptionParser::MissingArgument, missing.map { |key| "--#{key.to_s.tr('_', '-')}" }.join(', ') unless missing.empty?
 
-    measures = PbiTimeIntelRoute.measures_from_model(JSON.parse(File.read(options[:model])))
+    model_document = JSON.parse(File.read(options[:model]))
+    measures = PbiTimeIntelRoute.measures_from_model(model_document)
+    relationships = PbiTimeIntelRoute.relationships_from_model(model_document)
     dm_spec = JSON.parse(File.read(options[:dm_spec]))
     dm_readback = JSON.parse(File.read(options[:dm_readback])) if options[:dm_readback]
     master_map = JSON.parse(File.read(options[:master_map]))
@@ -65,7 +69,8 @@ begin
     measures: measures,
     dm_spec: dm_spec,
     dm_readback: dm_readback,
-    master_map: master_map
+    master_map: master_map,
+    relationships: relationships
   )
   PbiTimeIntelRoute.write_json(options[:out], artifact)
   PbiTimeIntelRoute.write_json(options[:patched_master_map], patched) if options[:patched_master_map]
