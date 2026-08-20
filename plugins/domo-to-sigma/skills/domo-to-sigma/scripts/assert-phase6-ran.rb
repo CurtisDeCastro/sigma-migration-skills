@@ -3,6 +3,12 @@
 # The subagent MUST run this script before declaring GREEN. It checks seven
 # independent things — failing ANY of them blocks the GREEN declaration:
 #
+#   0. Pre-POST render integrity — when the workdir carries a local workbook
+#      code-rep candidate (wb-spec.json, workbook-spec.json, then
+#      wb-readback.json), every chart/KPI/table/pivot/crosstab must have a
+#      usable data binding. Evidence is always written to
+#      blank-risk-elements.json. No local candidate → stated SKIP so legacy
+#      live-only runs remain valid.
 #   1. Phase 6 ran (parity-final.json exists, status=PASS, pass-rate met)
 #      → beads-sigma-4pm. Raw-mode: when the source tool is unreachable,
 #      verify-warehouse.rb writes parity-final.json with
@@ -431,6 +437,10 @@
 #      the ledger waiver IS the sanctioned escape (join-plan/LOD doctrine).
 #      No census file at all → stated SKIP (back-compat: builder predates the
 #      census or ran without --meta; non-adopting converters).
+#  32  Pre-POST render-integrity lint failed — a local workbook code-rep
+#      candidate is unreadable/invalid, or one or more chart/KPI/table/pivot/
+#      crosstab elements has no usable data binding. Inspect
+#      <workdir>/blank-risk-elements.json, fix the local spec, then POST.
 #
 # ANCHORS-ORACLE substitution (charts_total==0, exit 2): when every worksheet is
 # dashboard-embedded (no exportable view CSVs), the anchors oracle may stand in
@@ -472,6 +482,7 @@ require 'uri'
 require 'optparse'
 require 'rbconfig'
 require 'digest'
+require_relative 'lint-render-integrity'
 
 # Degradation ledger (PLAN-v3 PR-14) — vendored at scripts/lib/ in adopting
 # plugins; the canonical checkout resolves it from shared/lib. A checkout
@@ -595,7 +606,7 @@ EXIT_GATE_MAP = {
   9 => '7', 10 => '8', 11 => '9', 13 => '8b', 14 => '8c', 15 => '8d',
   16 => '11', 17 => '12', 18 => '13', 19 => 'waiver-budget', 20 => '14', 21 => '7b',
   22 => '15', 23 => '16', 24 => '17', 25 => '18', 26 => '19', 27 => '20', 28 => '21',
-  29 => '8e', 30 => '4b', 31 => '7c'
+  29 => '8e', 30 => '4b', 31 => '7c', 32 => 'render-integrity'
 }.freeze
 # Primary raw-evidence artifact per gate (workdir-relative) — the punch-list
 # pointer; gates without a stable artifact just omit the field.
@@ -610,6 +621,7 @@ GATE_EVIDENCE_PATHS = {
   '14' => 'visual-similarity.json', '15' => 'manual-residues.json',
   '16' => 'join-plan.json', '17' => 'lod-audit.json', '18' => 'ground-truth-plan.json',
   '19' => 'agg-semantics.json', '20' => 'semantic-edits.json', '21' => 'png-read.json',
+  'render-integrity' => 'blank-risk-elements.json',
   'waiver-budget' => 'waivers.json'
 }.freeze
 # The version-keyed base identity for this run's evidence: workbook id (flag /
@@ -1078,6 +1090,51 @@ end
 # Gate evaluation begins HERE — exits 1–3 are gate-1 verdicts from now on
 # (see the at_exit recorder's A10 guard above).
 gate_context_started = true
+
+# ---------------------------------------------------------------------------
+# Gate 0 — local pre-POST render integrity (exit 32)
+# Prefer the authored spec, then its conventional alternate name, then the
+# post-POST readback. This gate is intentionally conditional on a LOCAL
+# candidate: older live-only converter runs never retained one, and their
+# existing live gates remain authoritative. When a candidate exists there is
+# no waiver — a data element with no binding is a deterministic blank-render
+# risk and must be fixed before another POST.
+# ---------------------------------------------------------------------------
+render_spec_path = %w[wb-spec.json workbook-spec.json wb-readback.json]
+                   .map { |name| File.join(opts[:tab], name) }
+                   .find { |path| File.exist?(path) }
+render_evidence_path = File.join(opts[:tab], 'blank-risk-elements.json')
+if render_spec_path
+  begin
+    render_report = RenderIntegrity.lint_file(render_spec_path, out_path: render_evidence_path)
+  rescue RenderIntegrity::InputError => e
+    begin
+      RenderIntegrity.write_error_report(render_spec_path, render_evidence_path, e.message)
+    rescue RenderIntegrity::InputError => write_error
+      warn "[FAIL] render-integrity gate could not record evidence: #{write_error.message}"
+    end
+    warn "[FAIL] render-integrity gate: #{e.message}"
+    warn "       Fix #{render_spec_path}; evidence: #{render_evidence_path}"
+    exit 32
+  end
+
+  if render_report['status'] == 'FAIL'
+    warn "[FAIL] render-integrity gate: #{render_report['blank_risk_count']} of " \
+         "#{render_report['elements_checked']} data element(s) have no usable data bindings:"
+    render_report['elements'].each do |element|
+      warn "         - #{element['id']} (#{element['name'].inspect}, #{element['kind']}): " \
+           "#{element['reasons'].join('; ')}"
+    end
+    warn "       Fix #{render_spec_path} before POST; evidence: #{render_evidence_path}"
+    exit 32
+  end
+
+  puts "[OK] render-integrity gate: #{render_report['elements_checked']} data element(s) checked in " \
+       "#{File.basename(render_spec_path)}; 0 blank risks (evidence: blank-risk-elements.json)"
+else
+  puts '[SKIP] render-integrity gate: no local wb-spec.json, workbook-spec.json, or wb-readback.json candidate; ' \
+       'legacy live-only run preserved'
+end
 
 if opts[:skip_parity]
   # CONDITIONAL waiver: --skip-parity-gate is rejected unless the anchors

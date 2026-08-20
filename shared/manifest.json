@@ -1208,6 +1208,58 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/test-columns-pagination.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/test-columns-pagination.rb"
       ]
+    },
+    {
+      "canonical": "shared/scripts/png_health.py",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/png_health.py",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/png_health.py",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/png_health.py",
+        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/png_health.py",
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/png_health.py",
+        "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/png_health.py",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/png_health.py",
+        "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/png_health.py",
+        "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/png_health.py",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/png_health.py",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/png_health.py"
+      ]
+    },
+    {
+      "canonical": "shared/scripts/lint-render-integrity.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/microstrategy-to-sigma/skills/microstrategy-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/quicksight-to-sigma/skills/quicksight-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lint-render-integrity.rb"
+      ]
+    },
+    {
+      "canonical": "shared/scripts/build-migration-report.rb",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/build-migration-report.rb",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/scripts/build-migration-report.rb",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/scripts/build-migration-report.rb",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/build-migration-report.rb",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/build-migration-report.rb"
+      ]
+    },
+    {
+      "canonical": "shared/refs/migration-report-format.md",
+      "targets": [
+        "plugins/tableau-to-sigma/skills/tableau-to-sigma/refs/migration-report-format.md",
+        "plugins/looker-to-sigma/skills/looker-to-sigma/refs/migration-report-format.md",
+        "plugins/powerbi-to-sigma/skills/powerbi-to-sigma/refs/migration-report-format.md",
+        "plugins/qlik-to-sigma/skills/qlik-to-sigma/refs/migration-report-format.md",
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/migration-report-format.md"
+      ]
     }
   ]
 }

@@ -148,6 +148,26 @@ end
 puts '== happy path: every file-driven gate satisfied, both live-endpoint gates waived =='
 scenario('all fixtures valid, live gates skipped -> exit 0', 0)
 
+puts '== pre-POST render-integrity gate (local-spec conditional, exit 32) =='
+scenario('local wb-spec.json has a blank chart -> exit 32', 32) do |dir|
+  write_json(dir, 'wb-spec.json',
+             'pages' => [{ 'id' => 'overview',
+                           'elements' => [{ 'id' => 'blank-chart', 'name' => 'Blank Chart',
+                                           'kind' => 'bar-chart' }] }])
+end
+Dir.mktmpdir('domo-p6') do |dir|
+  write_good_fixtures(dir)
+  write_json(dir, 'wb-spec.json',
+             'elements' => [{ 'id' => 'healthy-table', 'kind' => 'table',
+                              'source' => { 'elementId' => 'source-table' } }])
+  write_json(dir, 'workbook-spec.json',
+             'elements' => [{ 'id' => 'lower-priority-blank', 'kind' => 'chart' }])
+  code = run_gate(dir, *HAPPY_FLAGS)
+  evidence = JSON.parse(File.read(File.join(dir, 'blank-risk-elements.json')))
+  eq(code, 0, 'wb-spec.json takes priority over workbook-spec.json')
+  eq(File.basename(evidence['spec']), 'wb-spec.json', 'evidence records the selected spec candidate')
+end
+
 puts '== gate 1 (Phase 6 parity) =='
 scenario('no parity-final.json at all -> exit 1 (Phase 6 never ran)', 1) { |dir| File.delete(File.join(dir, 'parity-final.json')) }
 scenario('parity-final.json is malformed JSON -> exit 3', 3) { |dir| File.write(File.join(dir, 'parity-final.json'), '{not valid json') }
@@ -313,7 +333,8 @@ scenario('verified source kind (line) disagrees with the live readback (bar) -> 
   write_json(dir, 'wb-readback.json',
              'pages' => [{ 'id' => 'overview', 'name' => 'Overview' }],
              'elements' => [{ 'id' => 'sales-region', 'name' => 'Sales by Region',
-                              'kind' => 'bar-chart', 'visibleAsSource' => true }],
+                              'kind' => 'bar-chart', 'visibleAsSource' => true,
+                              'xAxis' => { 'columnId' => 'region' } }],
              'layout' => '<Page id="overview"><Element elementId="sales-region"/></Page>')
 end
 
