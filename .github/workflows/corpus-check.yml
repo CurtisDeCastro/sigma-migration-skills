@@ -38,6 +38,8 @@ jobs:
         # fails every `cmp` golden as an opaque byte offset.
         with:
           ruby-version: '3.3'
+      - name: Install offline image-analysis dependencies
+        run: python3 -m pip install --quiet pillow numpy
       - name: Validate every corpus case against its golden
         run: ./corpus/run-corpus.sh --check
       - name: Converter-default regression (issue #227 — vendored default, no silent dev-checkout)
@@ -77,6 +79,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install offline image-analysis dependencies
+        run: python -m pip install --quiet pillow numpy
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -408,7 +412,7 @@ jobs:
         # New offline test_*.py → add its path here.
         run: |
           set -uo pipefail
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet pyyaml pillow numpy
           tests=(
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_grid_fidelity.py
             plugins/looker-to-sigma/skills/looker-to-sigma/tests/test_looker_client.py
