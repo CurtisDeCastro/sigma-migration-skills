@@ -15,6 +15,14 @@ trap 'rm -rf "$TMP"' EXIT
 # cycles; the canonical fixture pins the clean path.
 node "$S/test-audit-lookml-readiness.mjs"
 
+# The Windows corpus job is a portability/path smoke and intentionally does not
+# install optional PyYAML. The Linux corpus and unit jobs run the full dashboard
+# parse/build/accounting path below.
+if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+  echo "     SKIP dashboard accounting smoke (PyYAML unavailable; readiness audit passed)"
+  exit 0
+fi
+
 node "$S/audit-lookml-readiness.mjs" \
   --lookml-dir "$FIXTURE" --explore order_fact \
   --out "$TMP/lookml-readiness.json" \
