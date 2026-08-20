@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end offline pin for converter-backed formula audit and complete
 # Tableau source-object reporting on a real corpus workbook.
-set -uo pipefail
+set -euo pipefail
 
 CASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$CASE_DIR/../../.." && pwd)"
@@ -25,9 +25,9 @@ a = d["formula_audit"]
 assert a["formulas"], "fixture calculations were not audited"
 assert sum(a["counts"].values()) == len(a["formulas"])
 assert all(ds["total"] == sum(ds["counts"].values()) for ds in a["datasources"])
-assert a["counts"]["chart_only"] > 0, a["counts"]
-assert any(row["name"] == "Converter-translated formulas requiring contextual verification"
-           and row["status"] == "hint" for row in d["detected_features"])
+assert a["counts"]["not_converted"] > 0, a["counts"]
+assert any(row["name"] == "Converter-refused or unmapped calculated fields"
+           and row["status"] == "unhandled" for row in d["detected_features"])
 PY
 
 cat >"$TMP/parity-final.json" <<'JSON'
