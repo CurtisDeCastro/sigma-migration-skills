@@ -1216,7 +1216,7 @@ def main():
                     f"synthesized {n_synth} cross-filter control(s) from chart dimensions "
                     f"(associative-model approximation; --synth-controls={a.synth_controls}): "
                     + ", ".join(labels[f] for f in ranked)
-                    + " — in-chart mark-click filtering remains a Sigma UI step (not spec-authorable)")
+                    + " - in-chart mark-click filtering remains a Sigma UI step (not spec-authorable)")
 
     # Base children owned by a trellis-container are emitted THROUGH the
     # container (one faceted element), never standalone.
