@@ -28,7 +28,12 @@ user-invocable: true
 
 ## Preflight the workbook spec before POST (mandatory)
 
-Before POSTing any workbook spec, run `ruby scripts/lib/preflight_lint.rb <spec.json>` — it exits 1 with a precise message on the two migration-killer bugs: a `table` with aggregate columns + dimensions but **no `groupings`** (renders raw detail rows), and a malformed `control` (missing `id`/`controlId`/`controlType` or nesting value fields under a `value` object instead of flat, a non-double-nested `source`, or a list control wired to neither `source` nor `filters` — a filters-only list control is valid). Fix every violation first — never POST past it, and **never conclude a feature is "unsupported" from an `Invalid kind` error** (it means the inner fields are wrong). Verified shapes: `sigma-workbooks` `controls.md` / `tables.md`.
+Before POSTing any workbook spec, run **both** validators:
+
+1. `ruby scripts/lib/preflight_lint.rb <spec.json>` catches grouping and control grammar failures.
+2. From the companion `sigma-workbooks` skill, run `./scripts/validate-spec.sh <absolute-spec-path>` to reject bare source-column self-references and list/segmented controls without a value-list `source`.
+
+The API accepts a filters-only list control, but the picker is empty: `filters` names what changes; `source` supplies the values a user can select. API acceptance is not a shipping criterion. Date-range controls are different and correctly use `filters` without a separate value-list source. Fix every violation first — never POST past it, and **never conclude a feature is "unsupported" from an `Invalid kind` error** (it means the inner fields are wrong). Verified shapes: `sigma-workbooks` `controls.md` / `tables.md`.
 
 ## Converter architecture (read if you know the other migration skills)
 
@@ -351,7 +356,11 @@ curl -s -X POST "$SIGMA_BASE_URL/v2/workbooks/spec" \
 # UNSCOUTED error column — spawn a gap-scout per the printed --gap-id (see
 # scripts/gap-scout.md), re-run the gate, and only proceed when it exits 0.
 python3 scripts/scout-gate-readback.py --workbook-id <workbookId> --workdir <out-dir>
-# Read back and confirm document.layout + flat document.elements survived.
+# Read back, validate, and confirm document.layout + flat document.elements survived.
+curl -s "$SIGMA_BASE_URL/v2/workbooks/<workbookId>/spec" \
+  -H "Authorization: Bearer $SIGMA_API_TOKEN" > <out-dir>/workbook-readback.yaml
+# Run from the companion sigma-workbooks skill directory:
+./scripts/validate-spec.sh <absolute-out-dir>/workbook-readback.yaml
 # put-layout.rb is now a repair/reapply tool, not the normal create path:
 # ruby scripts/put-layout.rb --workbook <workbookId> --layout layout.xml
 ```

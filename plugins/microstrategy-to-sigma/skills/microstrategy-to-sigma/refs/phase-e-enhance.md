@@ -188,7 +188,8 @@ trial-proven spec-unsupported): chart-as-filter (`useAsFilter` silently dropped
 on readback), pie percent labels (`valueFormat:'percent'` silently dropped).
 DM-metric promotion is not an enhancement candidate: the normal workbook build
 already binds formula-equivalent, readback-confirmed metrics through
-`[Metrics/<metric name>]`. `[Master/<metric>]` is an invalid column lookup, not
+`[Metrics/<metric name>]`. `[Orders/<metric>]` (where `Orders` is the default
+join-element name) is an invalid column lookup, not
 evidence that data-model metrics are unavailable.
 
 ### Prerequisites for apply
