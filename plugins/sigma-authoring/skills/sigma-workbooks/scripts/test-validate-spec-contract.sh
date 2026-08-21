@@ -66,12 +66,15 @@ expect_fail() {
     printf 'FAIL: expected failure: %s\n' "$label" >&2
     return 1
   fi
-  if ! rg -F "$needle" "$TMP/out" >/dev/null; then
-    printf 'FAIL: wrong diagnostic for %s\n' "$label" >&2
-    printf '%s\n' '--- output ---' >&2
-    printf '%s\n' "$( < "$TMP/out" )" >&2
-    return 1
-  fi
+  case "$(< "$TMP/out")" in
+    *"$needle"*) ;;
+    *)
+      printf 'FAIL: wrong diagnostic for %s\n' "$label" >&2
+      printf '%s\n' '--- output ---' >&2
+      printf '%s\n' "$( < "$TMP/out" )" >&2
+      return 1
+      ;;
+  esac
   printf 'PASS: %s\n' "$label"
 }
 
