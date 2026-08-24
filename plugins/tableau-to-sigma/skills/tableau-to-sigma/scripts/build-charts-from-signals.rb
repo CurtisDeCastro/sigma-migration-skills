@@ -2933,8 +2933,12 @@ def build_pivot_element(z, meta, mmap, opts, warnings, data_elements = [])
                   "[#{plan['control_id']}] (#{psw['cases'].size} option(s))#{drp}: #{plan['sibling_form'].gsub(/\s+/, ' ')[0..100]}"
       next
     end
+    uv_calc_names = [uv['name'], uv['col']['name'], uv['raw']].compact.map do |name|
+      name.to_s.gsub(/^\[|\]$/, '').sub(/\A.*\.\[([^\]]+)\]\z/, '\1').strip
+    end
     ws_calc = (z['calculations'] || []).find do |c|
-      c['name'].to_s.gsub(/^\[|\]$/, '').strip.casecmp?(uv['name'])
+      calc_names = [c['name'], c['caption']].compact.map { |name| name.to_s.gsub(/^\[|\]$/, '').strip }
+      calc_names.any? { |calc_name| uv_calc_names.any? { |candidate| calc_name.casecmp?(candidate) } }
     end
     next unless ws_calc
     plan = translate_window_calc(ws_calc['formula'], mmap, meta['columns_by_guid'] || {})
