@@ -273,8 +273,16 @@ content_pages = [wb_ids['pages'][1]].compact if content_pages.empty?
 abort('no overview page (non-Data) in wb-ids') if content_pages.empty?
 
 page_for_dash = {}
+normalize_page_name = lambda do |value|
+  value.to_s.sub(/\A\[synthetic\]\s*/i, '').downcase.gsub(/[^a-z0-9]+/, ' ').strip
+end
 dash_layout.each do |d|
   pg = content_pages.find { |p| p['name'] == d['dashboard'] }
+  if pg.nil?
+    wanted = normalize_page_name.call(d['dashboard'])
+    candidates = content_pages.select { |page| normalize_page_name.call(page['name']) == wanted }
+    pg = candidates.first if candidates.one?
+  end
   pg ||= content_pages.first if dash_layout.length == 1
   if pg.nil?
     warn "WARN: no Sigma page matched dashboard #{d['dashboard'].inspect} — dashboard skipped from layout"

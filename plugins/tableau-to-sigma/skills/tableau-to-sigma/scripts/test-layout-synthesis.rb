@@ -529,6 +529,15 @@ end
 # 6. A reused workbook-local data pipeline lives on hidden pages that have no
 # Tableau dashboard zones. Preserve those pages/elements while rebuilding the
 # visible dashboard layout.
+puts '-- synthetic worksheet page matching'
+Dir.mktmpdir do |d|
+  synthetic = JSON.parse(JSON.generate(DL_TITLE))
+  synthetic[0]['dashboard'] = '[synthetic] Overview'
+  xml, _census, _log, = build(synthetic, WB_TITLE, d)
+  ok('synthetic parser page matches worksheet-named Sigma page',
+     !xml.nil? && xml.include?('id="page-overview"'))
+end
+
 puts '-- hidden pipeline page preservation'
 dl_pipeline = [{
   'dashboard' => 'Overview',
