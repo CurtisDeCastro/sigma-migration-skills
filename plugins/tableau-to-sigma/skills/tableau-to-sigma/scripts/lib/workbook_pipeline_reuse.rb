@@ -13,7 +13,16 @@ module WorkbookPipelineReuse
     raise ArgumentError, 'pipeline reuse spec must be an object' unless spec.is_a?(Hash)
     raise ArgumentError, 'pipeline reuse plan must be an object' unless plan.is_a?(Hash)
 
-    target = WorkbookCode.legacy_view(WorkbookCode.canonicalize(spec))
+    # The orchestrator calls this after per-page-master splitting while the spec
+    # still carries explicit pages[].elements assignments. Preserve that view:
+    # canonicalizing first can retain a stale pre-split layout and lose which
+    # content page references which detached Data-page master.
+    target =
+      if Array(spec['pages']).any? { |page| page.is_a?(Hash) && page.key?('elements') }
+        deep_copy(spec)
+      else
+        WorkbookCode.legacy_view(WorkbookCode.canonicalize(spec))
+      end
     donor_elements = WorkbookCode.elements(donor_spec).each_with_object({}) do |element, index|
       index[element['id']] = deep_copy(element) if element['id']
     end
