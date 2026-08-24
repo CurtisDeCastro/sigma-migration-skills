@@ -33,8 +33,16 @@ cases = panel['cases'].map do |definition|
   baseline_parity = read.call(baseline_dir, 'parity-final.json')
   candidate_parity = read.call(candidate_dir, 'parity-final.json')
   reconcile = read.call(candidate_dir, 'compile-plan-reconcile.json')
-  unless baseline_result || candidate_result || baseline_parity || candidate_parity
-    next { 'id' => definition['id'], 'status' => 'missing' }
+  baseline_present = baseline_result || baseline_parity
+  candidate_present = candidate_result || candidate_parity
+  unless baseline_present && candidate_present
+    next {
+      'id' => definition['id'], 'status' => 'missing',
+      'missing_sides' => [
+        ('baseline' unless baseline_present),
+        ('candidate' unless candidate_present)
+      ].compact
+    }
   end
   baseline_verdict = baseline_result&.dig('verdict') || 'RED'
   candidate_verdict = candidate_result&.dig('verdict') || 'RED'
