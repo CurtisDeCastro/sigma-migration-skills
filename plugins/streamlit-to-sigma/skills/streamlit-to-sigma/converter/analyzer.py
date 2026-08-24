@@ -42,6 +42,19 @@ SUPPORTED_PANDAS_OPS = {
     "value_counts",
 }
 
+# Recognized operations that the foundation workbook builder does not yet lower
+# with full source semantics. Detection is useful, but these must stay loud.
+UNLOWERED_PANDAS_OPS = {
+    "cumsum",
+    "drop_duplicates",
+    "head",
+    "merge",
+    "pivot_table",
+    "sort_values",
+    "to_period",
+    "value_counts",
+}
+
 CONTROL_CALLS = {
     "selectbox": "list",
     "multiselect": "list",
@@ -619,6 +632,15 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     "count": count,
                 }
             )
+        is_streamlit_call = (
+            path == "st"
+            or path.startswith("st.")
+            or root_name in self.columns
+        )
+        is_known_wrapper = leaf in {"render_chart", "render_filter", "render_kpi"}
+        is_component = "component" in path.lower() or leaf == "declare_component"
+        if not is_streamlit_call and not is_known_wrapper and not is_component:
+            return
 
         if "session_state" in path or "session_state" in unparse(call):
             self.add_gap(
@@ -854,9 +876,19 @@ def query_from_function(
     for call in (item for item in ast.walk(function) if isinstance(item, ast.Call)):
         if call_path(call.func).split(".")[-1] != "query" or not call.args:
             continue
+        if isinstance(call.func, ast.Attribute):
+            receiver = call.func.value
+            receiver_name = receiver.id if isinstance(receiver, ast.Name) else ""
+            if (
+                receiver_name.lower()
+                not in {"conn", "connection", "session", "snowflake"}
+                and "connection" not in receiver_name.lower()
+            ):
+                continue
         sql, dynamic = extract_string(call.args[0], assignments)
+        module = slug(str(path.relative_to(root).with_suffix("")))
         return Query(
-            f"query-{slug(function.name)}",
+            f"query-{module}-{slug(function.name)}",
             function.name,
             sql,
             infer_sql_columns(sql),
@@ -900,14 +932,19 @@ def analyze_project(source: str | Path) -> ProjectIR:
         except SyntaxError as error:
             raise SyntaxError(f"{path}: {error}") from error
 
-    query_functions: dict[str, Query] = {}
+    query_candidates: dict[str, list[Query]] = {}
     for path, tree in trees.items():
         for function in (
             item for item in tree.body if isinstance(item, ast.FunctionDef)
         ):
             query = query_from_function(path, root, function)
             if query:
-                query_functions[function.name] = query
+                query_candidates.setdefault(function.name, []).append(query)
+    query_functions = {
+        name: queries[0]
+        for name, queries in query_candidates.items()
+        if len(queries) == 1
+    }
 
     navigation_pages = extract_navigation_pages(trees[main_path], root)
     if navigation_pages:
@@ -934,7 +971,27 @@ def analyze_project(source: str | Path) -> ProjectIR:
             "sourceFiles": [str(path.relative_to(root)) for path in files],
         },
     )
-    ir.queries = list(query_functions.values())
+    ir.queries = [
+        query
+        for queries in query_candidates.values()
+        for query in queries
+    ]
+    for function, queries in query_candidates.items():
+        if len(queries) <= 1:
+            continue
+        for query in queries:
+            ir.gaps.append(
+                Gap(
+                    "ambiguous-query-function",
+                    "blocking",
+                    (
+                        f"Multiple modules define `{function}`; import/call-site "
+                        "lineage must be disambiguated."
+                    ),
+                    function,
+                    query.provenance,
+                )
+            )
     for query in ir.queries:
         if query.dynamic:
             ir.gaps.append(
@@ -995,6 +1052,24 @@ def analyze_project(source: str | Path) -> ProjectIR:
                 )
 
     for dataframe in ir.dataframes:
+        unlowered = [
+            operation
+            for operation in dataframe.operations
+            if operation in UNLOWERED_PANDAS_OPS
+        ]
+        if unlowered:
+            ir.gaps.append(
+                Gap(
+                    "dataframe-restructure-required",
+                    "restructure",
+                    (
+                        f"`{dataframe.name}` uses recognized operations not yet "
+                        f"lowered by the foundation builder: {', '.join(unlowered)}"
+                    ),
+                    "pandas",
+                    dataframe.provenance,
+                )
+            )
         unsupported = [
             operation
             for operation in dataframe.operations

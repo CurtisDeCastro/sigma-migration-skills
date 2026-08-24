@@ -32,12 +32,18 @@ def assess(path: Path) -> dict:
         + len(ir.controls)
         + len(ir.elements)
         + sum(WEIGHTS.get(gap.severity, 3) for gap in ir.gaps)
+        + len(ir.security) * 8
+    )
+    security_blocking = any(
+        finding.code == "warehouse-write" for finding in ir.security
     )
     readiness = (
         "blocked"
-        if any(gap.severity == "blocking" for gap in ir.gaps)
+        if security_blocking
+        or any(gap.severity == "blocking" for gap in ir.gaps)
         else "redesign"
-        if any(gap.severity in {"plugin-candidate", "restructure"} for gap in ir.gaps)
+        if ir.security
+        or any(gap.severity in {"plugin-candidate", "restructure"} for gap in ir.gaps)
         else "direct"
     )
     return {

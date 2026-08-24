@@ -25,15 +25,14 @@ converted”; unresolved lineage always becomes a gap.
 
 | Streamlit | Sigma |
 |---|---|
-| selectbox | single list |
-| multiselect | multiple list |
-| radio | segmented |
-| date-input tuple | date range |
-| slider | slider |
-| number input | number |
-| checkbox | checkbox |
-| toggle | switch |
-| text input/area | text/text-area |
+| selectbox | single list when dataframe column lineage resolves |
+| multiselect | multiple list when dataframe column lineage resolves |
+| radio | segmented when dataframe column lineage resolves |
+| date-input tuple | detected; predicate/column binding still requires review |
+| slider/range slider | detected; bounds and predicate binding not yet lowered |
+| number input | detected; comparator/predicate binding not yet lowered |
+| checkbox/toggle | detected; boolean predicate binding not yet lowered |
+| text input/area | detected; match mode/predicate binding not yet lowered |
 
 The analyzer must prove the source dataframe and target column. Otherwise the
 control is omitted with `control-lineage-unresolved`.
@@ -55,7 +54,10 @@ drop_duplicates / dropna / unique / value_counts
 ```
 
 The current formula translator covers common aggregate/arithmetic/conditional
-KPI expressions. It does not execute Pandas or infer arbitrary Python.
+KPI expressions and simple group-by chart intent. `merge`, `pivot_table`,
+`cumsum`, `head`, `drop_duplicates`, `to_period`, `value_counts`, and
+source-specific sorting remain loud `dataframe-restructure-required` gaps. It
+does not execute Pandas or infer arbitrary Python.
 
 ## Wrapper/config expansion
 

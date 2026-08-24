@@ -18,16 +18,23 @@ if str(LIB) not in sys.path:
 from code_rep import set_theme, wrap  # noqa: E402
 
 
-def display_name(value: str) -> str:
-    return " ".join(
-        word.capitalize()
-        for word in re.split(r"[_\s]+", value.strip())
-        if word
-    )
-
-
 def column_id(source_id: str, column: str) -> str:
     return f"{source_id}-col-{slug(column)[:32]}"
+
+
+def canonical_column(columns: list[str], requested: str) -> str:
+    for column in columns:
+        if column == requested:
+            return column
+    requested_folded = requested.casefold()
+    for column in columns:
+        if column.casefold() == requested_folded:
+            return column
+    requested_slug = slug(requested)
+    for column in columns:
+        if slug(column) == requested_slug:
+            return column
+    return requested
 
 
 def format_for(label: str) -> dict[str, str] | None:
@@ -92,7 +99,7 @@ class FormulaTranslator:
         return self.node(node) if node is not None else "Count()"
 
     def ref(self, name: str) -> str:
-        return f"[{self.source_name}/{display_name(name)}]"
+        return f"[{self.source_name}/{canonical_column(self.source_columns, name)}]"
 
     def node(self, node: ast.AST | None) -> str:
         if node is None:
@@ -223,7 +230,9 @@ def root_query_id(
         for query in ir.queries:
             if lowered in query.function.lower() or query.function.lower() in lowered:
                 return query.id
-    return next(iter(query_by_id), None)
+    if len(query_by_id) == 1:
+        return next(iter(query_by_id))
+    return None
 
 
 def workbook_source(
@@ -323,7 +332,12 @@ def build_workbook(
                 }
             )
             continue
-        source_column_id = column_id(source["id"], control.column)
+        query = query_by_id.get(query_id)
+        source_column_name = canonical_column(
+            list(query.columns) if query else [],
+            control.column,
+        )
+        source_column_id = column_id(source["id"], source_column_name)
         item = {
             "id": control.id,
             "kind": "control",
@@ -428,21 +442,29 @@ def build_workbook(
             chart_columns = []
             x_id = f"{item.id}-x"
             if x:
+                x_name = canonical_column(
+                    list(query.columns) if query else [],
+                    str(x),
+                )
                 chart_columns.append(
                     {
                         "id": x_id,
-                        "name": str(x),
-                        "formula": f"[{source_name}/{display_name(str(x))}]",
+                        "name": x_name,
+                        "formula": f"[{source_name}/{x_name}]",
                     }
                 )
             y_ids = []
             for index, y_name in enumerate(y_values, start=1):
+                canonical_y = canonical_column(
+                    list(query.columns) if query else [],
+                    y_name,
+                )
                 y_id = f"{item.id}-y-{index}"
                 y_ids.append(y_id)
                 column = {
                     "id": y_id,
-                    "name": y_name,
-                    "formula": f"Sum([{source_name}/{display_name(y_name)}])",
+                    "name": canonical_y,
+                    "formula": f"Sum([{source_name}/{canonical_y}])",
                 }
                 fmt = format_for(y_name)
                 if fmt:
@@ -482,7 +504,7 @@ def build_workbook(
                 {
                     "id": f"{item.id}-col-{index}",
                     "name": column_name,
-                    "formula": f"[{source_name}/{display_name(column_name)}]",
+                    "formula": f"[{source_name}/{column_name}]",
                 }
                 for index, column_name in enumerate(names, start=1)
             ]

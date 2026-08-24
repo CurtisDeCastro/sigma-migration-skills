@@ -116,7 +116,7 @@ For an estate/shortlist, use the sibling `streamlit-assessment` skill.
 - aliased `streamlit` calls and local page modules
 - cached `conn.query()` loader functions
 - explicit SQL output aliases
-- dataframe roots and supported Pandas operations
+- dataframe roots, recognized Pandas operations, and unlowered-operation gaps
 - controls, metrics, charts, tables, text, tabs, columns, popovers/status
 - wrapper calls and literal KPI/chart configuration loops
 - source file/line provenance for every finding
@@ -153,7 +153,8 @@ Current mechanical translations include:
 - native/Plotly/Altair line, bar, area, scatter intent → native Sigma chart
   when x/y bindings are known
 - dataframe/table → table
-- selectbox/multiselect/date/number/boolean controls
+- selectbox/multiselect controls when dataframe-column lineage resolves
+- detection (not silent conversion) for date/number/slider/boolean/text controls
 - `st.columns` → proportional grid
 - `st.tabs` → tabbed container
 - popover/status/expander contexts → native popover overlays
@@ -222,8 +223,8 @@ Then update `parity-final.json` and run:
 
 ```bash
 ruby scripts/assert-phase6-ran.rb \
-  --mission /tmp/project-migration/mission.json \
-  --parity /tmp/project-migration/parity-final.json
+  --workdir /tmp/project-migration \
+  --workbook-id <workbook-id>
 ```
 
 Compilation/readback alone is not parity.

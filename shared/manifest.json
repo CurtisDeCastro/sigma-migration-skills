@@ -198,7 +198,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/flip_gate.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/flip_gate.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/flip_gate.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/flip_gate.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/flip_gate.rb"
       ]
     },
     {
@@ -213,7 +214,8 @@
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/degradation_ledger.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/degradation_ledger.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/degradation_ledger.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/degradation_ledger.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/degradation_ledger.rb"
       ],
       "note": "W2.23's STANDING EXEMPTION for domo/hex was DISCHARGED 2026-08-05: this is the deliberate early-Wave-3 fan-out it called for — BOTH ledger sibs (this file + evidence_ledger.rb) added to domo and hex together, in one atomic commit, with domo's suites run — not a sync-tooling accident. Motivation: assert-phase6-ran.rb is vendored to 8 plugins but this lib was vendored to only 6, so on domo and hex the gate fell through to its legacy uncapped path (\"all gates pass — conversion may declare GREEN\") with no PR-14 verdict derivation — a GREEN there was strictly weaker than the same string from the 6 synced converters. Found while driving domo's 48-card cold run to a defensible gold verdict."
     },
@@ -1040,7 +1042,8 @@
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/lib/evidence_ledger.rb",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/evidence_ledger.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/evidence_ledger.rb",
-        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/evidence_ledger.rb"
+        "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/evidence_ledger.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/evidence_ledger.rb"
       ],
       "note": "W2.23's STANDING EXEMPTION (adjudicated R7/§3-A4) was DISCHARGED 2026-08-05 — this is the scheduled early-Wave-3 two-sibling fan-out it described: this file AND degradation_ledger.rb added to domo and hex together, one atomic commit, domo suites run. It is a deliberate runtime behavior change: domo's assert-phase6-ran.rb previously used its guarded inline ev_append fallback and now writes the real ledger."
     },
@@ -1091,7 +1094,8 @@
         "plugins/cognos-to-sigma/skills/cognos-to-sigma/scripts/visual-similarity.py",
         "plugins/gooddata-to-sigma/skills/gooddata-to-sigma/scripts/visual-similarity.py",
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/visual-similarity.py",
-        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/visual-similarity.py"
+        "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/visual-similarity.py",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/visual-similarity.py"
       ]
     },
     {
@@ -1266,7 +1270,8 @@
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/scripts/lint-render-integrity.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lint-render-integrity.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lint-render-integrity.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lint-render-integrity.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lint-render-integrity.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lint-render-integrity.rb"
       ]
     },
     {

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import re
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -68,6 +70,40 @@ class WorkbookTest(unittest.TestCase):
         element = model["pages"][0]["elements"][0]
         self.assertEqual(element["source"]["kind"], "sql")
         self.assertEqual(len(element["columns"]), 6)
+
+    def test_raw_snake_case_column_references_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    conn = st.connection("snowflake")
+                    def load_data():
+                        return conn.query(
+                            "SELECT order_date, net_revenue FROM db.s.orders"
+                        )
+                    df = load_data()
+                    revenue = df["net_revenue"].sum()
+                    st.metric("Revenue", revenue)
+                    st.line_chart(df, x="order_date", y="net_revenue")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            ir = analyze_project(root)
+            result = build_workbook(ir, "connection-1", "folder-1")
+            elements = workbook_elements(result["workbook"])
+            formulas = [
+                column["formula"]
+                for item in elements
+                for column in item.get("columns", [])
+            ]
+            source_name = next(
+                item["name"] for item in elements if item["kind"] == "table"
+            )
+            self.assertIn(f"[{source_name}/order_date]", formulas)
+            self.assertIn(f"Sum([{source_name}/net_revenue])", formulas)
 
 
 if __name__ == "__main__":

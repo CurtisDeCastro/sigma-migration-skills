@@ -50,6 +50,19 @@ class SigmaAPI:
             raise RuntimeError(
                 "SIGMA_BASE_URL, SIGMA_CLIENT_ID, and SIGMA_CLIENT_SECRET are required"
             )
+        parsed = urllib.parse.urlparse(self.base_url)
+        host = (parsed.hostname or "").lower()
+        trusted_domain = "sigma" + "computing.com"
+        if os.environ.get("SIGMA_ALLOW_INSECURE_BASE_URL") != "1":
+            if parsed.scheme != "https" or not (
+                host == trusted_domain
+                or host.endswith(f".{trusted_domain}")
+            ):
+                raise RuntimeError(
+                    "Refusing to transmit Sigma credentials: SIGMA_BASE_URL "
+                    "must be an HTTPS Sigma-managed host. Set "
+                    "SIGMA_ALLOW_INSECURE_BASE_URL=1 only for explicit dev use."
+                )
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         request = urllib.request.Request(
             f"{self.base_url}/v2/auth/token",
@@ -82,7 +95,31 @@ class SigmaAPI:
         try:
             with urllib.request.urlopen(request) as response:
                 content = response.read()
-                return json.loads(content) if content else {}
+                if not content:
+                    return {}
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError:
+                    try:
+                        import yaml  # type: ignore
+
+                        return yaml.safe_load(content.decode("utf-8"))
+                    except (ImportError, ValueError):
+                        # Create responses are shallow YAML maps; preserve ids
+                        # even when PyYAML is unavailable.
+                        result = {}
+                        for line in content.decode(
+                            "utf-8", errors="replace"
+                        ).splitlines():
+                            if ":" not in line or line.startswith((" ", "-")):
+                                continue
+                            key, value = line.split(":", 1)
+                            result[key.strip()] = value.strip().strip("\"'")
+                        if result:
+                            return result
+                        raise RuntimeError(
+                            f"Unable to parse Sigma response from {path}"
+                        )
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"{method} {path} failed ({error.code}): {detail}") from error
@@ -99,7 +136,7 @@ def resolve_folder(api: SigmaAPI, requested: str | None) -> str:
 def data_model_bindings(
     dm_spec: dict[str, Any],
     data_model_id: str,
-    query_functions: list[str],
+    queries: list[Any],
 ) -> dict[str, dict[str, Any]]:
     elements = [
         element
@@ -108,14 +145,28 @@ def data_model_bindings(
     ]
     by_name = {str(item.get("name", "")).lower(): item for item in elements}
     result = {}
-    for function in query_functions:
+    for query in queries:
+        function = query.function
         expected = function.replace("_", " ").title()
         element = by_name.get(expected.lower())
         if not element:
             raise RuntimeError(
                 f"Data model readback has no element matching query `{function}`"
             )
-        result[f"query-{re.sub(r'[^a-z0-9]+', '-', function.lower()).strip('-')}"] = {
+        available = {
+            str(column.get("name", "")).casefold()
+            for column in element.get("columns", [])
+        }
+        missing = [
+            column
+            for column in query.columns
+            if column.casefold() not in available
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Data model element `{expected}` is missing columns: {missing}"
+            )
+        result[query.id] = {
             "dataModelId": data_model_id,
             "elementId": element["id"],
             "name": element.get("name") or expected,
@@ -154,6 +205,7 @@ def main() -> int:
     )
     parser.add_argument("--dm-id", help="Existing DM id for --reuse-decision reuse")
     parser.add_argument("--allow-blocking-gaps", action="store_true")
+    parser.add_argument("--allow-conversion-warnings", action="store_true")
     parser.add_argument("--ack-security", action="store_true")
     args = parser.parse_args()
 
@@ -212,6 +264,27 @@ def main() -> int:
     )
     write_json(out / "dm-result.json", dm_result)
     write_json(out / "dm-spec.json", dm_result["dataModel"])
+    preflight_wb_result = build_workbook(
+        ir,
+        args.connection,
+        folder_id,
+        args.name,
+        "custom-sql",
+        {},
+    )
+    conversion_warnings = [
+        *dm_result.get("warnings", []),
+        *preflight_wb_result.get("warnings", []),
+    ]
+    write_json(out / "conversion-warnings.json", conversion_warnings)
+    if args.post and conversion_warnings and not args.allow_conversion_warnings:
+        print(
+            f"{len(conversion_warnings)} conversion warning(s) could cause "
+            "semantic loss; review conversion-warnings.json or pass "
+            "--allow-conversion-warnings with an explicit decision.",
+            file=sys.stderr,
+        )
+        return 11
 
     bindings: dict[str, dict[str, Any]] = {}
     data_model_id = None
@@ -225,7 +298,7 @@ def main() -> int:
         bindings = data_model_bindings(
             readback,
             data_model_id,
-            [query.function for query in ir.queries],
+            ir.queries,
         )
         source_mode = "data-model"
     elif args.post and args.reuse_decision == "reuse":
@@ -237,18 +310,35 @@ def main() -> int:
         bindings = data_model_bindings(
             readback,
             data_model_id,
-            [query.function for query in ir.queries],
+            ir.queries,
         )
         source_mode = "data-model"
 
-    wb_result = build_workbook(
-        ir,
-        args.connection,
-        folder_id,
-        args.name,
-        source_mode,
-        bindings,
+    wb_result = (
+        preflight_wb_result
+        if source_mode == "custom-sql"
+        else build_workbook(
+            ir,
+            args.connection,
+            folder_id,
+            args.name,
+            source_mode,
+            bindings,
+        )
     )
+    if (
+        args.post
+        and wb_result.get("warnings")
+        and not args.allow_conversion_warnings
+    ):
+        # This can differ from custom-SQL preflight when a reused DM does not
+        # expose the expected columns.
+        write_json(out / "conversion-warnings.json", wb_result["warnings"])
+        print(
+            "Data-model-bound workbook produced conversion warnings; posting stopped.",
+            file=sys.stderr,
+        )
+        return 11
     workbook = wb_result["workbook"]
     validate_layout(workbook)
     write_json(out / "workbook-result.json", wb_result)

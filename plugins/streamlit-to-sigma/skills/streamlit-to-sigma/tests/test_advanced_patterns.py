@@ -125,6 +125,57 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertEqual(charts[0].label, "Views Over Time")
             self.assertIn({"kind": "tab", "name": "Traffic"}, charts[0].context)
 
+    def test_duplicate_loaders_and_unlowered_pandas_stay_loud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "snowflake.yml",
+                """
+                definition_version: 2
+                entities:
+                  app:
+                    type: streamlit
+                    main_file: streamlit_app.py
+                    artifacts:
+                      - streamlit_app.py
+                      - lib/a.py
+                      - lib/b.py
+                """,
+            )
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import logging
+                import streamlit as st
+                from lib.a import load_data
+                logger = logging.getLogger(__name__)
+                df = load_data()
+                merged = df.merge(df, on="ID")
+                top = merged.sort_values("VALUE").head(10)
+                logger.info("not workbook text")
+                st.dataframe(top)
+                """,
+            )
+            for module, table in (("a", "A"), ("b", "B")):
+                self.write(
+                    root,
+                    f"lib/{module}.py",
+                    f"""
+                    def load_data():
+                        conn = get_connection()
+                        return conn.query("SELECT ID, VALUE FROM DB.S.{table}")
+                    """,
+                )
+            ir = analyze_project(root)
+            codes = {gap.code for gap in ir.gaps}
+            self.assertIn("ambiguous-query-function", codes)
+            self.assertIn("dataframe-restructure-required", codes)
+            self.assertFalse(
+                any(item.label == "not workbook text" for item in ir.elements)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
