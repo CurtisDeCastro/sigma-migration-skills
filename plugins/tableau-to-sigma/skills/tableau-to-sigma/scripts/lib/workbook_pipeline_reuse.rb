@@ -39,9 +39,14 @@ module WorkbookPipelineReuse
     existing_pages_by_id = target['pages'].to_h { |page| [page['id'], page] }
     pipeline_pages = Array(plan['pipeline_pages']).map do |page_plan|
       donor_page_elements = Array(page_plan['element_ids']).map { |id| deep_copy(donor_elements.fetch(id)) }
-      retained_elements = Array(existing_pages_by_id.dig(page_plan['id'], 'elements')).reject do |element|
-        requested_ids.include?(element['id'])
-      end
+      retained_elements =
+        if page_plan.fetch('retain_existing', true)
+          Array(existing_pages_by_id.dig(page_plan['id'], 'elements')).reject do |element|
+            requested_ids.include?(element['id'])
+          end
+        else
+          []
+        end
       {
         'id' => page_plan.fetch('id'),
         'name' => page_plan.fetch('name'),
@@ -52,6 +57,7 @@ module WorkbookPipelineReuse
     pipeline_page_ids = pipeline_pages.map { |page| page['id'] }
     content_pages = target['pages'].reject { |page| pipeline_page_ids.include?(page['id']) }
     target['pages'] = pipeline_pages + content_pages
+    apply_element_moves!(target['pages'], existing_pages_by_id, plan['move_existing_elements'] || [])
 
     by_id = target['pages'].flat_map { |page| Array(page['elements']) }
                   .each_with_object({}) { |element, index| index[element['id']] = element if element['id'] }
@@ -91,6 +97,24 @@ module WorkbookPipelineReuse
         next if Array(source['matches']).any? { |existing| existing['outputColumnName'] == match['outputColumnName'] }
         (source['matches'] ||= []) << deep_copy(match)
       end
+    end
+  end
+
+  def apply_element_moves!(pages, existing_pages, moves)
+    Array(moves).each do |move|
+      source = existing_pages[move.fetch('from_page')]
+      target = pages.find { |page| page['id'] == move.fetch('to_page') }
+      raise ArgumentError, "pipeline move target page #{move['to_page'].inspect} is missing" unless target
+      selected = Array(source && source['elements']).select do |element|
+        (!move['kind'] || element['kind'] == move['kind']) &&
+          (!move['name'] || element['name'].to_s.casecmp?(move['name'].to_s))
+      end
+      raise ArgumentError, "pipeline move selected no elements from #{move['from_page'].inspect}" if selected.empty?
+      selected_ids = selected.map { |element| element['id'] }
+      pages.each do |page|
+        page['elements'] = Array(page['elements']).reject { |element| selected_ids.include?(element['id']) }
+      end
+      target['elements'] = Array(target['elements']) + selected.map { |element| deep_copy(element) }
     end
   end
 
