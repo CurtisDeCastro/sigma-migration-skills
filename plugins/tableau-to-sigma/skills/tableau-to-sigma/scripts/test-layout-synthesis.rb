@@ -532,10 +532,10 @@ end
 puts '-- synthetic worksheet page matching'
 Dir.mktmpdir do |d|
   synthetic = JSON.parse(JSON.generate(DL_TITLE))
-  synthetic[0]['dashboard'] = '[synthetic] Overview'
+  synthetic[0]['dashboard'] = '[synthetic] Profitability Watch'
   xml, _census, _log, = build(synthetic, WB_TITLE, d)
   ok('synthetic parser page matches worksheet-named Sigma page',
-     !xml.nil? && xml.include?('id="page-overview"'))
+     !xml.nil? && xml.include?('id="page-pw"'))
 end
 
 puts '-- hidden pipeline page preservation'
