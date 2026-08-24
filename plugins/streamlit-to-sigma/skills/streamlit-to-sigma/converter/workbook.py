@@ -879,4 +879,3 @@ def build_workbook(
             "gaps": len(ir.gaps),
         },
     }
-
