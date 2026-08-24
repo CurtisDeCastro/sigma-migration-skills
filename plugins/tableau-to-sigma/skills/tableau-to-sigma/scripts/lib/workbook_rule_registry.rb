@@ -79,6 +79,17 @@ module WorkbookRuleRegistry
     CHART_RULES.each_with_object({}) { |(key, (kind, _rule)), out| out[key] = kind }.freeze
   end
 
+  def chart_key_for_target(target)
+    {
+      'bar-chart' => 'bar', 'line-chart' => 'line', 'area-chart' => 'area',
+      'pie-chart' => 'pie', 'scatter-chart' => 'scatter',
+      'combo-chart' => 'combo', 'waterfall-chart' => 'waterfall',
+      'point-map' => 'map-point', 'region-map' => 'map-region',
+      'pivot-table' => 'pivot-table', 'table' => 'table',
+      'kpi-chart' => 'kpi', 'box-plot' => 'box-plot'
+    }[target.to_s]
+  end
+
   def field_name(field)
     return field.to_s unless field.is_a?(Hash)
     field['caption'] || field['column_caption'] || field['name'] ||

@@ -76,6 +76,7 @@ require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field
 require_relative 'lib/workbook_ir'
 require_relative 'lib/tableau_workbook_compiler'
 require_relative 'lib/workbook_rule_registry'
+require_relative 'lib/compile_plan_apply'
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -139,6 +140,8 @@ if opts[:ir]
   opts[:out] ||= WorkbookIR.artifact_path(opts[:ir], 'chart_specs') || File.join(ir_root, 'chart-specs.json')
 end
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+compile_plan = nil
+compile_plan_index = CompilePlanApply.index(nil)
 if opts[:compile_plan]
   compile_plan = JSON.parse(File.read(opts[:compile_plan], encoding: 'UTF-8'))
   compile_errors = TableauWorkbookCompiler.validate(compile_plan)
@@ -150,6 +153,7 @@ if opts[:compile_plan]
     end
     warn "[WAIVER] compile plan has #{compile_plan['blocking'].length} blocker(s): #{opts[:allow_unsupported_plan]}"
   end
+  compile_plan_index = CompilePlanApply.index(compile_plan)
 end
 
 # Load the referenceable DM metrics once; every measure-emission site prefers a
@@ -4432,6 +4436,15 @@ layout.each do |dash|
     cap = z['caption']
     next if cap.nil? || cap.empty?
 
+    if compile_plan
+      begin
+        planned = CompilePlanApply.apply_zone!(z, dash['dashboard'], compile_plan_index)
+        warn "[compile-plan] '#{cap}' -> #{planned['target_kind']} (#{planned['rule']})" if planned
+      rescue ArgumentError => e
+        abort "compile-plan dispatch failed for #{dash['dashboard'].inspect}/#{cap.inspect}: #{e.message}"
+      end
+    end
+
     # PR-10 kind propagation: the Phase 1d read VERIFIED this tile's kind
     # against the source image — it beats every shelf inference below, for ALL
     # kinds (see the PNG_KIND header above). Mismatches are logged one line
@@ -8710,10 +8723,16 @@ $chart_provenance = {}
 elements.each do |e|
   ws = e['_worksheet'].to_s
   next if ws.empty? || e['id'].to_s.empty?
+  plan_entry = compile_plan && CompilePlanApply.find(
+    compile_plan_index,
+    e['_dashboard'],
+    { 'caption' => ws }
+  )
   $chart_provenance[e['id'].to_s] ||= {
     'worksheet' => ws,
     'dashboard' => e['_dashboard'],
-    'name'      => (e['name'].is_a?(String) ? e['name'] : nil)
+    'name'      => (e['name'].is_a?(String) ? e['name'] : nil),
+    'compile_plan_key' => plan_entry && plan_entry['key']
   }.compact
 end
 
