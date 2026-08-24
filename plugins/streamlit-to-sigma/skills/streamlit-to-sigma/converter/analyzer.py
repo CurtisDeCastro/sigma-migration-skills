@@ -387,6 +387,17 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 return query.id
         return None
 
+    def resolve_assignment(self, node: ast.AST | None) -> ast.AST | None:
+        seen: set[str] = set()
+        while (
+            isinstance(node, ast.Name)
+            and node.id in self.assignments
+            and node.id not in seen
+        ):
+            seen.add(node.id)
+            node = self.assignments[node.id]
+        return node
+
     def dataframe_name(self, node: ast.AST | None) -> str | None:
         if isinstance(node, ast.Name):
             return node.id
@@ -423,6 +434,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     )
                     self.tabs[name] = str(label)
                 return None
+            if leaf in CONTROL_CALLS or leaf == "render_filter":
+                for target in targets:
+                    self.assignments[target] = node.value
+                    self.ir.metadata.setdefault("assignments", {}).setdefault(
+                        self.page.id, {}
+                    )[target] = unparse(node.value)
+                    self.record_call(node.value, variable=target)
+                return None
 
         for target in targets:
             self.assignments[target] = node.value
@@ -449,9 +468,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 )
             if isinstance(node.value, ast.Call):
                 leaf = call_path(node.value.func).split(".")[-1]
-                if leaf in CONTROL_CALLS or leaf == "render_filter":
-                    self.record_call(node.value, variable=target)
-                elif "component" in call_path(node.value.func).lower():
+                if "component" in call_path(node.value.func).lower():
                     self.record_call(node.value, variable=target)
         return None
 
@@ -603,10 +620,11 @@ class ModuleAnalyzer(ast.NodeVisitor):
         if leaf in CONTROL_CALLS:
             label = display_text(args[0] if args else None)
             options = args[1] if len(args) > 1 else keyword(call, "options")
-            dataframe = self.dataframe_name(options)
+            resolved_options = self.resolve_assignment(options)
+            dataframe = self.dataframe_name(resolved_options)
             default_node = keyword(call, "default") or keyword(call, "value")
             default = literal(default_node)
-            column = first_subscript_column(options)
+            column = first_subscript_column(resolved_options)
             self.ir.controls.append(
                 Control(
                     self.new_id("control", label, call),
@@ -627,6 +645,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
         if leaf == "render_filter":
             label = display_text(args[0] if args else None)
             options = args[1] if len(args) > 1 else None
+            resolved_options = self.resolve_assignment(options)
             filter_type = literal(keyword(call, "filter_type"), "selectbox")
             self.ir.controls.append(
                 Control(
@@ -635,8 +654,8 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     "multiple" if filter_type == "multiselect" else "single",
                     label,
                     variable,
-                    self.dataframe_name(options),
-                    first_subscript_column(options),
+                    self.dataframe_name(resolved_options),
+                    first_subscript_column(resolved_options),
                     literal(keyword(call, "default")),
                     False,
                     self.page.id,
