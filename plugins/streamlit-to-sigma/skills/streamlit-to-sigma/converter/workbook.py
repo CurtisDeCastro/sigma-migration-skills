@@ -593,7 +593,11 @@ def build_workbook(
         sidebar_pairs = [
             pair
             for pair in page_pairs
-            if hasattr(pair[0], "sidebar") and pair[0].sidebar
+            if (hasattr(pair[0], "sidebar") and pair[0].sidebar)
+            or any(
+                context.get("kind") == "sidebar"
+                for context in getattr(pair[0], "context", [])
+            )
         ]
         normal_pairs = [pair for pair in page_pairs if pair not in sidebar_pairs]
 

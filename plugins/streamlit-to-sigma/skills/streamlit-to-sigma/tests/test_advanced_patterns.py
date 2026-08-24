@@ -176,6 +176,64 @@ class AdvancedPatternsTest(unittest.TestCase):
                 any(item.label == "not workbook text" for item in ir.elements)
             )
 
+    def test_scenario_planner_boundaries_are_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "snowflake.yml",
+                """
+                definition_version: 2
+                entities:
+                  app:
+                    type: streamlit
+                    main_file: streamlit_app.py
+                    artifacts:
+                      - streamlit_app.py
+                      - lib/data.py
+                """,
+            )
+            self.write(
+                root,
+                "lib/data.py",
+                """
+                def load_data(_conn):
+                    return _conn.query(
+                        "SELECT ORDER_ID, NET_REVENUE FROM DB.S.ORDERS"
+                    )
+                """,
+            )
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import streamlit as st
+                from lib.data import load_data
+                conn = st.connection("snowflake")
+                df = load_data(conn)
+                with st.form("assumptions"):
+                    st.session_state.pending["volume"] = st.number_input(
+                        "Volume Change %", value=0.0
+                    )
+                    st.form_submit_button("Apply")
+                scenario = apply_scenario(df, st.session_state.pending)
+                edited = st.data_editor(scenario)
+                st.plotly_chart(build_chart(edited))
+                """,
+            )
+            ir = analyze_project(root)
+            self.assertEqual(len(ir.queries), 1)
+            self.assertEqual(ir.queries[0].function, "load_data")
+            self.assertTrue(
+                any(control.label == "Volume Change %" for control in ir.controls)
+            )
+            codes = {gap.code for gap in ir.gaps}
+            self.assertIn("session-state", codes)
+            self.assertIn("deferred-form-state", codes)
+            self.assertIn("python-transform", codes)
+            self.assertIn("data-editor", codes)
+            self.assertIn("opaque-chart-object", codes)
+
 
 if __name__ == "__main__":
     unittest.main()

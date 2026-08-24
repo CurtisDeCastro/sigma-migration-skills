@@ -422,6 +422,11 @@ class ModuleAnalyzer(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> Any:
         targets = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        subscript_targets = [
+            target
+            for target in node.targets
+            if isinstance(target, ast.Subscript)
+        ]
         tuple_targets = [
             item.id
             for target in node.targets
@@ -448,13 +453,37 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     self.tabs[name] = str(label)
                 return None
             if leaf in CONTROL_CALLS or leaf == "render_filter":
-                for target in targets:
-                    self.assignments[target] = node.value
-                    self.ir.metadata.setdefault("assignments", {}).setdefault(
-                        self.page.id, {}
-                    )[target] = unparse(node.value)
-                    self.record_call(node.value, variable=target)
+                if targets:
+                    for target in targets:
+                        self.assignments[target] = node.value
+                        self.ir.metadata.setdefault("assignments", {}).setdefault(
+                            self.page.id, {}
+                        )[target] = unparse(node.value)
+                        self.record_call(node.value, variable=target)
+                else:
+                    self.record_call(node.value)
                 return None
+            if path.startswith("st.") and (
+                leaf in CHART_CALLS
+                or leaf in {"dataframe", "table", "data_editor"}
+                or leaf.endswith("_button")
+            ):
+                self.record_call(node.value, variable=targets[0] if targets else None)
+                return None
+
+        for target in subscript_targets:
+            base_names = referenced_names(target.value)
+            if base_names & set(self.dataframe_roots):
+                self.add_gap(
+                    "dataframe-column-mutation",
+                    "restructure",
+                    (
+                        "Calculated dataframe column assignment requires explicit "
+                        f"Sigma formula lowering: {unparse(target)}"
+                    ),
+                    "pandas",
+                    target,
+                )
 
         for target in targets:
             self.assignments[target] = node.value
@@ -496,6 +525,23 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 leaf = call_path(node.value.func).split(".")[-1]
                 if "component" in call_path(node.value.func).lower():
                     self.record_call(node.value, variable=target)
+                elif (
+                    isinstance(node.value.func, ast.Name)
+                    and node.value.func.id.startswith(
+                        ("apply_", "build_", "compute_", "clone_", "new_")
+                    )
+                    and node.value.func.id not in self.query_functions
+                ):
+                    self.add_gap(
+                        "python-transform",
+                        "restructure",
+                        (
+                            f"Local Python transform `{node.value.func.id}` "
+                            "requires an explicit Sigma lowering."
+                        ),
+                        node.value.func.id,
+                        node,
+                    )
         return None
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
@@ -645,12 +691,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     "count": count,
                 }
             )
+        if path.startswith("st.sidebar."):
+            call_context.append({"kind": "sidebar"})
         is_streamlit_call = (
             path == "st"
             or path.startswith("st.")
             or root_name in self.columns
         )
-        is_known_wrapper = leaf in {"render_chart", "render_filter", "render_kpi"}
+        is_known_wrapper = leaf.startswith("render_")
         is_component = "component" in path.lower() or leaf == "declare_component"
         if not is_streamlit_call and not is_known_wrapper and not is_component:
             return
@@ -711,12 +759,12 @@ class ModuleAnalyzer(ast.NodeVisitor):
             )
             return
 
-        if leaf == "metric" or leaf == "render_kpi":
+        if leaf in {"metric", "render_kpi", "render_kpi_card", "render_pct_kpi"}:
             label = display_text(args[0] if args else None)
             value = args[1] if len(args) > 1 else None
             dataframe = self.dataframe_name(value)
             bindings = {}
-            if leaf == "render_kpi":
+            if leaf in {"render_kpi", "render_kpi_card", "render_pct_kpi"}:
                 bindings = {
                     "delta": unparse(args[2]) if len(args) > 2 else None,
                     "prefix": literal(args[3]) if len(args) > 3 else "",
@@ -734,6 +782,46 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     call_context,
                     prov,
                 )
+            )
+            return
+
+        if leaf in {"render_empty_state", "render_validation_errors"}:
+            label = display_text(args[0] if args else None)
+            self.ir.elements.append(
+                Element(
+                    self.new_id("text", label[:32], call),
+                    "text",
+                    label or leaf.replace("_", " ").title(),
+                    self.page.id,
+                    self.dataframe_name(args[0] if args else None),
+                    {"style": "info" if leaf == "render_empty_state" else "error"},
+                    unparse(args[0]) if args else None,
+                    call_context,
+                    prov,
+                )
+            )
+            return
+
+        if leaf == "render_status_banner":
+            self.ir.elements.append(
+                Element(
+                    self.new_id("status", "Scenario status", call),
+                    "text",
+                    "Scenario status (conditional)",
+                    self.page.id,
+                    self.dataframe_name(args[0] if args else None),
+                    {"style": "status", "conditional": True},
+                    unparse(args[0]) if args else None,
+                    call_context,
+                    prov,
+                )
+            )
+            self.add_gap(
+                "conditional-status",
+                "restructure",
+                "Conditional status styling requires explicit Sigma formulas/rules.",
+                leaf,
+                call,
             )
             return
 
@@ -759,6 +847,17 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     prov,
                 )
             )
+            if CHART_CALLS[leaf] == "plugin-chart":
+                self.add_gap(
+                    "opaque-chart-object",
+                    "review",
+                    (
+                        f"`st.{leaf}` receives a runtime chart object; inspect "
+                        "the helper/config before choosing a native Sigma chart or plugin."
+                    ),
+                    f"st.{leaf}",
+                    call,
+                )
             return
 
         if leaf == "render_chart":
@@ -835,12 +934,23 @@ class ModuleAnalyzer(ast.NodeVisitor):
             )
             return
 
-        if leaf in {"divider", "progress", "button"}:
+        if leaf in {
+            "divider",
+            "progress",
+            "button",
+            "form_submit_button",
+            "download_button",
+        }:
             label = display_text(args[0] if args else None) or leaf.title()
+            kind = (
+                "button"
+                if leaf in {"form_submit_button", "download_button"}
+                else leaf
+            )
             self.ir.elements.append(
                 Element(
-                    self.new_id(leaf, label, call),
-                    leaf,
+                    self.new_id(kind, label, call),
+                    kind,
                     label,
                     self.page.id,
                     None,
@@ -854,6 +964,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     prov,
                 )
             )
+            if leaf == "download_button":
+                self.add_gap(
+                    "download-action",
+                    "review",
+                    "Download behavior maps to Sigma export, not a spec-authored file payload.",
+                    leaf,
+                    call,
+                )
             return
 
         if leaf in {"switch_page", "rerun", "stop"}:
@@ -875,6 +993,16 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 path,
                 call,
             )
+            return
+
+        if leaf.startswith("render_"):
+            self.add_gap(
+                "unresolved-wrapper",
+                "review",
+                f"Wrapper `{leaf}` was detected but not statically expanded.",
+                leaf,
+                call,
+            )
 
 
 def query_from_function(
@@ -892,10 +1020,11 @@ def query_from_function(
         if isinstance(call.func, ast.Attribute):
             receiver = call.func.value
             receiver_name = receiver.id if isinstance(receiver, ast.Name) else ""
+            normalized_receiver = receiver_name.lstrip("_").lower()
             if (
-                receiver_name.lower()
+                normalized_receiver
                 not in {"conn", "connection", "session", "snowflake"}
-                and "connection" not in receiver_name.lower()
+                and "connection" not in normalized_receiver
             ):
                 continue
         sql, dynamic = extract_string(call.args[0], assignments)
