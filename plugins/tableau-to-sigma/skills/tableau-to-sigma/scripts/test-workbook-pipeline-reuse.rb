@@ -75,7 +75,8 @@ plan = {
     'element_ids' => %w[actuals combined]
   }],
   'master_sources' => {
-    'master-overview' => {
+    'page-overview-master' => {
+      'page' => 'Overview',
       'source' => { 'kind' => 'table', 'elementId' => 'combined' },
       'fields' => {
         'Record Type' => '"P&L"',

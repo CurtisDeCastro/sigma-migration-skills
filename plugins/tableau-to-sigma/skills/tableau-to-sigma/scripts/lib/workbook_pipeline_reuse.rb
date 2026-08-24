@@ -87,7 +87,9 @@ module WorkbookPipelineReuse
       unless master
         page_name = instructions['page']
         page = pages.find { |candidate| candidate['name'].to_s.casecmp?(page_name.to_s) } if page_name
-        candidates = Array(page && page['elements']).select do |element|
+        refs = []
+        collect_element_refs!(page && page['elements'], refs)
+        candidates = refs.uniq.filter_map { |id| elements[id] }.select do |element|
           element['kind'] == 'table' && element['name'].to_s.casecmp?('Master')
         end
         raise ArgumentError, "generated workbook has no unique master #{master_id.inspect} on page #{page_name.inspect}" unless candidates.one?
@@ -103,6 +105,18 @@ module WorkbookPipelineReuse
       patched << master['id']
     end
     patched
+  end
+
+  def collect_element_refs!(node, output)
+    case node
+    when Hash
+      node.each do |key, value|
+        output << value if key == 'elementId' && value.is_a?(String)
+        collect_element_refs!(value, output)
+      end
+    when Array
+      node.each { |value| collect_element_refs!(value, output) }
+    end
   end
 
   def rewrite_formulas!(node, rewrites)
