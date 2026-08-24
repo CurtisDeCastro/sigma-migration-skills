@@ -1844,7 +1844,7 @@ WorkbookCode.pages(wb_ids_raw).each do |page|
   preserved_pages << { 'id' => page_id, 'name' => page['name'], 'elements' => page_elements.length }
 end
 unless preserved_pages.empty?
-  warn "preserved #{preserved_pages.length} non-dashboard pipeline page(s): " \
+  warn "preserved #{preserved_pages.length} non-dashboard pipeline page(s): " +
        preserved_pages.map { |page| "#{page['name'] || page['id']} (#{page['elements']})" }.join(', ')
 end
 

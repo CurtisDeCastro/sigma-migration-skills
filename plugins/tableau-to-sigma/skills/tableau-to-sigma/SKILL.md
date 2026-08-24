@@ -183,15 +183,9 @@ ruby scripts/migrate-tableau.rb --workbook "<name>" \
 > `ruby scripts/migrate-tableau.rb --shadow-compile --from-corpus <case-dir>
 > --out <workdir>` — compiles and compares to `golden/workbook.json`, writes
 > `shadow-compile.json`, and hard-disables all Tableau/Sigma writes.
->
-> **Already-landed extract data may live in a workbook-local pipeline**, not
-> only a data model. The agent should search Sigma by source workbook name,
-> inspect the candidate workbook's hidden join/union/input-table closure, write
-> a reviewed semantic `pipeline-map.json`, then run with
-> `--reuse-dm <id> --pipeline-template-workbook <workbook-id>
-> --pipeline-map <path>`. This satisfies the extract gate without re-landing;
-> `apply-workbook-pipeline.rb` performs the same merge explicitly at an exit-4
-> handoff. Never infer a pipeline from name similarity alone.
+> **Already-landed workbook pipeline:** after reviewing a matching Sigma
+> workbook, use `--reuse-dm ID --pipeline-template-workbook ID --pipeline-map
+> PATH`; map contract and exit-4 CLI: `refs/script-map.md`.
 
 > **Parity is EXACT for warehouse-backed migrations — never blame "drift."**
 > Sigma queries the **same warehouse** Tableau reads; a value gap is a real bug
