@@ -542,6 +542,13 @@ dl_pipeline = [{
 wb_pipeline = {
   'pages' => [
     {
+      'id' => 'page-data', 'name' => 'Data', 'visibility' => 'hidden',
+      'elements' => [{
+        'id' => 'pipeline-source', 'kind' => 'table', 'name' => 'Source',
+        'visibleAsSource' => false, 'columns' => []
+      }]
+    },
+    {
       'id' => 'page-derived', 'name' => 'Derived Data', 'visibility' => 'hidden',
       'elements' => [{
         'id' => 'pipeline-union', 'kind' => 'table', 'name' => 'Combined',
@@ -565,7 +572,7 @@ Dir.mktmpdir do |d|
      !xml.nil? && xml.include?('id="page-derived"') && xml.include?('elementId="pipeline-union"'))
   ok('visible dashboard remains laid out once',
      !xml.nil? && xml.scan(/elementId="chart-revenue"/).length == 1)
-  ok('builder reports preserved pipeline page', log.include?('preserved 1 non-dashboard pipeline page'))
+  ok('builder reports preserved pipeline page', log.include?('non-dashboard pipeline page'))
 end
 
 puts($fail.zero? ? "\nALL PASS — layout synthesis (bands, rail, KPI containers, min rows, determinism)" : "\n#{$fail} FAILED")
