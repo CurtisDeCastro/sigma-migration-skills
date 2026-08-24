@@ -15,6 +15,17 @@ Grid plus bar/line have live source-to-target evidence; waterfall uses the
 released native shape; area is mechanically wired but still unverified. Do not
 collapse those distinct evidence levels into a blanket "chart support" claim.
 
+**Path B hand-build ✓** marks a shape proven on a live super-cube *rehost*
+rebuild (`refs/path-b-rehost.md` §5) — spec-authored, POSTed, and
+render/parity-verified end-to-end — but **not yet wired into the classic
+converter's automated emission**. Treat it as a validated recipe to apply by
+hand on Path B, not an auto-conversion. Also mapped there: a **synchronized-axis
+bar chart** (MSTR's per-category same-scale panels) → `bar-chart`
+`trellis:{rowsBy:[{columnId}]}` (needs a long facet dimension — unpivot wide
+cube columns); **linked text boxes / chapter nav** → `button` + `navigate`
+effect (or the built-in `settings.navigation` sidebar); a **dynamic last-N
+chapter filter** → an element list filter pinned to the last N periods.
+
 Counts below are from a 365-dossier / ~7,400-viz sweep of MicroStrategy's
 public demo environment (Tutorial, MobileDashboards, Embedded Analytics,
 AI Auto projects, 2026-06) — the extractor walker parsed **all** of them,
@@ -23,21 +34,21 @@ so every listed type is extraction-validated. Counts double as gap priority.
 | MSTR `visualizationType` | n | Sigma element kind | Build |
 |---|---|---|---|
 | `grid` | 1893 | `table` (pivot when `crossTab: true`) | **validated (parity-verified)** |
-| `kpi` | 1633 | `kpi-chart` | roadmap (top priority by volume) |
+| `kpi` | 1633 | `kpi-chart` | **Path B hand-build ✓** (roadmap for classic converter) |
 | `bar_chart` | 810 | `bar-chart` | **validated** |
 | `geospatial_service` | 331 | `region-map` / `point-map` (by geo attribute granularity — cognos `tiledmap` precedent) | roadmap |
 | `line_chart` | 252 | `line-chart` | **validated** |
 | `bubble_chart` | 221 | `scatter` (size slot) | roadmap |
-| `heat_map` | 188 | flagged `table` (size+color tile grid has no Sigma analog) | fallback |
+| `heat_map` | 188 | `pivot-table` + `conditionalFormats:{type:backgroundScale}` (diverging scheme for signed values); cross-filter a partner bar via a control | **Path B hand-build ✓** (was: flagged — it DOES have an analog) |
 | `combo_chart` | 182 | `combo` | roadmap |
 | `area_chart` | 170 | `area-chart` | wired, **not live-verified** |
-| `multi_metric_kpi` | 168 | one `kpi-chart` per metric | roadmap |
+| `multi_metric_kpi` | 168 | a KPI-card row: per metric a `kpi-chart` with `comparisonColumn`+`comparison:{display:percentage,colorGood/Bad}` (Δ badge) + a "Previous …" subtitle `text` + a composite `area-chart` sparkline stacked below in the same container | **Path B hand-build ✓** (recipe: `path-b-rehost.md` §5) |
 | `compound_grid` | 155 | `table` | roadmap |
-| `microcharts` | 113 | `table` + flagged sparkline columns | fallback |
+| `microcharts` | 113 | `table` + composite `area-chart` sparklines (a borderless area-chart per row/metric; the KPI's own `trend` field is inert from spec) | **Path B hand-build ✓** (recipe: `path-b-rehost.md` §5) |
 | `ring_chart` | 111 | `pie` (donut variant) | roadmap |
 | `google_map` | 104 | `region-map` / `point-map` | roadmap |
 | `pie_chart` | 90 | `pie` | roadmap |
-| `comparison_kpi` | 67 | `kpi-chart` (comparison value flagged) | roadmap |
+| `comparison_kpi` | 67 | `kpi-chart` + `comparisonColumn`/`comparison` (the Δ badge IS spec-authorable) | **Path B hand-build ✓** |
 | `sankey` | 42 | flagged `table` | fallback |
 | `gauge` | 33 | `progress` when explicit value/range semantics exist; otherwise flagged `table` | **released, grounded-only** |
 | `histogram` | 27 | `bar` (pre-binned) or flagged | fallback |
