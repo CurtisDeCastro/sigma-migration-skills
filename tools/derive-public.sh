@@ -67,8 +67,9 @@ rm -rf \
   V5.5-FABLE-HANDOFF.md \
   V5.6-CONTROLS-AUDIT.md
 rm -f docs/tableau-to-sigma-*HANDOFF*.md
-# derive-public.sh itself never ships public; neither does the version stamper.
-rm -f tools/derive-public.sh tools/stamp-version.rb
+# derive-public.sh itself never ships public; neither does the version stamper
+# or SYNC.md (both name the private dev repo + the prohibited-pattern list).
+rm -f tools/derive-public.sh tools/stamp-version.rb SYNC.md
 
 # ─────────────────────────────────────────────────────────────────────────
 # STEP 3 — overlay public-only OSS files from public/main
@@ -981,7 +982,12 @@ for path in sorted(glob.glob("plugins/*/skills/*/converter/PROVENANCE.json")):
             changed = True
     if changed:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            # ensure_ascii=False: tableau's ledger prose (local_patches summaries,
+            # the _upstream_and_revendor_tasks block) uses em-dashes/curly quotes;
+            # the default ensure_ascii=True would rewrite them to \uXXXX escapes,
+            # corrupting the human-readable ledger and defeating the later text
+            # scrub in 4g (which matches on the literal glyphs).
+            json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
         n += 1
 print(f"    stripped private lineage fields from {n} PROVENANCE.json file(s)")
@@ -1146,7 +1152,14 @@ RULES = [
      'a local converter-source checkout'),
     (re.compile(r'~/(?:Desktop/)?(?:[\w.-]+/)?sigma-data-model-mcp'),
      '~/converter-source'),
-    (re.compile(r'(?:[\w.-]+/)?sigma-data-model-mcp'),
+    # Bare fallback — token-only (NO optional `[\w.-]+/` prefix). The prefix
+    # form wrongly ate a path/var segment: `$converter/sigma-data-model-mcp/build`
+    # (a shell path in corpus/converter-default-test.sh) collapsed to the invalid
+    # `$converter-source/build` (bash then parsed `${converter-source}`). GitHub
+    # `owner/repo` refs still scrub cleanly: `owner/` is left intact and any
+    # prohibited owner (twells89) is neutralized by its own rule below, yielding
+    # e.g. `sigmacomputing/converter-source` rather than a broken collapse.
+    (re.compile(r'sigma-data-model-mcp'),
      'converter-source'),
     (re.compile(r'[A-Za-z0-9_.-]*\.onrender\.com'),
      'the hosted-converter endpoint'),
@@ -1195,6 +1208,28 @@ if [ -f tools/check-cognos-bundle.rb ] && \
    [ -f plugins/cognos-to-sigma/skills/cognos-to-sigma/converter/cli.ts ]; then
   echo "  refresh cognos converter/*.ts source_sha256 pin (post-scrub)"
   ruby tools/check-cognos-bundle.rb --write || echo "  WARN: could not refresh cognos source_sha256 — review before shipping"
+fi
+
+# The fleet-wide scrub above also rewrites strings *inside* the tableau converter
+# bundle (tableau.mjs carries `sigma-data-model-mcp` + a beads- id in comments).
+# refs/functions.json + refs/coverage-manifest.json are DERIVED from that bundle
+# by gen-translation-table.mjs, and the W2.13 determinism gate
+# (scripts/test-translation-table.rb) byte-diffs them against a fresh
+# regeneration — so a scrubbed bundle with stale derived tables fails CI.
+# Regenerate them in place from the now-scrubbed bundle. Idempotent: if the
+# bundle was untouched the regeneration is byte-identical (a no-op). node is the
+# same runtime CI uses for this gate; skip with a warning if it is unavailable
+# (the gate itself SKIPs without node, so a public contributor is not blocked).
+TAB_SKILL=plugins/tableau-to-sigma/skills/tableau-to-sigma
+TAB_GEN="$TAB_SKILL/scripts/dev/gen-translation-table.mjs"
+if [ -f "$TAB_GEN" ] && [ -f "$TAB_SKILL/converter/tableau.mjs" ]; then
+  NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+  if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
+    echo "  regenerate tableau refs/functions.json + coverage-manifest.json from scrubbed bundle (W2.13 determinism)"
+    "$NODE_BIN" "$TAB_GEN" || echo "  WARN: gen-translation-table.mjs failed — refs/ tables may be stale vs the scrubbed bundle; review before shipping"
+  else
+    echo "  WARN: node unavailable — skipped tableau determinism-table regen; the scrubbed bundle may leave refs/functions.json stale (regenerate with: node $TAB_GEN)"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
