@@ -78,12 +78,13 @@ module TableauWorkbookCompiler
     controls = compile_controls(ir, pages)
     formulas = compile_formulas(pages)
     actions = compile_actions(pages)
+    source_gaps = Array(ir['unsupported']).map { |entry| source_gap(entry) }
     blocking = (
       visuals.select { |entry| entry['status'] == 'unsupported' } +
       controls.select { |entry| entry['status'] == 'unsupported' } +
       formulas.select { |entry| entry['status'] == 'unsupported' } +
       actions.select { |entry| entry['status'] == 'unsupported' } +
-      Array(ir['unsupported']).map { |entry| source_gap(entry) }
+      source_gaps.select { |entry| entry['status'] == 'unsupported' }
     )
 
     plan = {
@@ -95,6 +96,7 @@ module TableauWorkbookCompiler
       'controls' => controls,
       'formulas' => formulas,
       'actions' => actions,
+      'source_gaps' => source_gaps,
       'blocking' => blocking,
       'summary' => {
         'pages' => pages.length,
@@ -203,7 +205,7 @@ module TableauWorkbookCompiler
 
     filters = pages.flat_map do |page|
       Array(page['zones']).flat_map do |zone|
-        Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
+        nested = Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
           name = filter['caption'] || filter['column'] || filter['field'] || filter['raw_param']
           if name.to_s.empty?
             {
@@ -225,9 +227,41 @@ module TableauWorkbookCompiler
             }
           end
         end
+        zone_control =
+          if %w[filter parameter].include?(zone['kind'].to_s)
+            name = zone['filter_column_caption'] || zone['caption']
+            if name.to_s.empty?
+              [{
+                'key' => stable_key('zone-control', page['name'], zone['id']),
+                'source' => zone['kind'] == 'parameter' ? 'parameter' : 'quick-filter',
+                'dashboard' => page['name'],
+                'status' => 'unsupported',
+                'rule' => 'control.zone.v1',
+                'reason' => 'control column could not be resolved'
+              }]
+            else
+              [{
+                'key' => stable_key('zone-control', page['name'], zone['id'], name),
+                'source' => zone['kind'] == 'parameter' ? 'parameter' : 'quick-filter',
+                'dashboard' => page['name'],
+                'name' => name,
+                'status' => 'lowered',
+                'target_kind' => control_kind(
+                  'datatype' => zone['filter_column_datatype'],
+                  'display' => zone['control_display']
+                ),
+                'rule' => 'control.zone.v1'
+              }]
+            end
+          else
+            []
+          end
+        nested + zone_control
       end
     end
-    (parameters + filters).uniq { |entry| entry['key'] }.sort_by { |entry| entry['key'] }
+    (parameters + filters)
+      .uniq { |entry| [entry['source'], entry['name'], entry['dashboard']] }
+      .sort_by { |entry| entry['key'] }
   end
 
   def compile_formulas(pages)
@@ -307,9 +341,10 @@ module TableauWorkbookCompiler
   end
 
   def source_gap(entry)
+    severity = entry['severity'].to_s
     {
       'key' => stable_key('source-gap', entry['visual'], entry['detail']),
-      'status' => 'unsupported',
+      'status' => severity == 'approximated' ? 'verify-required' : 'unsupported',
       'rule' => 'source.coverage-gap.v1',
       'source' => entry
     }
@@ -319,7 +354,7 @@ module TableauWorkbookCompiler
     errors = []
     errors << 'schemaVersion must be 1' unless plan['schemaVersion'] == SCHEMA_VERSION
     errors << 'kind must be tableau-workbook-compile-plan' unless plan['kind'] == 'tableau-workbook-compile-plan'
-    %w[pages visuals controls formulas actions blocking].each do |key|
+    %w[pages visuals controls formulas actions source_gaps blocking].each do |key|
       errors << "#{key} must be an array" unless plan[key].is_a?(Array)
     end
     keys = %w[visuals controls formulas actions].flat_map { |section| Array(plan[section]).map { |entry| entry['key'] } }
