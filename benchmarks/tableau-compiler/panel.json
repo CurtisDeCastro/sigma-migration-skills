@@ -9,7 +9,7 @@
   "cases": [
     {
       "id": "orders-executive-overview",
-      "label": "Orders Executive Overview",
+      "label": "Executive Orders Anchor",
       "role": "live-anchor",
       "source_env": "TABLEAU_BENCH_ORDERS_EXEC_URL",
       "minimum_charts": 9,
