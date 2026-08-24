@@ -36,12 +36,17 @@ module WorkbookPipelineReuse
       page['elements'] = Array(page['elements']).reject { |element| requested_ids.include?(element['id']) }
     end
 
+    existing_pages_by_id = target['pages'].to_h { |page| [page['id'], page] }
     pipeline_pages = Array(plan['pipeline_pages']).map do |page_plan|
+      donor_page_elements = Array(page_plan['element_ids']).map { |id| deep_copy(donor_elements.fetch(id)) }
+      retained_elements = Array(existing_pages_by_id.dig(page_plan['id'], 'elements')).reject do |element|
+        requested_ids.include?(element['id'])
+      end
       {
         'id' => page_plan.fetch('id'),
         'name' => page_plan.fetch('name'),
         'visibility' => page_plan.fetch('visibility', 'hidden'),
-        'elements' => Array(page_plan['element_ids']).map { |id| deep_copy(donor_elements.fetch(id)) }
+        'elements' => donor_page_elements + retained_elements
       }
     end
     pipeline_page_ids = pipeline_pages.map { |page| page['id'] }

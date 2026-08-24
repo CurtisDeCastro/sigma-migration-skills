@@ -71,7 +71,7 @@ generated = {
 plan = {
   'template_workbook_id' => 'donor-id',
   'pipeline_pages' => [{
-    'id' => 'pipeline-data', 'name' => 'Pipeline Data', 'visibility' => 'hidden',
+    'id' => 'data', 'name' => 'Pipeline Data', 'visibility' => 'hidden',
     'element_ids' => %w[actuals combined]
   }],
   'master_sources' => {
@@ -94,8 +94,9 @@ spec = result['spec']
 elements = spec['pages'].flat_map { |page| page['elements'] || [] }
 by_id = elements.to_h { |element| [element['id'], element] }
 
-assert(spec['pages'].first['id'] == 'pipeline-data', 'pipeline page prepended')
+assert(spec['pages'].first['id'] == 'data', 'pipeline page merged with existing data page')
 assert(%w[actuals combined].all? { |id| by_id.key?(id) }, 'donor pipeline copied')
+assert(by_id.key?('master-overview'), 'existing page master retained during pipeline merge')
 assert(by_id['master-overview'].dig('source', 'elementId') == 'combined', 'master routed to pipeline root')
 assert(by_id['master-overview']['columns'][0]['formula'] == '"P&L"', 'semantic constant mapping applied')
 assert(by_id['master-overview']['columns'][1]['formula'] == '[Combined/Amount]', 'semantic source mapping applied')
