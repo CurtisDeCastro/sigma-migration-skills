@@ -302,6 +302,13 @@ OptionParser.new do |o|
   o.on('--force')            {     opts[:force]   = true }
   o.on('--reuse-dm [ID]', 'opt IN to DM reuse (default: build new; bare flag = use find-or-pick-dm\'s ' \
                           'recommendation). An EXPLICIT id combined with --wb-spec takes the FAST PATH.') { |v| opts[:reuse_dm] = v || :recommended }
+  o.on('--pipeline-template-workbook ID', 'reuse a proven workbook-local data pipeline (joins/unions/input tables) ' \
+                                           'from this Sigma workbook; requires --pipeline-map and explicit --reuse-dm') do |v|
+    opts[:pipeline_template_workbook] = v
+  end
+  o.on('--pipeline-map PATH', 'agent-authored semantic mapping plan for --pipeline-template-workbook') do |v|
+    opts[:pipeline_map] = File.expand_path(v)
+  end
   o.on('--skip-reuse-scan')  {     opts[:skip_reuse] = true }
   o.on('--fact-table NAME', 'override the object-model fact election: NAME (case-insensitive warehouse table / ' \
                             'logical-table name) becomes the fact/base element every LOD/Top-N/window helper and ' \
@@ -415,6 +422,13 @@ OptionParser.new do |o|
                               '--reuse-dm. Iterating a fix? Re-run with --reuse-dm <id> --reuse-workbook <id> to edit the ' \
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
+
+if !!opts[:pipeline_template_workbook] != !!opts[:pipeline_map]
+  abort 'FATAL: --pipeline-template-workbook and --pipeline-map must be passed together'
+end
+if opts[:pipeline_template_workbook] && !opts[:reuse_dm].is_a?(String)
+  abort 'FATAL: --pipeline-template-workbook requires an explicit --reuse-dm <id>; the pipeline must bind to a proven live model'
+end
 
 if opts[:shadow_compile]
   abort 'FATAL: --shadow-compile requires --from-corpus DIR' unless opts[:from_corpus]
@@ -2144,7 +2158,7 @@ else
   # so the frozen extract bytes are never consumed on this route — skip
   # discovery's heavy includeExtract=true re-download instead of paying for an
   # unused multi-GB payload.
-  disc << '--no-extract-refetch' if opts[:skip_extract_landing]
+  disc << '--no-extract-refetch' if opts[:skip_extract_landing] || opts[:pipeline_template_workbook]
   # W2.20 (lane F): thread the dashboard scope into discovery (member-sheet CSVs
   # only; discovery FAILS OPEN to all views, stated, when membership is unresolvable).
   (opts[:dashboards] || []).each { |d| disc += ['--dashboard', d] }
@@ -2673,7 +2687,7 @@ if mechanical
       # the loop stalled 30s on runs that were headed to the manual gate
       # anyway), and stop as soon as the discovery lane has exited — no
       # further .twbx replacement is possible after that.
-      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] && !opts[:pipeline_template_workbook] &&
          opts[:conn] && sf_ok && land_db && land_sch && File.exist?(twbx_payload)
         6.times do
           break if (File.binread(twbx_payload).include?('.hyper') rescue false)
@@ -2682,13 +2696,13 @@ if mechanical
           sleep 5
         end
       end
-      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] && !opts[:pipeline_template_workbook] &&
          File.exist?(twbx_payload) && opts[:conn] && sf_ok && !(land_db && land_sch)
         line 'auto-land: SKIPPED — landing target unknown, and there is NO default db/schema. ' \
              'Pass --db/--schema (or set SNOWFLAKE_DATABASE/SNOWFLAKE_SCHEMA in the env / ' \
              '~/.sigma-migration/env); the manual landing gate (exit 17) follows.'
       end
-      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+      if landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] && !opts[:pipeline_template_workbook] &&
          File.exist?(twbx_payload) && opts[:conn] && sf_ok && land_db && land_sch
         # Prefix carries a LUID fragment so two workbooks whose names share the
         # slug can never clobber each other's landed tables (write_pandas
@@ -2722,7 +2736,7 @@ if mechanical
           File.delete(mani_p) if mani_body.is_a?(Array) && mani_body.empty?
           line 'WARN: auto-landing landed nothing (failure or payload-less .twbx) — manual landing gate (exit 17)'
         end
-      elsif landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] &&
+      elsif landing_manifest.nil? && !opts[:no_auto_land] && !opts[:skip_extract_landing] && !opts[:pipeline_template_workbook] &&
             File.exist?(twbx_payload) && opts[:conn] && !sf_ok
         line 'NOTE: auto-landing available but SNOWFLAKE_ACCOUNT/SNOWFLAKE_USER are not in env or ' \
              '~/.sigma-migration/env — add them once to skip this manual gate on future runs.'
@@ -2730,6 +2744,17 @@ if mechanical
       if landing_manifest
         line "embedded-extract sources (#{conn_classes.join(', ')}) — landing manifest found " \
              "(#{File.basename(landing_manifest)}); parity mode is EXACT (frozen extract landed byte-identical)"
+      elsif opts[:pipeline_template_workbook]
+        line "embedded-extract source is already represented by reusable workbook pipeline " \
+             "#{opts[:pipeline_template_workbook]} over explicit DM #{opts[:reuse_dm]} — " \
+             "landing gate satisfied by the reviewed #{File.basename(opts[:pipeline_map])} semantic map"
+        Offramp.decision(
+          WORK,
+          kind: 'pipeline-reuse',
+          question: 'extract landing or existing governed workbook pipeline?',
+          answer: "reuse workbook #{opts[:pipeline_template_workbook]} with map #{opts[:pipeline_map]}",
+          decided_by: 'relayed'
+        )
       elsif opts[:skip_extract_landing]
         line "WARN: embedded-extract sources with NO landing manifest — proceeding on --skip-extract-landing " \
              "(#{opts[:skip_extract_landing]}); the DM's table paths are on you (--db/--schema)"
@@ -5204,6 +5229,37 @@ if opts[:per_page_masters]
     line 'per-page-masters (PR-17): no split needed (<=1 page draws on the master) — shared master kept'
   end
 end
+
+# A reusable data model may expose only normalized base elements while the
+# source workbook depends on a proven workbook-local pipeline (joins, unions,
+# input tables, and derived masters). The agent/LLM selects an existing Sigma
+# workbook and authors a small semantic map; this deterministic merge applies
+# it before validation/POST. No pipeline is guessed from names alone.
+if opts[:pipeline_template_workbook]
+  require File.join(HERE, 'lib', 'workbook_pipeline_reuse')
+  require 'sigma_rest'
+  donor = Sigma.request(
+    :get,
+    "/v2/workbooks/#{opts[:pipeline_template_workbook]}/spec",
+    accept: 'application/json'
+  )
+  pipeline_plan = JSON.parse(File.read(opts[:pipeline_map], encoding: 'UTF-8'))
+  pipeline_plan['template_workbook_id'] ||= opts[:pipeline_template_workbook]
+  pipeline_result = WorkbookPipelineReuse.apply!(
+    spec,
+    donor_spec: donor,
+    plan: pipeline_plan
+  )
+  spec = pipeline_result['spec']
+  File.write(
+    File.join(WORK, 'pipeline-reuse.json'),
+    JSON.pretty_generate(pipeline_result['report']) + "\n"
+  )
+  line "pipeline reuse: copied #{pipeline_result['report']['pipeline_elements_copied']} proven element(s) " \
+       "from workbook #{opts[:pipeline_template_workbook]}; patched " \
+       "#{pipeline_result['report']['masters_patched'].length} page master(s)"
+end
+
 # ---- PUT-APPEND: incremental one-tab-at-a-time into an EXISTING workbook ----
 # When --workbook-target <id> is set with a single-dashboard build, append the
 # newly-built page(s) to the existing workbook's spec instead of POSTing a brand

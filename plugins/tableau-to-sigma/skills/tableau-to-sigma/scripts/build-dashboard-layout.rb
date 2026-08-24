@@ -1827,6 +1827,27 @@ dash_layout.each do |d|
 end
 
 layout_out = assemble(*page_xmls) + "\n"
+
+# Preserve workbook-local pipeline pages that have no Tableau dashboard zone
+# counterpart (hidden inputs/data/derived pages, joins, unions, sub-masters).
+# Previously the builder validated against ALL declared elements but generated
+# layout only for source dashboards, so a valid reused pipeline failed as
+# "missing elements" and the orchestrator fell back to a stacked layout.
+laid_out_page_ids = layout_out.scan(/<Page\b[^>]*\bid="([^"]+)"/).flatten
+preserved_pages = []
+WorkbookCode.pages(wb_ids_raw).each do |page|
+  page_id = page['id'].to_s
+  next if page_id.empty? || laid_out_page_ids.include?(page_id)
+  page_elements = WorkbookCode.elements_for_page(wb_ids_raw, page)
+  next if page_elements.empty?
+  layout_out << "#{WorkbookCode.page_xml(page_id, page_elements)}\n"
+  preserved_pages << { 'id' => page_id, 'name' => page['name'], 'elements' => page_elements.length }
+end
+unless preserved_pages.empty?
+  warn "preserved #{preserved_pages.length} non-dashboard pipeline page(s): " \
+       preserved_pages.map { |page| "#{page['name'] || page['id']} (#{page['elements']})" }.join(', ')
+end
+
 # Documented output-shape guard: an empty elementId is always a builder bug
 # and makes Sigma reject the whole layout PUT.
 abort 'FATAL: empty elementId in generated layout XML — builder bug' if layout_out.include?('elementId=""')
