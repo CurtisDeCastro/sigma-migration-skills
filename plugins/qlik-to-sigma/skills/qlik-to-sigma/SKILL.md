@@ -404,6 +404,23 @@ MANUAL. The builder emits the **`control-scope.json` sidecar** (contract:
 `sourceFilterSignals`, per-control `mustReach` over every chart on every page
 (static proof of global reach), and `unbound` entries with reasons.
 
+**Synthesized cross-filter controls (`--synth-controls`).** Qlik cross-filters on
+*any* field via the global associative model — including sheets with **no**
+filterpane, where a user just clicks a bar. Sigma has **no authorable chart-mark
+"Use as filter"** (UI-only), so `build-sigma-workbook.py` recreates that UX with
+controls: when the source app has **zero** filter widgets (e.g. QlikView `-prj`,
+which carries none, or a filterpane-less Sense sheet), it **synthesizes a compact
+control bar** from the most-used chart **dimension** fields (deduped, `*_KEY`/`*_ID`
+and expression dims excluded, capped by `--synth-controls-max`, default 6), each
+filtering the shared master via the *same* `build_control()` shapes + `control_lint`
+reach enforcement. Modes: `auto` (default — synth only when there are no real filter
+widgets, so apps that already have filterpanes are unchanged/golden-safe), `all`
+(also top up apps that have some filters), `off` (strict port — real widgets only).
+Synth controls are tagged `synthesized:true` in the sidecar (`synthesizedCount`),
+and are **not** counted as `sourceFilterSignals`. **Post-publish note:** true
+in-chart mark-click cross-filtering is a one-time Sigma UI step ("Use as filter"),
+not spec-authorable — call it out to the customer.
+
 **Native trellis (small multiples).** A Qlik **chart-level trellis** (a chart
 whose Appearance>Trellis splits it into a panel grid by a dimension) and the
 native **trellis-container** object both collapse to Sigma's **native element

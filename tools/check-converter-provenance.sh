@@ -51,6 +51,14 @@
 #   latency of an offline check — --online below trades the "always
 #   available" property back for a real comparison when a checkout exists.
 #
+#   A human who runs --online against the current upstream checkout and
+#   confirms that a module has not changed may record a time-bounded
+#   freshness_check:
+#     {"checked_at":"YYYY-MM-DD","upstream_head":"<sha>","result":"no-module-drift"}
+#   The standing gate uses the newer of source_commit_date and checked_at. This
+#   avoids demanding a byte-identical fake re-vendor when upstream itself has
+#   not moved, while preserving the re-audit clock and an auditable head.
+#
 #   cognos-to-sigma is not a false-flagged case: its PROVENANCE.json has no
 #   source_repo/source_commit at all by design (converter/cli.ts is vendored
 #   IN this repo, not from sigma-data-model-mcp — see tools/check-cognos-bundle.rb,
@@ -129,7 +137,35 @@ for p in paths:
         print('::error file=%s::source_commit_date %r is not ISO YYYY-MM-DD' % (p, date_str))
         fail = True
         continue
-    age = (today - pinned).days
+    checked = pinned
+    check = d.get('freshness_check')
+    if check is not None:
+        if not isinstance(check, dict):
+            print('::error file=%s::freshness_check must be an object' % p)
+            fail = True
+            continue
+        missing = [k for k in ('checked_at', 'upstream_head', 'result') if not check.get(k)]
+        if missing:
+            print('::error file=%s::freshness_check missing key(s): %s' % (p, ', '.join(missing)))
+            fail = True
+            continue
+        if check.get('result') != 'no-module-drift':
+            print('::error file=%s::freshness_check result must be no-module-drift' % p)
+            fail = True
+            continue
+        try:
+            audited = datetime.date.fromisoformat(check['checked_at'])
+        except ValueError:
+            print('::error file=%s::freshness_check.checked_at %r is not ISO YYYY-MM-DD' % (p, check.get('checked_at')))
+            fail = True
+            continue
+        if audited > today:
+            print('::error file=%s::freshness_check.checked_at %s is in the future' % (p, audited))
+            fail = True
+            continue
+        checked = max(pinned, audited)
+    age = (today - checked).days
+    checked_str = checked.isoformat()
     # vendor_arg (when present) is the RECORDED tools/vendor-converters.sh arg
     # for this plugin — needed because domo's module basename ("sql") is NOT
     # its vendor arg ("domo"); vendored_modules alone would suggest running
@@ -168,17 +204,19 @@ for p in paths:
                   'with %d OPEN local_patches entr%s. Do NOT re-vendor blind: it would drop '
                   'patches not yet landed upstream. Port each open entry upstream, retire it '
                   'here, then re-vendor. Not failing the build — the pin is deliberate.'
-                  % (p, plugin, commit, date_str, age, stale_days,
+                  % (p, plugin, commit, checked_str, age, stale_days,
                      len(open_lp), 'y' if len(open_lp) == 1 else 'ies'))
         else:
             note = ''
             if isinstance(lp, list) and lp:
                 note = (' NOTE: local_patches entries are all SUPERSEDED (landed upstream), so a '
                         're-vendor is safe here and should also retire them.')
-            print('::error file=%s::STALE — %s pinned at %s (%s, %dd old, exceeds %dd) — run: tools/vendor-converters.sh <sigma-data-model-mcp checkout> %s%s' % (p, plugin, commit, date_str, age, stale_days, mod, note))
+            print('::error file=%s::STALE — %s pinned/audited at %s (%s, %dd old, exceeds %dd) — run: tools/vendor-converters.sh <sigma-data-model-mcp checkout> %s%s' % (p, plugin, commit, checked_str, age, stale_days, mod, note))
             fail = True
     else:
-        print('%-24s %-12s %-12s %-6d  %s' % (plugin, commit, date_str, age, 'OK — within %dd freshness window' % stale_days))
+        suffix = ('; no module drift at upstream %s' % check.get('upstream_head')
+                  if isinstance(check, dict) and checked > pinned else '')
+        print('%-24s %-12s %-12s %-6d  %s' % (plugin, commit, checked_str, age, 'OK — within %dd freshness window%s' % (stale_days, suffix)))
 sys.exit(1 if fail else 0)
 " "$REF" "$STALE_DAYS"
   rc=$?
@@ -313,12 +351,27 @@ while IFS= read -r p; do
     fi
     continue
   fi
-  err="$(git show "$HEAD:$p" | python3 -c '
-import json, sys
+err="$(git show "$HEAD:$p" | python3 -c '
+import datetime, json, sys
 try:
     d = json.load(sys.stdin)
 except Exception as exc:
     print("not valid JSON (%s)" % exc); sys.exit(0)
+fc = d.get("freshness_check")
+if fc is not None:
+    if not isinstance(fc, dict):
+        print("freshness_check must be an object"); sys.exit(0)
+    missing = [k for k in ("checked_at", "upstream_head", "result") if not fc.get(k)]
+    if missing:
+        print("freshness_check missing key(s): %s" % ", ".join(missing)); sys.exit(0)
+    if fc.get("result") != "no-module-drift":
+        print("freshness_check result must be no-module-drift"); sys.exit(0)
+    try:
+        checked = datetime.date.fromisoformat(fc["checked_at"])
+    except ValueError:
+        print("freshness_check.checked_at must be ISO YYYY-MM-DD"); sys.exit(0)
+    if checked > datetime.date.today():
+        print("freshness_check.checked_at cannot be in the future"); sys.exit(0)
 lp = d.get("local_patches")
 if lp is None:
     sys.exit(0)

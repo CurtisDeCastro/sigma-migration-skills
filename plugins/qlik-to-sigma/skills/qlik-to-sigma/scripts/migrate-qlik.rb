@@ -242,6 +242,9 @@ end
 
 def run!(cmd, env: {})
   out, st = Open3.capture2e(env, *cmd)
+  # Windows consoles hand back cp1252 bytes (e.g. em-dash -> 0x97) that are invalid
+  # UTF-8; scrub so the strip/each_line below never raise Encoding::CompatibilityError.
+  out = out.force_encoding('UTF-8').scrub
   out.each_line { |l| puts "   #{l.rstrip}" } unless out.strip.empty?
   abort "FATAL: command failed (#{st.exitstatus}): #{cmd.join(' ')}" unless st.success?
   out
