@@ -70,14 +70,14 @@ python3 plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/streamlit-c
       "element_names": [
         "Data — Load Sales",
         "Region",
-        "text-retail-sales-dashboard-29-2",
         "Revenue",
         "Profit",
         "Orders",
         "Bar Chart",
         "Detail",
-        "sidebar-streamlit-app",
-        "tabs-streamlit-app"
+        "id0010",
+        "id0027",
+        "id0028"
       ],
       "metric_names": [],
       "relationship_names": []
