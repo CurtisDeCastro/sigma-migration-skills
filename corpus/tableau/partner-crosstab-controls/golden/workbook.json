@@ -254,11 +254,7 @@
           {
             "id": "p-el-metric-partner-closed-won-col-created-fyqq"
           }
-        ],
-        "totals": {
-          "showGrandTotals": "hidden",
-          "showSubtotals": "when-collapsed"
-        }
+        ]
       },
       {
         "id": "tc-page-dash-1-hdr",
