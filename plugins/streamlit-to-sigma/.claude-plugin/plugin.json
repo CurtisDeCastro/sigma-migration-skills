@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "streamlit-to-sigma",
+  "displayName": "Streamlit → Sigma",
+  "version": "0.1.0",
+  "description": "Migrate Streamlit content to Sigma — converter + assessment (scaffolded). Bundles streamlit-to-sigma + streamlit-assessment.",
+  "author": {
+    "name": "Thomas Wells"
+  },
+  "license": "MIT",
+  "keywords": [
+    "streamlit",
+    "sigma",
+    "migration",
+    "bi",
+    "converter"
+  ],
+  "skills": "./skills/"
+}
