@@ -93,7 +93,7 @@ Dir.mktmpdir('migration-pair-test') do |dir|
     '--sigma-spec', sigma_spec
   )
   assert(status.success?, "offline capture failed: #{stdout}\n#{stderr}")
-  captured_twb = File.read(File.join(capture_out, 'tableau', 'workbook-content.twb'))
+  captured_twb = File.read(File.join(capture_out, 'tableau', 'workbook-content.twb'), encoding: 'UTF-8')
   assert(!captured_twb.include?('customer.example'), 'server scrubbed from TWB')
   assert(!captured_twb.include?('dont-keep-me'), 'password scrubbed from TWB')
   captured_meta = File.read(File.join(capture_out, 'sigma', 'workbook-meta.json'))
