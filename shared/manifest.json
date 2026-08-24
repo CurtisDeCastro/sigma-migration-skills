@@ -108,7 +108,8 @@
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/code_rep.rb",
         "plugins/sigma-authoring/skills/sigma-workbooks/scripts/lib/code_rep.rb",
         "plugins/sigma-authoring/skills/custom-sql-to-data-model/scripts/lib/code_rep.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/code_rep.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/code_rep.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/code_rep.rb"
       ]
     },
     {
@@ -451,7 +452,8 @@
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-warehouse.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-warehouse.rb",
         "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-warehouse.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-warehouse.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-warehouse.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/verify-warehouse.rb"
       ]
     },
     {
@@ -554,7 +556,8 @@
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/record-visual-check.rb",
         "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/record-visual-check.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/record-visual-check.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/record-visual-check.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/record-visual-check.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/record-visual-check.rb"
       ]
     },
     {
@@ -570,7 +573,8 @@
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/blind_grade.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/blind_grade.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/blind_grade.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/blind_grade.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/blind_grade.rb"
       ]
     },
     {
@@ -586,7 +590,8 @@
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/cli_encoding.rb",
         "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/cli_encoding.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/cli_encoding.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/cli_encoding.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/cli_encoding.rb"
       ]
     },
     {
@@ -1009,7 +1014,8 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/verify-anchors.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/verify-anchors.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/verify-anchors.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-anchors.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/verify-anchors.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/verify-anchors.rb"
       ]
     },
     {
@@ -1078,7 +1084,8 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/lib/anchor_values.rb",
         "plugins/domo-to-sigma/skills/domo-to-sigma/scripts/lib/anchor_values.rb",
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/lib/anchor_values.rb",
-        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/anchor_values.rb"
+        "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/lib/anchor_values.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/anchor_values.rb"
       ]
     },
     {
@@ -1216,7 +1223,8 @@
         "plugins/hex-to-sigma/skills/hex-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/mode-to-sigma/skills/mode-to-sigma/scripts/cleanup-orphan-workbooks.rb",
         "plugins/qlik-to-sigma/skills/qlik-to-sigma/scripts/cleanup-orphan-workbooks.rb",
-        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/cleanup-orphan-workbooks.rb"
+        "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/cleanup-orphan-workbooks.rb",
+        "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/cleanup-orphan-workbooks.rb"
       ]
     },
     {
