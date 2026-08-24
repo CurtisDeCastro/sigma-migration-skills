@@ -121,6 +121,11 @@ Tableau wb `<workbook-luid>`, Sigma DM `<dm-id>`.
         "title--synthetic-win-weekly-funnel", "WIN Weekly Funnel",
         "title--synthetic-win-pareto-category", "WIN Pareto Category"
       ]
+    },
+    "workbook.json": {
+      "pages": 9,
+      "elements": 50,
+      "columns": 38
     }
   }
 }
