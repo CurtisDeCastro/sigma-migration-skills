@@ -66,6 +66,13 @@ DM/workbook POST:
   DB.SCHEMA.TABLE"}`) runs live against the connection and resolves immediately
   — the role still needs `SELECT`, but there's no catalog-sync dependency. It
   also lets you alias columns to clean display names in one place.
+- **Derive time attributes in that `sql` source.** MSTR dossiers routinely use
+  Year / Quarter / Month attributes derived from a date the cube stores as a
+  string. Do the derivation once in the SQL so the DM exposes clean typed columns
+  — e.g. `TO_DATE(REPORT_DATE,'MM/DD/YYYY') AS "Date"`,
+  `YEAR(…) AS "Year"`, `'Q'||QUARTER(…) AS "Quarter"`, `MONTHNAME(…) AS "Month"`
+  — rather than fighting string dates in every downstream formula. A real DATE
+  type also lets a KPI pick the latest period (`… [Date] = Date("YYYY-MM-DD") …`).
 
 Rejoin the normal flow at **Phase 3** (build the DM, then the workbook).
 
@@ -110,6 +117,14 @@ The bundle/vizzes tell you the data; they do **not** tell you the intended
 - **Execute every viz** (`…/instances/{mid}/chapters/{ck}/visualizations/{vk}`)
   for the exact attribute↔metric pairings and displayed values (the parity
   baseline + how derived metrics slice).
+- **Vizzes on one page can carry DIFFERENT filters — detect them per viz.** A KPI
+  may show the latest period, a table the current year, a trend all years, all on
+  the same page. Heuristic: if a viz's value is a clean fraction of the all-data
+  aggregate, look for a viz/chapter period filter before assuming your Sigma
+  aggregation is wrong. (Reproduce with the pre-filtered-source pattern in §5.)
+  Also expect **sub-1% deltas** vs the source's printed values — the shared demo
+  cubes drift and a "current year"/dynamic-window boundary rarely lands on an
+  exact calendar year; reconcile the delta, don't chase it as a logic bug.
 
 **PDF-export limits (`export-dossier-pdf.py`):** it tends to render only the
 *active/default* chapter and **blocks external images** (whitelist) — so the
@@ -153,6 +168,11 @@ which is ahead of any vendored copy.
   to long** — a `sql` source with `UNION ALL`/`UNPIVOT` (or a `transpose`
   source) that yields a `Department`-style column. Note: a column can't sit on
   both `trellis` and `color` — add a **duplicate column** for the color channel.
+  > A **nested TIME axis** (Year▸Quarter shown under year brackets) is a
+  > *different* thing — that is ONE chart, not panels. Build a single combined
+  > period column (`Text([Year]) & " " & [Quarter]`) sorted chronologically on
+  > the x-axis; do **not** trellis by year (trellis is for per-**category** small
+  > multiples, and trellising a time split reads as disconnected mini-charts).
 - **panel stack + panel selector → `tabbed-container`.** One `<Tab>` per panel
   (bare `<Element>` children only, no nested `<Container>` inside a `<Tab>`);
   drive it from a button with the `select-tab` effect if needed.
@@ -165,6 +185,30 @@ which is ahead of any vendored copy.
   tab bar and its vertical mode clips — stacked `button`s give the boxed look.
 - **dynamic "last N quarters" chapter filter → an element list filter** pinned
   to the last N period values (MSTR's "default dynamic selection filter").
+- **A grouped table that ALSO needs a filter → point it at a pre-filtered
+  hidden source element, don't filter the grouped element itself.** A per-element
+  list filter on, say, a `Year` column fights the element's `groupings`/top-n and
+  renders wrong — the top-ranked row's values get duplicated across every row and
+  the rest go blank (verified). The robust fix: add one hidden passthrough table
+  (`retail-2023` = `Retail Base` with a single `Year = 2023` filter) and source
+  the grouped tables/charts from *it*, grouping cleanly with **no** filter column
+  of their own. (This supersedes any "just hide the filter column" advice — hiding
+  it does not fix the grouping conflict.)
+- **selector panels ("Choose Metric / Geo / Time") → `control` elements.** Shape:
+  `{kind:control, controlType:"list", controlId, filters:[{source:{kind:table,
+  elementId:<target-table>}, columnId:<col>}]}` — the `filters` wire what it
+  controls (target must be a **table** element's column). **A list control also
+  needs a VALUE SOURCE or its dropdown renders EMPTY** — confirm the option-source
+  binding in the live OpenAPI `control` schema before shipping, and render to
+  verify the dropdown actually populates (an empty control passes POST silently).
+  MSTR selectors that dynamically add/remove GRID COLUMNS are **UI-only** — you
+  can't spec control-driven column visibility; reproduce as filter controls over a
+  fixed grid and flag the dynamic-column behavior as a one-click follow-up.
+- **`microcharts` → `table` with inline data bars / a composite sparkline**, but
+  the tile's measure is frequently **absent from the viz `templateMetrics`** (an
+  attribute-form or dossier-derived value). Recover it from the source or
+  approximate it and **label the approximation** — never present a guessed metric
+  as the source's exact one.
 - **Theme:** `settings.theme.name:"Dark"` + `overrides.categoricalScheme` (the
   source's palette) + `overrides.colors.highlight` (accent). Set it once at the
   document level; per-element `color.scheme` still drives bar/line series.
