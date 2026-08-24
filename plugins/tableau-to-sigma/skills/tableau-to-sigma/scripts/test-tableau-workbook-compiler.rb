@@ -39,6 +39,7 @@ ir = {
             'kind' => 'chart',
             'caption' => 'Revenue by Region',
             'chart_kind' => 'bar',
+            'measures' => [{ 'column' => 'Revenue' }],
             'filters' => [{ 'column' => 'Region', 'kind' => 'list' }],
             'calculations' => [
               { 'caption' => 'Running Revenue', 'formula' => 'RUNNING_SUM(SUM([Revenue]))' }
@@ -49,6 +50,7 @@ ir = {
             'kind' => 'chart',
             'caption' => 'Revenue and Margin',
             'chart_kind' => 'line',
+            'measures' => [{ 'column' => 'Revenue' }, { 'column' => 'Margin' }],
             'dual_axis' => true,
             'synchronized_axis' => false
           },
@@ -83,16 +85,24 @@ blocked_ir.dig('workbook', 'pages', 0, 'zones') << {
   'id' => 'z-unknown',
   'kind' => 'chart',
   'caption' => 'Unsupported Viz',
-  'chart_kind' => 'radial-tree'
+  'chart_kind' => 'radial-tree',
+  'measures' => [{ 'column' => 'Revenue' }]
+}
+blocked_ir.dig('workbook', 'pages', 0, 'zones') << {
+  'id' => 'z-unbound',
+  'kind' => 'chart',
+  'caption' => 'Unbound Viz',
+  'chart_kind' => 'bar'
 }
 blocked_ir.dig('workbook', 'pages', 0, 'zones', 0, 'calculations') << {
   'caption' => 'Selected Set',
   'formula' => '[Region] IN [Top Regions]'
 }
 blocked_plan = TableauWorkbookCompiler.compile(blocked_ir)
-assert(blocked_plan.dig('summary', 'blocking') == 2, 'unknown viz and set membership block')
+assert(blocked_plan.dig('summary', 'blocking') == 3, 'unknown viz, set membership, and missing bindings block')
 assert(blocked_plan['blocking'].any? { |entry| entry['rule'] == 'viz.unknown.v1' }, 'unknown viz named')
 assert(blocked_plan['blocking'].any? { |entry| entry['rule'] == 'formula.set-membership.v1' }, 'set membership named')
+assert(blocked_plan['blocking'].any? { |entry| entry['rule'] == 'viz.binding-missing.v1' }, 'missing chart bindings named')
 
 Dir.mktmpdir('workbook-compiler-cli') do |dir|
   File.write(File.join(dir, 'workbook-content.twb'), '<workbook/>')

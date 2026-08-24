@@ -4894,6 +4894,7 @@ if mechanical
                '--coverage-out', File.join(WORK, 'coverage.json')]
   build_cmd += ['--meta', layout_json.sub(/\.json$/, '-meta.json')] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
   build_cmd += ['--auto-controls'] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
+  build_cmd += ['--skip-dashboard-read', opts[:skip_dashboard_read]] if opts[:skip_dashboard_read]
   build_cmd += ['--detected-actions', detected_actions_path] if File.exist?(detected_actions_path)
   build_cmd += ['--grain-plan', grain_plan_path] if grain_plan && File.exist?(grain_plan_path)
   if deterministic_plan_path && File.exist?(deterministic_plan_path)

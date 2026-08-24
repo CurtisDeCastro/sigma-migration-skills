@@ -138,6 +138,13 @@ module TableauWorkbookCompiler
 
     case zone['kind'].to_s
     when 'chart', 'worksheet'
+      unless chart_bindings_present?(zone)
+        return unsupported(
+          base,
+          'viz.binding-missing.v1',
+          'chart has no shelves, measures, channels, or calculations to materialize'
+        )
+      end
       chart_key = normalized_chart_key(zone)
       if zone['dual_axis']
         return base.merge(
@@ -371,6 +378,16 @@ module TableauWorkbookCompiler
     key = zone['is_kpi'] ? 'kpi' : (zone['is_crosstab'] ? 'crosstab' : zone['chart_kind'])
     key = MARK_FALLBACKS[zone['mark_class'].to_s.downcase] if key.to_s.empty?
     key.to_s.downcase.tr('_', '-').strip
+  end
+
+  def chart_bindings_present?(zone)
+    shelves = [zone['rows_shelf'], zone['cols_shelf']].compact.any? do |shelf|
+      shelf.is_a?(Hash) ? Array(shelf['fields']).any? : !shelf.to_s.strip.empty?
+    end
+    shelves ||
+      Array(zone['measures']).any? ||
+      (zone['channels'].is_a?(Hash) && zone['channels'].any?) ||
+      Array(zone['calculations']).any?
   end
 
   def control_kind(parameter)
