@@ -77,6 +77,7 @@ require_relative 'lib/workbook_ir'
 require_relative 'lib/tableau_workbook_compiler'
 require_relative 'lib/workbook_rule_registry'
 require_relative 'lib/compile_plan_apply'
+require_relative 'lib/compile_plan_reconcile'
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -9762,6 +9763,25 @@ File.write(coverage_path, JSON.pretty_generate(
 warn "wrote #{coverage_path} (#{built_n} element(s) built; " \
      "#{by_sev['dropped'] || 0} dropped, #{by_sev['degraded'] || 0} degraded, " \
      "#{by_sev['approximated'] || 0} approximated)"
+
+if compile_plan
+  provenance_path = File.join(opts[:tab], 'chart-provenance.json')
+  provenance_doc = File.exist?(provenance_path) ? JSON.parse(File.read(provenance_path, encoding: 'UTF-8')) : {}
+  coverage_doc = JSON.parse(File.read(coverage_path, encoding: 'UTF-8'))
+  chart_doc = JSON.parse(File.read(opts[:out], encoding: 'UTF-8'))
+  reconcile = CompilePlanReconcile.reconcile(
+    plan: compile_plan,
+    chart_specs: chart_doc,
+    provenance: provenance_doc,
+    coverage: coverage_doc
+  )
+  reconcile_path = File.join(opts[:tab], 'compile-plan-reconcile.json')
+  File.write(reconcile_path, JSON.pretty_generate(reconcile) + "\n")
+  warn "compile-plan reconcile: #{reconcile['status']} " \
+       "(#{reconcile['matched_chart_keys'].length}/#{reconcile['planned_chart_keys'].length} charts, " \
+       "#{reconcile['built_control_names'].length}/#{reconcile['planned_control_names'].length} controls)"
+  abort "compile-plan reconcile failed — see #{reconcile_path}" unless reconcile['status'] == 'PASS'
+end
 
 # ---- manual-residues.json — the G6 build-it ledger ---------------------------
 # Phase 1e (extract-calc-fields.rb WINPROBE split) routes the STAYS-MANUAL

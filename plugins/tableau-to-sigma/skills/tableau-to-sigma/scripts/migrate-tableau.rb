@@ -1661,12 +1661,22 @@ if opts[:finalize]
   report_verdict = report_doc['verdict'] || 'unavailable'
   line "migration report: #{report_verdict}#{report_st.success? ? '' : " (exit #{report_st.exitstatus})"}"
 
+  compiler_gate_out = ''
+  compiler_gate_ok = true
+  if File.exist?(File.join(WORK, 'workbook-compile-plan.json'))
+    compiler_gate_out, compiler_gate_st = run!(
+      ['ruby', File.join(HERE, 'assert-compiler-runtime.rb'), '--workdir', WORK],
+      allow_fail: true
+    )
+    compiler_gate_ok = compiler_gate_st.success?
+  end
+
   # With an explicit --min-pass-rate (honest NAMED divergences), the census-
   # aware gate is the parity authority — phase6's own exit stays strict-100%.
   parity_ok = p6st.success? || (opts[:min_pass_rate] && gst.success?)
   accounting_ok = census_st.success? && report_st.success? && report_verdict != 'RED'
   all_green = parity_ok && clst.success? && gst.success? && dsfst.success? &&
-              agst.success? && accounting_ok
+              agst.success? && accounting_ok && compiler_gate_ok
 
   # ---------------------------------------------------------------------------
   # Phase E (OPT-IN) — Enhance. Runs ONLY when --enhance was passed (here or on
@@ -1802,7 +1812,7 @@ if opts[:finalize]
   else
     puts "PARITY      : #{pf['status'] || '?'} (#{pf['charts_pass']}/#{pf['charts_total']} charts#{state['extract_mode'] ? ', extract-mode' : ''})"
   end
-  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"} action-gates=#{agst.success? ? 'PASS' : "FAIL(#{agst.exitstatus})"} source-census=#{census_st.success? ? 'PASS' : "FAIL(#{census_st.exitstatus})"} report=#{report_verdict}#{report_st.success? ? '' : "(#{report_st.exitstatus})"}"
+  puts "GATES       : phase6=#{p6st.success? ? 'PASS' : 'FAIL'} cleanup=#{clst.success? ? 'PASS' : 'FAIL'} assert-phase6-ran=#{gst.success? ? 'PASS' : "FAIL(#{gst.exitstatus})"} ds-filters=#{dsfst.success? ? 'PASS' : "FAIL(#{dsfst.exitstatus})"} action-gates=#{agst.success? ? 'PASS' : "FAIL(#{agst.exitstatus})"} compiler=#{compiler_gate_ok ? 'PASS' : 'FAIL'} source-census=#{census_st.success? ? 'PASS' : "FAIL(#{census_st.exitstatus})"} report=#{report_verdict}#{report_st.success? ? '' : "(#{report_st.exitstatus})"}"
   puts "ENHANCE     : #{enhance_line}" if enhance_line
   puts "PUNCH LIST  : #{_pl_note}" if _pl_note
   puts "STATUS      : #{all_green ? 'GREEN' : 'NOT GREEN'}"
@@ -1844,6 +1854,7 @@ if opts[:finalize]
                 elsif !parity_ok then p6out # p6 failure NOT excused by --min-pass-rate
                 elsif !dsfst.success? then dsfout
                 elsif !agst.success? then agout
+                elsif !compiler_gate_ok then compiler_gate_out
                 elsif !census_st.success? then census_out
                 elsif !report_st.success? then report_out
                 else clout
@@ -1854,6 +1865,7 @@ if opts[:finalize]
                                                    cleanup: clst.exitstatus,
                                                    dsfilters: dsfst.exitstatus,
                                                    actiongates: agst.exitstatus,
+                                                   compiler: compiler_gate_ok ? 0 : 3,
                                                    census: census_st.exitstatus,
                                                    report: report_st.exitstatus,
                                                    report_verdict: report_verdict },
