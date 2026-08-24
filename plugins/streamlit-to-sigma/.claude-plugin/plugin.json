@@ -3,7 +3,7 @@
   "name": "streamlit-to-sigma",
   "displayName": "Streamlit → Sigma",
   "version": "0.1.0",
-  "description": "Migrate Streamlit content to Sigma — converter + assessment (scaffolded). Bundles streamlit-to-sigma + streamlit-assessment.",
+  "description": "Migrate Streamlit source projects to Sigma with safe static analysis, conservative Pandas lineage, controls/charts/pages/layout conversion, parity gates, and read-only assessment.",
   "author": {
     "name": "Thomas Wells"
   },

@@ -173,7 +173,7 @@
     {
       "name": "streamlit-to-sigma",
       "source": "./plugins/streamlit-to-sigma",
-      "description": "Streamlit → Sigma (scaffolded). Bundles streamlit-to-sigma + streamlit-assessment.",
+      "description": "Streamlit → Sigma static converter and assessment — SQL/dataframe lineage, controls, charts, pages, layout, gaps, and parity.",
       "category": "migration",
       "keywords": ["streamlit", "migration", "bi"]
     }
