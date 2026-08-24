@@ -56,7 +56,8 @@ module CompilePlanReconcile
   def flatten_elements(chart_specs)
     return chart_specs if chart_specs.is_a?(Array)
     return [] unless chart_specs.is_a?(Hash)
-    Array(chart_specs['data_elements']) +
-      Array(chart_specs['pages']).flat_map { |page| Array(page['elements']) }
+    # Hidden helper/data elements support planned visuals but are not themselves
+    # source dashboard visuals and therefore do not require plan keys.
+    Array(chart_specs['pages']).flat_map { |page| Array(page['elements']) }
   end
 end

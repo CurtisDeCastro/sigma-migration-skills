@@ -74,6 +74,12 @@ ir = {
             'measures' => [{ 'column' => 'Amount', 'derivation' => 'sum' }]
           },
           {
+            'id' => 'z-filter',
+            'kind' => 'filter',
+            'filter_column_caption' => 'Region Friendly',
+            'filter_column_datatype' => 'string'
+          },
+          {
             'id' => 'z-nav',
             'kind' => 'dashboard-object',
             'caption' => 'Details',

@@ -218,7 +218,8 @@ module TableauWorkbookCompiler
 
     filters = pages.flat_map do |page|
       Array(page['zones']).flat_map do |zone|
-        nested = Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
+        nested = if %w[filter parameter].include?(zone['kind'].to_s)
+          Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
           name = filter['column_caption'] || filter['caption'] ||
             filter['column'] || filter['field'] || filter['raw_param']
           if name.to_s.empty?
@@ -242,6 +243,9 @@ module TableauWorkbookCompiler
               'target_master_id' => "master-#{slug(page['name'])}"
             }
           end
+          end
+        else
+          []
         end
         zone_control =
           if %w[filter parameter].include?(zone['kind'].to_s)
