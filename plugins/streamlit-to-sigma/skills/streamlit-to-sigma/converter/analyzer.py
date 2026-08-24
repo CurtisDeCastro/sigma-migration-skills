@@ -479,6 +479,19 @@ class ModuleAnalyzer(ast.NodeVisitor):
                         self.provenance(node),
                     )
                 )
+            else:
+                operations = dataframe_operations(node.value)
+                if set(operations) & UNLOWERED_PANDAS_OPS:
+                    self.dataframe_ops[target] = operations
+                    self.ir.dataframes.append(
+                        Dataframe(
+                            target,
+                            None,
+                            operations,
+                            unparse(node.value),
+                            self.provenance(node),
+                        )
+                    )
             if isinstance(node.value, ast.Call):
                 leaf = call_path(node.value.func).split(".")[-1]
                 if "component" in call_path(node.value.func).lower():
