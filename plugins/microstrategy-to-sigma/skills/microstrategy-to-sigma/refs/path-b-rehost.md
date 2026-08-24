@@ -194,16 +194,23 @@ which is ahead of any vendored copy.
   the grouped tables/charts from *it*, grouping cleanly with **no** filter column
   of their own. (This supersedes any "just hide the filter column" advice — hiding
   it does not fix the grouping conflict.)
-- **selector panels ("Choose Metric / Geo / Time") → `control` elements.** Shape:
-  `{kind:control, controlType:"list", controlId, filters:[{source:{kind:table,
-  elementId:<target-table>}, columnId:<col>}]}` — the `filters` wire what it
-  controls (target must be a **table** element's column). **A list control also
-  needs a VALUE SOURCE or its dropdown renders EMPTY** — confirm the option-source
-  binding in the live OpenAPI `control` schema before shipping, and render to
-  verify the dropdown actually populates (an empty control passes POST silently).
-  MSTR selectors that dynamically add/remove GRID COLUMNS are **UI-only** — you
-  can't spec control-driven column visibility; reproduce as filter controls over a
-  fixed grid and flag the dynamic-column behavior as a one-click follow-up.
+- **selector panels ("Choose Metric / Geo / Time") → `control` elements.** A
+  `list` control needs TWO distinct bindings — a double-nested **`source`** that
+  populates the dropdown's *options*, and a **`filters`** array that wires what it
+  *filters* downstream. They are separate; the `filters` target must be a
+  **table** element's column. Verified shape (live):
+  ```
+  { "kind": "control", "controlType": "list", "controlId": "YearCtl",
+    "source":  { "kind": "source", "source": { "kind": "table", "elementId": "grid" }, "columnId": "col-year" },
+    "filters": [ { "source": { "kind": "table", "elementId": "grid" }, "columnId": "col-year" } ] }
+  ```
+  **Omit `source` and the dropdown renders EMPTY** even though the POST returns
+  200 — a `filters`-only control does not target/populate, so always render and
+  confirm the options appear. A default selection is `values:[…]` and must match
+  the column's underlying **type** (a numeric year is `2023`, not `"2023"` — a
+  type mismatch silently fails to pre-select). MSTR selectors that dynamically
+  add/remove GRID COLUMNS are **UI-only** — reproduce as filter controls over a
+  fixed grid and flag the dynamic-column behavior.
 - **`microcharts` → `table` with inline data bars / a composite sparkline**, but
   the tile's measure is frequently **absent from the viz `templateMetrics`** (an
   attribute-form or dossier-derived value). Recover it from the source or
