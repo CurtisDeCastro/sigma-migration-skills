@@ -99,6 +99,16 @@ end
 abort 'master-columns.json produced no deterministic master columns' if master_columns.empty?
 
 chart_document = JSON.parse(charts.read(encoding: 'UTF-8'))
+grand_total_pivots = Array(config['pivot_grand_totals'])
+unless grand_total_pivots.empty?
+  chart_pages_for_totals = chart_document.is_a?(Hash) ? Array(chart_document['pages']) : []
+  chart_pages_for_totals.flat_map { |page| Array(page['elements']) }.each do |element|
+    next unless element['kind'] == 'pivot-table' && grand_total_pivots.include?(element['name'])
+    # Absence uses Sigma's native grand-total behavior. The explicit "hidden"
+    # shape is only correct when the source disables totals.
+    element.delete('totals')
+  end
+end
 chart_pages = chart_document.is_a?(Hash) && chart_document['pages'] ? chart_document['pages'] : chart_document
 data_elements = chart_document.is_a?(Hash) ? Array(chart_document['data_elements']) : []
 theme = chart_document.is_a?(Hash) ? chart_document['theme'] : nil
