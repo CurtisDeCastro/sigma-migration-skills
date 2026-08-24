@@ -55,6 +55,7 @@ require_relative 'lib/layout'
 require_relative 'lib/zone_census'
 require_relative 'lib/arrangement_lint'
 require_relative 'lib/workbook_code'
+require_relative 'lib/workbook_ir'
 include SigmaLayout
 
 # ---- Source-derived header chrome -----------------------------------------
@@ -108,6 +109,7 @@ end
 opts = { page_cols: 24, page_rows: 32, row_scale: 1.5, chart_y0: 29.7,
          chart_y1: 100.0, chart_row0: 6, renames: {}, pruned_elements: [] }
 OptionParser.new do |p|
+  p.on('--ir PATH', 'canonical workbook-ir.json; resolves layout/wb-ids/out') { |v| opts[:ir] = v }
   p.on('--layout PATH')        { |v| opts[:layout] = v }
   p.on('--wb-ids PATH')        { |v| opts[:wb_ids] = v }
   p.on('--out PATH')           { |v| opts[:out] = v }
@@ -128,6 +130,12 @@ OptionParser.new do |p|
   p.on('--no-containers', 'force the geometry-banded layout even when the dashboard nests a filter/parameter rail') { opts[:no_containers] = true }
   p.on('--no-synthetic-title', 'never fabricate the page-name header band (synthetic title banner)') { opts[:no_synthetic_title] = true }
 end.parse!
+if opts[:ir]
+  ir_root = File.dirname(File.expand_path(opts[:ir]))
+  opts[:layout] ||= WorkbookIR.artifact_path(opts[:ir], 'layout')
+  opts[:wb_ids] ||= WorkbookIR.artifact_path(opts[:ir], 'workbook_ids')
+  opts[:out] ||= WorkbookIR.artifact_path(opts[:ir], 'layout_xml') || File.join(ir_root, 'layout.xml')
+end
 %i[layout wb_ids out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
 
 # ---- Rename persistence (#422 re-entry repeat-tax) --------------------------
@@ -1901,3 +1909,17 @@ puts "wrote #{census_out} (#{census_pages.size} page census record(s): " \
      "#{census_pages.map { |c| "#{c['page']} #{c['placed']}/#{c['zones']} tiles, fill #{(c['grid_fill_pct'] * 100).round}%" }.join('; ')})"
 puts "wrote #{arr_out} (#{arrangement_pages.size} page arrangement record(s), " \
      "#{arr_total} violation(s)#{arr_total.positive? ? ' — see ARRANGEMENT WARN lines above' : ''})"
+
+if opts[:ir]
+  WorkbookIR.emit(
+    File.dirname(opts[:layout]),
+    out: opts[:ir],
+    overrides: {
+      'layout_xml' => opts[:out],
+      'layout_elements' => "#{opts[:out]}.elements.json",
+      'layout_census' => census_out,
+      'layout_arrangement' => arr_out
+    }
+  )
+  puts "refreshed workbook IR #{opts[:ir]}"
+end

@@ -73,10 +73,12 @@ require_relative 'lib/kpi_card'       # shared KPI-chart emitter (comparative-KP
 require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-measure detector
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
+require_relative 'lib/workbook_ir'
 require 'erb'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
+  p.on('--ir PATH', 'canonical workbook-ir.json; resolves tableau-dir/layout/meta/master-map/out') { |v| opts[:ir] = v }
   p.on('--tableau-dir DIR')         { |v| opts[:tab] = v }
   p.on('--layout PATH')             { |v| opts[:layout] = v }
   p.on('--meta PATH', 'parse-twb-layout sister meta file (worksheets+shared_filters)') { |v| opts[:meta] = v }
@@ -122,6 +124,15 @@ OptionParser.new do |p|
     opts[:detected_actions_file] = v
   end
 end.parse!
+if opts[:ir]
+  ir_root = File.dirname(File.expand_path(opts[:ir]))
+  opts[:tab] ||= ir_root
+  opts[:layout] ||= WorkbookIR.artifact_path(opts[:ir], 'layout')
+  opts[:meta] ||= WorkbookIR.artifact_path(opts[:ir], 'meta')
+  opts[:mmap] ||= WorkbookIR.artifact_path(opts[:ir], 'master_map')
+  opts[:grain_plan] ||= WorkbookIR.artifact_path(opts[:ir], 'grain_plan')
+  opts[:out] ||= WorkbookIR.artifact_path(opts[:ir], 'chart_specs') || File.join(ir_root, 'chart-specs.json')
+end
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
 
 # Load the referenceable DM metrics once; every measure-emission site prefers a
@@ -9836,4 +9847,19 @@ begin
   end
 rescue StandardError => e
   warn "WARN: manual-residues ledger skipped (#{e.class}: #{e.message})"
+end
+
+# Keep the canonical IR synchronized for single-entry compiler consumers.
+if opts[:ir]
+  WorkbookIR.emit(
+    opts[:tab],
+    out: opts[:ir],
+    overrides: {
+      'chart_specs' => opts[:out],
+      'chart_provenance' => File.join(opts[:tab], 'chart-provenance.json'),
+      'control_scope' => File.join(opts[:tab], 'control-scope.json'),
+      'coverage' => coverage_path
+    }
+  )
+  warn "refreshed workbook IR #{opts[:ir]}"
 end
