@@ -43,6 +43,10 @@ auto_workdir = options[:workdir].nil?
 workdir = Pathname(options[:workdir] || Dir.mktmpdir('tableau-offline-compile')).expand_path
 FileUtils.mkdir_p(workdir)
 required_inputs.each { |name| FileUtils.cp(case_dir.join(name), workdir.join(name)) }
+if case_dir.join('views').directory?
+  FileUtils.rm_rf(workdir.join('views'))
+  FileUtils.cp_r(case_dir.join('views'), workdir.join('views'))
+end
 
 begin
 HERE = Pathname(__dir__).freeze
