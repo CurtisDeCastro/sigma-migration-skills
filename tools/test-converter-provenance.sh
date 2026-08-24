@@ -24,7 +24,8 @@
 #            fails; a stale entry carrying local_patches gets the
 #            do-not-re-vendor-blind note; an in-skill (cognos-shaped, no
 #            source_repo) entry is reported explicitly as not-applicable,
-#            never silently dropped or miscounted as stale
+#            never silently dropped or miscounted as stale; a recent audited
+#            no-module-drift freshness_check passes without a fake re-vendor
 #   Part F — --online soft-pass: with no local sigma-data-model-mcp checkout
 #            present, --online exits 0 with a warning rather than failing —
 #            it is a human-driven convenience, never a hard CI requirement
@@ -211,7 +212,31 @@ check $? "cognos-shaped (no source_repo) entry reported explicitly as not-applic
 ! grep -q "tooly-to-sigma.*STALE\|STALE.*tooly-to-sigma" "$TMP/out"
 check $? "cognos-shaped entry is never counted as stale"
 
-sed -i.bak "s/$OLD_DATE/$TODAY_DATE/" "$TOOLX/PROVENANCE.json" && rm -f "$TOOLX/PROVENANCE.json.bak"
+python3 - "$TOOLX/PROVENANCE.json" "$TODAY_DATE" <<'PYEOF'
+import json, sys
+p, today = sys.argv[1:]
+d = json.load(open(p))
+d["freshness_check"] = {
+    "checked_at": today,
+    "upstream_head": d["source_commit"],
+    "result": "no-module-drift",
+}
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+E0a="$(commit_all audited-no-drift)"
+CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E0a" >"$TMP/out" 2>&1; RC=$?
+[ "$RC" -eq 0 ]; check $? "fresh no-module-drift attestation passes without fake re-vendor (got $RC)"
+grep -q "no module drift at upstream aaaaaaa" "$TMP/out"
+check $? "passing attestation names the audited upstream head"
+
+python3 - "$TOOLX/PROVENANCE.json" "$TODAY_DATE" <<'PYEOF'
+import json, sys
+p, today = sys.argv[1:]
+d = json.load(open(p))
+d.pop("freshness_check", None)
+d["source_commit_date"] = today
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
 E1="$(commit_all fresh)"
 CONVERTER_STALENESS_DAYS=14 bash "$GUARD" --freshness "$E1" >"$TMP/out" 2>&1; RC=$?
 [ "$RC" -eq 0 ]; check $? "today's source_commit_date passes freshness (got $RC)"
