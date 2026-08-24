@@ -2,71 +2,17 @@
 
 require 'digest'
 require 'json'
+require_relative 'workbook_rule_registry'
 
 # Deterministic lowering planner for Tableau workbook semantics. It converts the
 # canonical workbook IR into an explicit rule-by-rule plan consumed by the
 # existing chart/layout builders. Unsupported constructs are blocking records,
 # never silent fallbacks.
 module TableauWorkbookCompiler
-  SCHEMA_VERSION = 1
-
-  CHART_RULES = {
-    'bar' => ['bar-chart', 'viz.bar.v1'],
-    'bar-chart' => ['bar-chart', 'viz.bar.v1'],
-    'line' => ['line-chart', 'viz.line.v1'],
-    'line-chart' => ['line-chart', 'viz.line.v1'],
-    'area' => ['area-chart', 'viz.area.v1'],
-    'area-chart' => ['area-chart', 'viz.area.v1'],
-    'pie' => ['pie-chart', 'viz.pie.v1'],
-    'donut' => ['pie-chart', 'viz.donut.v1'],
-    'scatter' => ['scatter-plot', 'viz.scatter.v1'],
-    'scatter-plot' => ['scatter-plot', 'viz.scatter.v1'],
-    'map' => ['map', 'viz.map.v1'],
-    'symbol-map' => ['map', 'viz.map.v1'],
-    'filled-map' => ['map', 'viz.map-filled.v1'],
-    'table' => ['table', 'viz.table.v1'],
-    'crosstab' => ['pivot-table', 'viz.pivot.v1'],
-    'pivot' => ['pivot-table', 'viz.pivot.v1'],
-    'pivot-table' => ['pivot-table', 'viz.pivot.v1'],
-    'kpi' => ['kpi-chart', 'viz.kpi.v1'],
-    'kpi-chart' => ['kpi-chart', 'viz.kpi.v1'],
-    'trellis' => ['bar-chart', 'viz.trellis.v1'],
-    'box-plot' => ['box-plot', 'viz.box.v1'],
-    'histogram' => ['bar-chart', 'viz.histogram.v1'],
-    'gantt' => ['bar-chart', 'viz.gantt.v1']
-  }.freeze
-
-  MARK_FALLBACKS = {
-    'bar' => 'bar',
-    'line' => 'line',
-    'area' => 'area',
-    'pie' => 'pie',
-    'circle' => 'scatter',
-    'square' => 'scatter',
-    'polygon' => 'filled-map',
-    'map' => 'map',
-    'text' => 'table'
-  }.freeze
-
-  TABLE_CALC_RECIPES = {
-    'RUNNING_SUM' => 'formula.running-sum.v1',
-    'RUNNING_AVG' => 'formula.running-avg.v1',
-    'RUNNING_MIN' => 'formula.running-min.v1',
-    'RUNNING_MAX' => 'formula.running-max.v1',
-    'WINDOW_SUM' => 'formula.window-sum.v1',
-    'WINDOW_AVG' => 'formula.window-avg.v1',
-    'WINDOW_MIN' => 'formula.window-min.v1',
-    'WINDOW_MAX' => 'formula.window-max.v1',
-    'RANK' => 'formula.rank.v1',
-    'RANK_DENSE' => 'formula.rank-dense.v1',
-    'RANK_UNIQUE' => 'formula.row-number.v1',
-    'LOOKUP' => 'formula.lookup.v1',
-    'INDEX' => 'formula.index.v1',
-    'FIRST' => 'formula.first.v1',
-    'LAST' => 'formula.last.v1',
-    'TOTAL' => 'formula.partition-total.v1',
-    'SIZE' => 'formula.partition-size.v1'
-  }.freeze
+  SCHEMA_VERSION = 2
+  CHART_RULES = WorkbookRuleRegistry::CHART_RULES
+  MARK_FALLBACKS = WorkbookRuleRegistry::MARK_FALLBACKS
+  TABLE_CALC_RECIPES = WorkbookRuleRegistry::TABLE_CALC_RECIPES
 
   module_function
 
@@ -102,6 +48,9 @@ module TableauWorkbookCompiler
         'pages' => pages.length,
         'source_zones' => visuals.length,
         'visuals_lowered' => visuals.count { |entry| entry['status'] == 'lowered' },
+        'planned_chart_visuals' => visuals.count do |entry|
+          entry['status'] == 'lowered' && chart_target?(entry['target_kind'])
+        end,
         'controls_lowered' => controls.count { |entry| entry['status'] == 'lowered' },
         'formulas_lowered' => formulas.count { |entry| entry['status'] == 'lowered' },
         'actions_lowered' => actions.count { |entry| entry['status'] == 'lowered' },
@@ -151,13 +100,19 @@ module TableauWorkbookCompiler
           'status' => 'lowered',
           'target_kind' => 'combo-chart',
           'rule' => 'viz.dual-axis-combo.v1',
-          'synchronized_axis' => !!zone['synchronized_axis']
+          'synchronized_axis' => !!zone['synchronized_axis'],
+          'bindings' => compile_bindings(dashboard, zone)
         )
       end
-      target, rule = CHART_RULES[chart_key]
+      target, rule = WorkbookRuleRegistry.target_for(chart_key)
       return unsupported(base, 'viz.unknown.v1', "unknown chart family #{chart_key.inspect}") unless target
 
-      base.merge('status' => 'lowered', 'target_kind' => target, 'rule' => rule)
+      base.merge(
+        'status' => 'lowered',
+        'target_kind' => target,
+        'rule' => rule,
+        'bindings' => compile_bindings(dashboard, zone)
+      )
     when 'filter', 'parameter'
       base.merge('status' => 'lowered', 'target_kind' => 'control', 'rule' => 'control.zone.v1')
     when 'text', 'title', 'dash-title'
@@ -195,6 +150,57 @@ module TableauWorkbookCompiler
     end
   end
 
+  def compile_bindings(dashboard, zone)
+    rows = axis_bindings(zone['rows_shelf'])
+    cols = axis_bindings(zone['cols_shelf'])
+    values = Array(zone['measures']).map do |measure|
+      {
+        'column' => WorkbookRuleRegistry.field_name(measure),
+        'formula' => WorkbookRuleRegistry.aggregate_formula(measure),
+        'derivation' => measure.is_a?(Hash) ? measure['derivation'] : nil
+      }.compact
+    end
+    if values.empty?
+      values = Array(zone['calculations']).select { |calc| calc.is_a?(Hash) }.map do |calc|
+        name = calc['caption'] || calc['name']
+        { 'column' => name, 'formula' => WorkbookRuleRegistry.aggregate_formula('name' => name) }
+      end
+    end
+    filters = Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
+      {
+        'column' => filter['column_caption'] || filter['caption'] ||
+          filter['column'] || filter['field'] || filter['raw_param'],
+        'kind' => filter['kind'] || 'list',
+        'mode' => filter['exclude'] ? 'exclude' : 'include',
+        'values' => filter['members'] || filter['values']
+      }.compact
+    end
+    {
+      'source' => {
+        'master_id' => "master-#{slug(dashboard)}",
+        'pipeline_root' => nil
+      },
+      'rows' => rows,
+      'columns' => cols,
+      'values' => values,
+      'filters' => filters,
+      'channels' => zone['channels'] || {},
+      'metric_eligible' => filters.empty?
+    }
+  end
+
+  def axis_bindings(shelf)
+    fields = shelf.is_a?(Hash) ? Array(shelf['fields']) : []
+    fields.map do |field|
+      {
+        'column' => WorkbookRuleRegistry.field_name(field),
+        'formula' => WorkbookRuleRegistry.master_formula(field),
+        'role' => field.is_a?(Hash) ? field['role'] : nil,
+        'derivation' => field.is_a?(Hash) ? field['derivation'] : nil
+      }.compact
+    end
+  end
+
   def compile_controls(ir, pages)
     parameters = Array(ir.dig('workbook', 'parameters')).map do |parameter|
       name = parameter['caption'] || parameter['name'] || parameter['id']
@@ -213,7 +219,8 @@ module TableauWorkbookCompiler
     filters = pages.flat_map do |page|
       Array(page['zones']).flat_map do |zone|
         nested = Array(zone['filters']).reject { |filter| filter['is_action'] }.map do |filter|
-          name = filter['caption'] || filter['column'] || filter['field'] || filter['raw_param']
+          name = filter['column_caption'] || filter['caption'] ||
+            filter['column'] || filter['field'] || filter['raw_param']
           if name.to_s.empty?
             {
               'key' => stable_key('filter', page['name'], zone['id']),
@@ -230,7 +237,9 @@ module TableauWorkbookCompiler
               'name' => name,
               'status' => 'lowered',
               'target_kind' => filter_control_kind(filter),
-              'rule' => 'control.filter.v1'
+              'rule' => 'control.filter.v1',
+              'members' => filter['members'] || filter['values'],
+              'target_master_id' => "master-#{slug(page['name'])}"
             }
           end
         end
@@ -257,7 +266,9 @@ module TableauWorkbookCompiler
                   'datatype' => zone['filter_column_datatype'],
                   'display' => zone['control_display']
                 ),
-                'rule' => 'control.zone.v1'
+                'rule' => 'control.zone.v1',
+                'column_caption' => name,
+                'target_master_id' => "master-#{slug(page['name'])}"
               }]
             end
           else
@@ -303,14 +314,23 @@ module TableauWorkbookCompiler
 
     table_functions = TABLE_CALC_RECIPES.keys.select { |function| formula.match?(/\b#{Regexp.escape(function)}\s*\(/i) }
     unless table_functions.empty?
-      recipes = table_functions.map { |function| TABLE_CALC_RECIPES.fetch(function) }.uniq
-      return base.merge('status' => 'lowered', 'rule' => 'formula.table-calc.v1', 'recipes' => recipes)
+      recipes = table_functions.map { |function| TABLE_CALC_RECIPES.fetch(function).first }.uniq
+      return base.merge(
+        'status' => 'lowered',
+        'rule' => 'formula.table-calc.v1',
+        'recipes' => recipes,
+        'sigma_formula' => lower_formula(formula)
+      )
     end
     if formula.match?(/\{(?:FIXED|INCLUDE|EXCLUDE)\b/i)
-      return base.merge('status' => 'lowered', 'rule' => 'formula.lod.v1')
+      return base.merge(
+        'status' => 'verify-required',
+        'rule' => 'formula.lod.v1',
+        'reason' => 'LOD lowering requires the data-model grain compiler'
+      )
     end
 
-    base.merge('status' => 'lowered', 'rule' => 'formula.scalar.v1')
+    base.merge('status' => 'lowered', 'rule' => 'formula.scalar.v1', 'sigma_formula' => lower_formula(formula))
   end
 
   def compile_actions(pages)
@@ -359,7 +379,7 @@ module TableauWorkbookCompiler
 
   def validate(plan)
     errors = []
-    errors << 'schemaVersion must be 1' unless plan['schemaVersion'] == SCHEMA_VERSION
+    errors << "schemaVersion must be #{SCHEMA_VERSION}" unless plan['schemaVersion'] == SCHEMA_VERSION
     errors << 'kind must be tableau-workbook-compile-plan' unless plan['kind'] == 'tableau-workbook-compile-plan'
     %w[pages visuals controls formulas actions source_gaps blocking].each do |key|
       errors << "#{key} must be an array" unless plan[key].is_a?(Array)
@@ -367,6 +387,15 @@ module TableauWorkbookCompiler
     keys = %w[visuals controls formulas actions].flat_map { |section| Array(plan[section]).map { |entry| entry['key'] } }
     duplicates = keys.compact.tally.select { |_key, count| count > 1 }.keys
     errors << "duplicate compile keys: #{duplicates.join(', ')}" unless duplicates.empty?
+    Array(plan['visuals']).each_with_index do |visual, index|
+      next unless visual['status'] == 'lowered' && chart_target?(visual['target_kind'])
+      bindings = visual['bindings']
+      errors << "visuals[#{index}] lowered chart is missing bindings" unless bindings.is_a?(Hash)
+      if bindings.is_a?(Hash) &&
+         (Array(bindings['rows']) + Array(bindings['columns']) + Array(bindings['values'])).empty?
+        errors << "visuals[#{index}] lowered chart has no semantic field bindings"
+      end
+    end
     errors
   end
 
@@ -376,8 +405,18 @@ module TableauWorkbookCompiler
 
   def normalized_chart_key(zone)
     key = zone['is_kpi'] ? 'kpi' : (zone['is_crosstab'] ? 'crosstab' : zone['chart_kind'])
+    if key.to_s.downcase == 'table' && shelf_has_dimension?(zone['rows_shelf']) &&
+       shelf_has_dimension?(zone['cols_shelf']) && Array(zone['measures']).any?
+      key = 'crosstab'
+    end
     key = MARK_FALLBACKS[zone['mark_class'].to_s.downcase] if key.to_s.empty?
     key.to_s.downcase.tr('_', '-').strip
+  end
+
+  def shelf_has_dimension?(shelf)
+    Array(shelf.is_a?(Hash) ? shelf['fields'] : nil).any? do |field|
+      !field.is_a?(Hash) || %w[dim dimension].include?(field['role'].to_s.downcase)
+    end
   end
 
   def chart_bindings_present?(zone)
@@ -404,6 +443,31 @@ module TableauWorkbookCompiler
     return 'date-range-control' if kind.include?('date')
     return 'number-range-control' if kind.include?('number') || kind.include?('range')
     'list-control'
+  end
+
+  def lower_formula(formula)
+    result = formula.to_s.dup
+    {
+      'COUNTD' => 'CountDistinct', 'COUNT' => 'Count', 'SUM' => 'Sum',
+      'AVG' => 'Avg', 'MIN' => 'Min', 'MAX' => 'Max', 'MEDIAN' => 'Median',
+      'IIF' => 'If', 'ZN' => 'Zn'
+    }.each { |tableau, sigma| result.gsub!(/\b#{tableau}\s*\(/i, "#{sigma}(") }
+    TABLE_CALC_RECIPES.each do |tableau, (_rule, sigma)|
+      result.gsub!(/\b#{Regexp.escape(tableau)}\s*\(/i, "#{sigma}(")
+    end
+    result
+  end
+
+  def chart_target?(kind)
+    %w[
+      bar-chart line-chart area-chart pie-chart scatter-chart combo-chart
+      waterfall-chart point-map region-map pivot-table table kpi-chart
+      box-plot
+    ].include?(kind.to_s)
+  end
+
+  def slug(value)
+    value.to_s.downcase.gsub(/[^a-z0-9]+/, '-').sub(/\A-/, '').sub(/-\z/, '')[0, 40]
   end
 
   def unsupported(base, rule, reason)

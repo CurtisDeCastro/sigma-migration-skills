@@ -40,7 +40,12 @@ ir = {
             'caption' => 'Revenue by Region',
             'chart_kind' => 'bar',
             'measures' => [{ 'column' => 'Revenue' }],
-            'filters' => [{ 'column' => 'Region', 'kind' => 'list' }],
+            'filters' => [{
+              'column_caption' => 'Region Friendly',
+              'raw_param' => '[federated].[none:Region:nk]',
+              'kind' => 'list',
+              'members' => %w[East West]
+            }],
             'calculations' => [
               { 'caption' => 'Running Revenue', 'formula' => 'RUNNING_SUM(SUM([Revenue]))' }
             ]
@@ -53,6 +58,20 @@ ir = {
             'measures' => [{ 'column' => 'Revenue' }, { 'column' => 'Margin' }],
             'dual_axis' => true,
             'synchronized_axis' => false
+          },
+          {
+            'id' => 'z-pivot',
+            'kind' => 'chart',
+            'caption' => 'Monthly P&L',
+            'chart_kind' => 'table',
+            'mark_class' => 'Automatic',
+            'rows_shelf' => {
+              'fields' => [{ 'role' => 'dim', 'guid' => 'Line Item' }]
+            },
+            'cols_shelf' => {
+              'fields' => [{ 'role' => 'dim', 'guid' => 'Month' }]
+            },
+            'measures' => [{ 'column' => 'Amount', 'derivation' => 'sum' }]
           },
           {
             'id' => 'z-nav',
@@ -72,12 +91,21 @@ ir = {
 
 plan = TableauWorkbookCompiler.compile(ir)
 assert(plan.dig('summary', 'blocking') == 0, 'supported workbook has no blockers')
+assert(plan['schemaVersion'] == 2, 'semantic compile plan schema v2')
 assert(plan['visuals'].any? { |entry| entry['rule'] == 'viz.bar.v1' && entry['target_kind'] == 'bar-chart' }, 'bar lowering')
 assert(plan['visuals'].any? { |entry| entry['rule'] == 'viz.dual-axis-combo.v1' }, 'dual-axis lowering')
+bar = plan['visuals'].find { |entry| entry['zone_id'] == 'z-bar' }
+assert(bar.dig('bindings', 'values', 0, 'formula') == 'Sum([Master/Revenue])', 'chart value formula bound')
+assert(bar.dig('bindings', 'filters', 0, 'column') == 'Region Friendly', 'filter caption wins over raw token')
+assert(bar.dig('bindings', 'filters', 0, 'values') == %w[East West], 'filter members retained')
+assert(plan['visuals'].any? { |entry| entry['zone_id'] == 'z-pivot' && entry['target_kind'] == 'pivot-table' },
+       'Automatic dim-by-dim grid lowers to pivot')
 assert(plan['controls'].any? { |entry| entry['name'] == 'Metric' && entry['target_kind'] == 'list-control' }, 'parameter list control')
 assert(plan['controls'].any? { |entry| entry['name'] == 'As Of' && entry['target_kind'] == 'date-control' }, 'date control')
-assert(plan['controls'].any? { |entry| entry['name'] == 'Region' }, 'quick-filter control')
+assert(plan['controls'].any? { |entry| entry['name'] == 'Region Friendly' }, 'quick-filter uses resolved caption')
 assert(plan['formulas'].any? { |entry| entry['recipes']&.include?('formula.running-sum.v1') }, 'table-calc recipe')
+assert(plan['formulas'].any? { |entry| entry['sigma_formula']&.include?('CumulativeSum(') },
+       'table-calc entry carries concrete Sigma formula')
 assert(plan['actions'].any? { |entry| entry['rule'] == 'action.navigation.v1' }, 'navigation action')
 
 blocked_ir = Marshal.load(Marshal.dump(ir))

@@ -75,6 +75,7 @@ require_relative 'lib/action_ledger' # workbook-wide action id registry + valida
 require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require_relative 'lib/workbook_ir'
 require_relative 'lib/tableau_workbook_compiler'
+require_relative 'lib/workbook_rule_registry'
 require 'erb'
 
 opts = { master_id: 'master' }
@@ -305,23 +306,7 @@ rescue StandardError
 end
 
 # ---- chart_kind → Sigma element kind ----
-SIGMA_KIND = {
-  'bar'           => 'bar-chart',
-  'line'          => 'line-chart',
-  'area'          => 'area-chart',
-  'pie'           => 'pie-chart',
-  'scatter'       => 'scatter-chart',
-  'combo'         => 'combo-chart',
-  'waterfall'     => 'waterfall-chart',
-  'map-region'    => 'region-map',
-  'map-point'     => 'point-map',
-  'pivot-table'   => 'pivot-table',
-  'table'         => 'table',
-  'kpi'           => 'kpi-chart',
-  'table-or-text' => 'table',         # legacy parser output — kept for back-compat
-  'automatic'     => 'bar-chart',     # fallback; agent verifies against PNG
-  'other'         => 'bar-chart'
-}.freeze
+SIGMA_KIND = WorkbookRuleRegistry.sigma_kind_map
 
 # The human display name for a built tile: the source-displayed worksheet title
 # (parse-twb-layout's `display_title`, from the worksheet <title> run — e.g.
