@@ -1112,4 +1112,3 @@ def analyze_project(source: str | Path) -> ProjectIR:
             )
 
     return ir
-

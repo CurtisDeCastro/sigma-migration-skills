@@ -103,4 +103,3 @@ class ProjectIR:
 
     def to_dict(self) -> dict[str, Any]:
         return {"irVersion": IR_VERSION, **asdict(self)}
-

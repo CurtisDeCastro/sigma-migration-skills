@@ -379,7 +379,6 @@ def build_workbook(
     converted_by_page: dict[str, list[tuple[IRElement, dict[str, Any]]]] = {
         page.id: [] for page in ir.pages
     }
-
     for item in ir.elements:
         query_id = root_query_id(
             ir, item.dataframe, query_by_id, dataframe_roots

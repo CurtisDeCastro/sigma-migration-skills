@@ -82,4 +82,3 @@ def build_data_model(
             "columns": sum(len(item["columns"]) for item in elements),
         },
     }
-
