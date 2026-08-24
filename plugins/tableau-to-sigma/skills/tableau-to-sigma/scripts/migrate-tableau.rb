@@ -161,6 +161,7 @@ require 'yaml'
 require 'optparse'
 require 'fileutils'
 require 'open3'
+require 'tmpdir'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 begin; require_relative 'lib/modeling_advisory'; rescue LoadError; end # shared, vendor-neutral CDW join-cost advisory (optional; synced from shared/)
 require 'date'
@@ -208,7 +209,7 @@ ENV['SIGMA_ORCHESTRATED_RUN'] = '1'
 # rescue). :recommended reuse comes from auto-pick, never a CLI arg, so the
 # snapshot carries no --reuse-dm to strip.
 ORIGINAL_ARGV = ARGV.dup.freeze
-opts = { per_page_masters: true }
+opts = { per_page_masters: true, deterministic_compiler: 'auto' }
 OptionParser.new do |o|
   o.banner = <<~BANNER
     Usage: ruby scripts/migrate-tableau.rb --workbook <name>|--workbook-id <luid> \\
@@ -227,6 +228,15 @@ OptionParser.new do |o|
 
     Options:
   BANNER
+  o.on('--shadow-compile', 'compile a corpus/source fixture twice with zero live writes; no credentials required') { opts[:shadow_compile] = true }
+  o.on('--from-corpus DIR', 'fixture directory for --shadow-compile') { |v| opts[:from_corpus] = File.expand_path(v) }
+  o.on('--baseline PATH', 'normalized workbook golden for --shadow-compile') { |v| opts[:baseline] = File.expand_path(v) }
+  o.on('--write-candidate PATH', 'candidate workbook output for --shadow-compile') { |v| opts[:write_candidate] = File.expand_path(v) }
+  o.on('--record-baseline REASON', 'replace --baseline from a reviewed shadow result (non-empty reason required)') { |v| opts[:record_baseline] = v }
+  o.on('--deterministic-compiler MODE', %w[auto required off],
+       'workbook IR/lowering gate: auto (default) activates on zero blockers; required stops on any blocker; off disables') do |v|
+    opts[:deterministic_compiler] = v
+  end
   o.on('--workbook NAME')    { |v| opts[:wb_name] = v }
   o.on('--workbook-id LUID') { |v| opts[:wb_id]   = v }
   o.on('--connection ID')    { |v| opts[:conn]    = v }
@@ -405,6 +415,52 @@ OptionParser.new do |o|
                               '--reuse-dm. Iterating a fix? Re-run with --reuse-dm <id> --reuse-workbook <id> to edit the ' \
                               'SAME dashboard rather than orphaning it.') { |v| opts[:reuse_workbook] = v }
 end.parse!
+
+if opts[:shadow_compile]
+  abort 'FATAL: --shadow-compile requires --from-corpus DIR' unless opts[:from_corpus]
+  live_conflicts = {
+    '--finalize' => opts[:finalize],
+    '--connection' => opts[:conn],
+    '--reuse-dm' => opts[:reuse_dm],
+    '--reuse-workbook' => opts[:reuse_workbook],
+    '--workbook-target' => opts[:wb_target],
+    '--enhance' => opts[:enhance]
+  }.select { |_flag, value| value }
+  abort "FATAL: --shadow-compile cannot be combined with live flags: #{live_conflicts.keys.join(', ')}" unless live_conflicts.empty?
+  if opts[:record_baseline] && opts[:record_baseline].to_s.strip.empty?
+    abort 'FATAL: --record-baseline requires a non-empty review reason'
+  end
+
+  shadow_work = File.expand_path(opts[:out] || Dir.mktmpdir('tableau-shadow-compile'))
+  FileUtils.mkdir_p(shadow_work)
+  candidate = File.expand_path(opts[:write_candidate] || File.join(shadow_work, 'candidate-workbook.json'))
+  baseline = opts[:baseline] || File.join(opts[:from_corpus], 'golden', 'workbook.json')
+  command = [
+    RbConfig.ruby, File.join(HERE, 'compile-tableau-offline.rb'),
+    '--case-dir', opts[:from_corpus],
+    '--workdir', shadow_work,
+    '--out', candidate
+  ]
+  if opts[:record_baseline]
+    command.concat(['--record', baseline])
+  elsif File.exist?(baseline)
+    command.concat(['--compare', baseline])
+  else
+    abort "FATAL: shadow baseline not found: #{baseline} (pass --baseline or --record-baseline REASON)"
+  end
+
+  warn 'SHADOW COMPILE: offline deterministic path; Sigma/Tableau writes are hard-disabled.'
+  success = system({ 'SIGMA_SHADOW_COMPILE' => '1' }, *command)
+  status = $?.exitstatus || 1
+  report = File.join(shadow_work, 'offline-compile.json')
+  FileUtils.cp(report, File.join(shadow_work, 'shadow-compile.json')) if File.exist?(report)
+  if opts[:record_baseline] && success
+    warn "SHADOW BASELINE RECORDED: #{baseline} (reason: #{opts[:record_baseline]})"
+  end
+  exit status
+end
+
+deterministic_plan_path = nil
 
 # --db/--schema travel together: a lone half used to be silently completed by a
 # fabricated default, which 404s in every real org (E2E-caught). Fail loudly.
@@ -2213,6 +2269,29 @@ if have_twb
     run!(['ruby', File.join(HERE, 'parse-twb-layout.rb'), twb, layout_json] + DASH_SCOPE)
   end
   line 'parse-twb-layout REUSED (.twb sha + scope unchanged) — delete dashboard-layout.json to force a re-parse' if parse_st == :reused
+  unless opts[:deterministic_compiler] == 'off'
+    ir_path = File.join(WORK, 'workbook-ir.json')
+    plan_path = File.join(WORK, 'workbook-compile-plan.json')
+    run!(['ruby', File.join(HERE, 'emit-workbook-ir.rb'), '--workdir', WORK, '--out', ir_path])
+    run!(['ruby', File.join(HERE, 'compile-workbook-ir.rb'), '--ir', ir_path, '--out', plan_path])
+    compiler_plan = JSON.parse(File.read(plan_path, encoding: 'UTF-8'))
+    compiler_blockers = Array(compiler_plan['blocking'])
+    if compiler_blockers.empty?
+      deterministic_plan_path = plan_path
+      line "deterministic compiler: PROVEN for this workbook " \
+           "(#{compiler_plan.dig('summary', 'source_zones')} zones, " \
+           "#{compiler_plan.dig('summary', 'controls_lowered')} controls, 0 blockers)"
+    elsif opts[:deterministic_compiler] == 'required'
+      warn "DETERMINISTIC COMPILER STOP: #{compiler_blockers.length} unsupported construct(s); no Sigma writes made."
+      compiler_blockers.first(20).each do |blocker|
+        warn "  - #{blocker['rule']}: #{blocker['reason'] || blocker.dig('source', 'detail') || blocker.dig('source', 'visual')}"
+      end
+      exit 11
+    else
+      warn "deterministic compiler: #{compiler_blockers.length} blocker(s) — auto mode keeps the existing gated path; " \
+           'use --deterministic-compiler required to fail here.'
+    end
+  end
   line "per-dashboard scope: #{(opts[:dashboards] || []) + (opts[:pages] || [])} (single-tab build)" if scoped?
   dash = JSON.parse(File.read(layout_json))
   # E9.6 — a scoped name that matches NOTHING is a named STOP listing the
@@ -4817,6 +4896,10 @@ if mechanical
   build_cmd += ['--auto-controls'] if File.exist?(layout_json.sub(/\.json$/, '-meta.json'))
   build_cmd += ['--detected-actions', detected_actions_path] if File.exist?(detected_actions_path)
   build_cmd += ['--grain-plan', grain_plan_path] if grain_plan && File.exist?(grain_plan_path)
+  if deterministic_plan_path && File.exist?(deterministic_plan_path)
+    build_cmd += ['--ir', File.join(WORK, 'workbook-ir.json'),
+                  '--compile-plan', deterministic_plan_path]
+  end
   # Per-dashboard scope (defensive — the layout is already pre-scoped, so a single
   # dashboard yields exactly one page; passing the flags keeps a standalone build
   # honest if it's ever handed a full layout).
