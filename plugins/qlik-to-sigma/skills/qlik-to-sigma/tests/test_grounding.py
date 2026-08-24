@@ -326,6 +326,61 @@ def test_retail_count_distinct_golden():
     print("[ok] retail golden: safe CountDistinct normalization is pinned")
 
 
+def _build_scope(charts_path, synth="auto"):
+    """Build with a control-scope sidecar + a --synth-controls mode; return (spec, scope)."""
+    with tempfile.TemporaryDirectory() as d:
+        spec_out = os.path.join(d, "spec.json"); cs = os.path.join(d, "control-scope.json")
+        r = subprocess.run(
+            [sys.executable, BUILDER, "--charts", charts_path, "--layout", os.path.join(FIX, "layout.json"),
+             "--denorm", os.path.join(FIX, "denorm.json"), "--dm-id", "dm-x", "--denorm-element-id", "el-x",
+             "--name", "T", "--dry-run", "--synth-controls", synth,
+             "--spec-out", spec_out, "--out", os.path.join(d, "res.json"),
+             "--element-map", os.path.join(d, "emap.json"), "--layout-out", os.path.join(d, "l.xml"),
+             "--control-scope-out", cs],
+            capture_output=True, text=True)
+        assert r.returncode == 0, "builder failed:\n" + r.stderr
+        return json.load(open(spec_out)), json.load(open(cs))
+
+
+def _filterless_charts(d):
+    """Fixture charts with every filterpane/listbox removed — a Qlik app that
+    relied on pure associative click-filtering (the synth-controls gap)."""
+    kept = [c for c in json.load(open(os.path.join(FIX, "charts.json")))
+            if c.get("vizType") not in ("filterpane", "listbox")]
+    p = os.path.join(d, "charts_nofilter.json"); json.dump(kept, open(p, "w"))
+    return p
+
+
+def test_synth_fills_filterless_app():
+    with tempfile.TemporaryDirectory() as d:
+        spec, scope = _build_scope(_filterless_charts(d), synth="auto")
+    assert scope["sourceFilterSignals"] == 0, "no source filters expected"
+    assert scope["synthesizedCount"] > 0, "auto must synthesize a control bar when the app has no filters"
+    assert any(c.get("synthesized") for c in scope["controls"]), "expected synthesized scope entries"
+    for e in (el for el in spec["document"]["elements"] if el.get("kind") == "control"):
+        tgt = (e.get("filters") or [{}])[0].get("source", {})
+        assert tgt.get("elementId") == "m-master", f"{e.get('controlId')} must filter the shared master"
+    assert not any(c["controlId"].upper().endswith(("KEYFILTER", "IDFILTER"))
+                   for c in scope["controls"] if c.get("synthesized")), "never synthesize a join/id key"
+    print("[ok] synth-controls: filterless app gets a master-filtering control bar")
+
+
+def test_synth_noop_when_filters_present():
+    _, scope = _build_scope(os.path.join(FIX, "charts.json"), synth="auto")
+    assert scope["sourceFilterSignals"] > 0
+    assert scope["synthesizedCount"] == 0, "auto must NOT synthesize when real filters exist (no regression)"
+    print("[ok] synth-controls: auto no-ops when real filters exist (golden safe)")
+
+
+def test_synth_all_tops_up_and_dedupes():
+    _, scope = _build_scope(os.path.join(FIX, "charts.json"), synth="all")
+    assert scope["synthesizedCount"] > 0, "all must top up"
+    ids = [c["controlId"] for c in scope["controls"]]
+    assert len(ids) == len(set(ids)), "controlIds must be unique (synth dedupes against real fields)"
+    assert any(not c.get("synthesized") for c in scope["controls"]), "real controls must remain alongside synth"
+    print("[ok] synth-controls: --all tops up + dedupes against real filters")
+
+
 if __name__ == "__main__":
     test_catalogs_valid()
     test_no_inline_maps()
@@ -335,5 +390,8 @@ if __name__ == "__main__":
     test_coverage_matrix_fresh()
     test_scalar_actual_converter_path()
     test_retail_count_distinct_golden()
+    test_synth_fills_filterless_app()
+    test_synth_noop_when_filters_present()
+    test_synth_all_tops_up_and_dedupes()
     test_golden()
     print("ALL PASS")
