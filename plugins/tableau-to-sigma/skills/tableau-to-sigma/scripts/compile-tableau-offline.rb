@@ -62,7 +62,8 @@ charts = workdir.join('chart-specs.json')
 wb_spec_path = workdir.join('wb-spec.json')
 wb_ids_path = workdir.join('wb-ids.json')
 layout_xml = workdir.join('layout.xml')
-final_path = Pathname(options[:out] || workdir.join('workbook.json')).expand_path
+internal_final_path = workdir.join('workbook.json')
+final_path = Pathname(options[:out] || internal_final_path).expand_path
 
 run!(RUBY, HERE.join('parse-twb-layout.rb').to_s, workdir.join('workbook-content.twb').to_s, layout.to_s)
 run!(RUBY, HERE.join('emit-workbook-ir.rb').to_s, '--workdir', workdir.to_s, '--out', ir_path.to_s)
@@ -148,25 +149,28 @@ final = LayoutApply.apply(
 )
 final_errors = WorkbookCode.validate(final)
 abort "offline final workbook invalid: #{final_errors.join('; ')}" unless final_errors.empty?
-FileUtils.mkdir_p(final_path.dirname)
-final_path.write("#{JSON.pretty_generate(final)}\n")
+internal_final_path.write("#{JSON.pretty_generate(final)}\n")
 WorkbookIR.emit(
   workdir,
   out: ir_path,
   overrides: {
-    'workbook_spec' => final_path.to_s,
+    'workbook_spec' => internal_final_path.to_s,
     'workbook_ids' => wb_ids_path.to_s,
     'compile_plan' => compile_plan.to_s,
     'chart_specs' => charts.to_s,
     'layout_xml' => layout_xml.to_s
   }
 )
+unless final_path == internal_final_path
+  FileUtils.mkdir_p(final_path.dirname)
+  FileUtils.cp(internal_final_path, final_path)
+end
 
 report = {
   'schema_version' => 1,
   'mode' => 'offline-shadow',
   'source_case' => case_dir.basename.to_s,
-  'candidate_sha256' => Digest::SHA256.file(final_path).hexdigest,
+  'candidate_sha256' => Digest::SHA256.file(internal_final_path).hexdigest,
   'pages' => WorkbookCode.pages(final).length,
   'elements' => WorkbookCode.elements(final).length,
   'sigma_writes' => 0,
@@ -178,7 +182,7 @@ report = {
 if options[:record]
   record_path = Pathname(options[:record]).expand_path
   FileUtils.mkdir_p(record_path.dirname)
-  FileUtils.cp(final_path, record_path)
+  FileUtils.cp(internal_final_path, record_path)
   report['recorded'] = record_path.to_s
 end
 
@@ -186,7 +190,7 @@ if options[:compare]
   baseline = Pathname(options[:compare]).expand_path
   abort "baseline not found: #{baseline}" unless baseline.file?
   report['baseline_sha256'] = Digest::SHA256.file(baseline).hexdigest
-  report['identical'] = File.binread(baseline) == File.binread(final_path)
+  report['identical'] = File.binread(baseline) == File.binread(internal_final_path)
 end
 WorkbookIR.atomic_json(workdir.join('offline-compile.json'), report)
 

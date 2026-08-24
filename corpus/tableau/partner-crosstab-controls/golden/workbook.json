@@ -196,7 +196,7 @@
       {
         "id": "el-metric-partner-closed-won",
         "kind": "pivot-table",
-        "name": "Metric Partner Closed Won",
+        "name": "Summary $ Choose",
         "source": {
           "kind": "table",
           "elementId": "master"
@@ -215,7 +215,7 @@
           {
             "id": "p-el-metric-partner-closed-won-value-summary-",
             "name": "Summary $",
-            "formula": "Sum([Master/Summary $])",
+            "formula": "Switch([ctl-param-summary-choose-metric-partner-closed], \"1\", Sum([TCV]), \"2\", Sum([Product TCV]), \"3\", Sum([ACV]))",
             "format": {
               "kind": "number",
               "formatString": ",.0f"
@@ -229,6 +229,16 @@
               "kind": "number",
               "formatString": ",.0f"
             }
+          },
+          {
+            "id": "pvsw-tcv",
+            "name": "TCV",
+            "formula": "[Master/TCV]"
+          },
+          {
+            "id": "pvsw-product-tcv",
+            "name": "Product TCV",
+            "formula": "[Master/Product TCV]"
           }
         ],
         "values": [

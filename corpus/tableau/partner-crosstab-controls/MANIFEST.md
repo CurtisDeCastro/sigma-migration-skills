@@ -123,7 +123,9 @@ parameter switches the calculation. Throwaway workbook + DM were deleted after.
     {"path": "master-columns.json", "format": "json"},
     {"path": "chart-specs.json", "format": "json"},
     {"path": "compiler-case.json", "format": "json"},
-    {"path": "parity-oracle.json", "format": "json"}
+    {"path": "parity-oracle.json", "format": "json"},
+    {"path": "checks.sh", "format": "text"},
+    {"path": "check_workbook.py", "format": "text"}
   ],
   "goldens": {
     "workbook.json": {

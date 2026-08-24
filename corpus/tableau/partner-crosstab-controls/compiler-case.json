@@ -3,6 +3,7 @@
   "page_mode": "page-per-worksheet",
   "title": "Partner Bookings Crosstab",
   "pivot_grand_totals": [
-    "Metric Partner Closed Won"
+    "Metric Partner Closed Won",
+    "Summary $ Choose"
   ]
 }
