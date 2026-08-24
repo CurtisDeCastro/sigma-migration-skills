@@ -43,7 +43,7 @@ module WorkbookPipelineReuse
                   .each_with_object({}) { |element, index| index[element['id']] = element if element['id'] }
 
     apply_extensions!(by_id, plan['extensions'] || {})
-    patch_masters!(by_id, plan['master_sources'] || {})
+    patched_master_ids = patch_masters!(target['pages'], by_id, plan['master_sources'] || {})
     rewrite_formulas!(target, plan['formula_rewrites'] || {})
     normalize_names!(target)
 
@@ -57,7 +57,7 @@ module WorkbookPipelineReuse
             'element_ids' => page['elements'].map { |element| element['id'] } }
         end,
         'pipeline_elements_copied' => requested_ids.length,
-        'masters_patched' => (plan['master_sources'] || {}).keys.sort,
+        'masters_patched' => patched_master_ids.sort,
         'formula_rewrites' => plan['formula_rewrites'] || {}
       }
     }
@@ -80,9 +80,19 @@ module WorkbookPipelineReuse
     end
   end
 
-  def patch_masters!(elements, master_sources)
+  def patch_masters!(pages, elements, master_sources)
+    patched = []
     master_sources.each do |master_id, instructions|
-      master = elements[master_id] or raise ArgumentError, "generated workbook has no master #{master_id.inspect}"
+      master = elements[master_id]
+      unless master
+        page_name = instructions['page']
+        page = pages.find { |candidate| candidate['name'].to_s.casecmp?(page_name.to_s) } if page_name
+        candidates = Array(page && page['elements']).select do |element|
+          element['kind'] == 'table' && element['name'].to_s.casecmp?('Master')
+        end
+        raise ArgumentError, "generated workbook has no unique master #{master_id.inspect} on page #{page_name.inspect}" unless candidates.one?
+        master = candidates.first
+      end
       master['source'] = deep_copy(instructions.fetch('source'))
       fields = instructions['fields'] || {}
       Array(master['columns']).each do |column|
@@ -90,7 +100,9 @@ module WorkbookPipelineReuse
         column['formula'] = rule['formula'] if rule.is_a?(Hash) && rule['formula']
         column['formula'] = rule if rule.is_a?(String)
       end
+      patched << master['id']
     end
+    patched
   end
 
   def rewrite_formulas!(node, rewrites)
