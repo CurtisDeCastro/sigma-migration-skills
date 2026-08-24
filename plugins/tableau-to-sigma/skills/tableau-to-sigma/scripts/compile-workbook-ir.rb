@@ -20,11 +20,16 @@ ir = WorkbookIR.load(options[:ir])
 plan = TableauWorkbookCompiler.compile(ir)
 destination = options[:out] || File.join(File.dirname(File.expand_path(options[:ir])), 'workbook-compile-plan.json')
 WorkbookIR.atomic_json(destination, plan)
-WorkbookIR.emit(
-  File.dirname(File.expand_path(options[:ir])),
-  out: options[:ir],
-  overrides: { 'compile_plan' => destination }
-)
+if ir.dig('artifacts', 'layout')
+  WorkbookIR.emit(
+    File.dirname(File.expand_path(options[:ir])),
+    out: options[:ir],
+    overrides: { 'compile_plan' => destination }
+  )
+else
+  # Standalone IR fixtures have no parser artifacts to rebuild from. Preserve
+  # their semantic pages/zones; the requested --out is already authoritative.
+end
 
 puts "WORKBOOK COMPILE PLAN: #{destination}"
 puts "  pages:     #{plan.dig('summary', 'pages')}"
