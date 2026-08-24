@@ -42,6 +42,13 @@ class AnalyzerTest(unittest.TestCase):
         self.assertIn("text", kinds)
         chart = next(item for item in self.ir.elements if item.kind == "bar-chart")
         self.assertIn({"kind": "tab", "name": "Overview"}, chart.context)
+        metrics = [item for item in self.ir.elements if item.kind == "metric"]
+        column_contexts = [
+            next(context for context in item.context if context["kind"] == "column")
+            for item in metrics
+        ]
+        self.assertEqual([context["index"] for context in column_contexts], [0, 1, 2])
+        self.assertEqual(len({context["group"] for context in column_contexts}), 1)
 
     def test_ir_is_serializable_and_provenanced(self):
         body = json.dumps(self.ir.to_dict())

@@ -607,6 +607,18 @@ class ModuleAnalyzer(ast.NodeVisitor):
         leaf = path.split(".")[-1]
         args = call.args
         prov = self.provenance(call)
+        call_context = self.context.copy()
+        root_name = path.split(".", 1)[0]
+        if root_name in self.columns:
+            group, index, count = self.columns[root_name]
+            call_context.append(
+                {
+                    "kind": "column",
+                    "group": group,
+                    "index": index,
+                    "count": count,
+                }
+            )
 
         if "session_state" in path or "session_state" in unparse(call):
             self.add_gap(
@@ -684,7 +696,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     dataframe,
                     bindings,
                     unparse(value),
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
@@ -708,7 +720,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     self.dataframe_name(data),
                     bindings,
                     unparse(data),
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
@@ -737,7 +749,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     self.dataframe_name(data),
                     config,
                     unparse(data),
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
@@ -757,7 +769,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     self.dataframe_name(data),
                     {},
                     unparse(data),
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
@@ -782,7 +794,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     self.dataframe_name(args[0] if args else None),
                     {"style": leaf},
                     unparse(args[0]) if args else None,
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
@@ -803,7 +815,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                         if item.arg
                     },
                     None,
-                    self.context.copy(),
+                    call_context,
                     prov,
                 )
             )
