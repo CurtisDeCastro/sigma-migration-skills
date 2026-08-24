@@ -74,11 +74,14 @@ require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-m
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require_relative 'lib/workbook_ir'
+require_relative 'lib/tableau_workbook_compiler'
 require 'erb'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
   p.on('--ir PATH', 'canonical workbook-ir.json; resolves tableau-dir/layout/meta/master-map/out') { |v| opts[:ir] = v }
+  p.on('--compile-plan PATH', 'deterministic workbook compile plan; blocks unsupported constructs') { |v| opts[:compile_plan] = v }
+  p.on('--allow-unsupported-plan REASON', 'continue despite compile-plan blockers (recorded reason required)') { |v| opts[:allow_unsupported_plan] = v }
   p.on('--tableau-dir DIR')         { |v| opts[:tab] = v }
   p.on('--layout PATH')             { |v| opts[:layout] = v }
   p.on('--meta PATH', 'parse-twb-layout sister meta file (worksheets+shared_filters)') { |v| opts[:meta] = v }
@@ -131,9 +134,22 @@ if opts[:ir]
   opts[:meta] ||= WorkbookIR.artifact_path(opts[:ir], 'meta')
   opts[:mmap] ||= WorkbookIR.artifact_path(opts[:ir], 'master_map')
   opts[:grain_plan] ||= WorkbookIR.artifact_path(opts[:ir], 'grain_plan')
+  opts[:compile_plan] ||= WorkbookIR.artifact_path(opts[:ir], 'compile_plan')
   opts[:out] ||= WorkbookIR.artifact_path(opts[:ir], 'chart_specs') || File.join(ir_root, 'chart-specs.json')
 end
 %i[tab layout mmap out].each { |k| abort("missing --#{k.to_s.tr('_','-')}") unless opts[k] }
+if opts[:compile_plan]
+  compile_plan = JSON.parse(File.read(opts[:compile_plan], encoding: 'UTF-8'))
+  compile_errors = TableauWorkbookCompiler.validate(compile_plan)
+  abort("invalid --compile-plan: #{compile_errors.join('; ')}") unless compile_errors.empty?
+  if TableauWorkbookCompiler.blocking?(compile_plan)
+    if opts[:allow_unsupported_plan].to_s.strip.empty?
+      abort("compile plan has #{compile_plan['blocking'].length} unsupported construct(s); " \
+            'fix them or pass --allow-unsupported-plan "<attributable reason>"')
+    end
+    warn "[WAIVER] compile plan has #{compile_plan['blocking'].length} blocker(s): #{opts[:allow_unsupported_plan]}"
+  end
+end
 
 # Load the referenceable DM metrics once; every measure-emission site prefers a
 # governed [Metrics/<name>] ref over its inline aggregate when they match by formula
