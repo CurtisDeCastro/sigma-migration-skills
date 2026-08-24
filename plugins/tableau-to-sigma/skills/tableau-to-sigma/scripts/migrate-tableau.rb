@@ -5245,6 +5245,10 @@ if opts[:pipeline_template_workbook]
   )
   pipeline_plan = JSON.parse(File.read(opts[:pipeline_map], encoding: 'UTF-8'))
   pipeline_plan['template_workbook_id'] ||= opts[:pipeline_template_workbook]
+  File.write(
+    File.join(WORK, 'pipeline-pre-spec.json'),
+    JSON.pretty_generate(WorkbookCode.canonicalize(spec)) + "\n"
+  )
   pipeline_result = WorkbookPipelineReuse.apply!(
     spec,
     donor_spec: donor,

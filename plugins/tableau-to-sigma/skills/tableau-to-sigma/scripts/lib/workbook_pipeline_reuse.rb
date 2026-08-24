@@ -101,7 +101,20 @@ module WorkbookPipelineReuse
         candidates = refs.uniq.filter_map { |id| elements[id] }.select do |element|
           element['kind'] == 'table' && element['name'].to_s.casecmp?('Master')
         end
-        raise ArgumentError, "generated workbook has no unique master #{master_id.inspect} on page #{page_name.inspect}" unless candidates.one?
+        if candidates.empty? && page_name
+          slug = page_name.to_s.downcase.gsub(/[^a-z0-9]+/, '-').sub(/\A-/, '').sub(/-\z/, '')[0, 40]
+          candidates = elements.values.select do |element|
+            element['kind'] == 'table' && element['name'].to_s.casecmp?('Master') &&
+              element['id'].to_s == "master-#{slug}"
+          end
+        end
+        unless candidates.one?
+          available = elements.values.select do |element|
+            element['kind'] == 'table' && element['name'].to_s.casecmp?('Master')
+          end.map { |element| element['id'] }
+          raise ArgumentError, "generated workbook has no unique master #{master_id.inspect} on page #{page_name.inspect}; " \
+                               "available masters: #{available.join(', ')}"
+        end
         master = candidates.first
       end
       master['source'] = deep_copy(instructions.fetch('source'))
