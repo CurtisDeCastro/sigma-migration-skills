@@ -32,6 +32,8 @@ corpus/
 | tableau/winprobe-window-functions | synthetic window/table-calc workbook | chart-spec golden + compiler determinism |
 | tableau/compiler-blocked-viz | unsupported bound visual IR | strict pre-write blocker contract |
 | tableau/pipeline-reuse-smoke | generated + donor workbook specs and semantic map | deterministic workbook-pipeline graft checks |
+| tableau/orders-executive-compiler | sanitized recorded-live compiler evidence | 9/9 strict parity + anchors + visual floor |
+| tableau/fpa-pipeline-compiler | sanitized recorded-live pipeline-reuse evidence | WIP negative promotion control (no-data/semantic gaps remain explicit) |
 | powerbi/model-fixtures | 8 TMSL .bim (plugin fixtures) | DM for fixture_01 |
 | powerbi/report-classic-employee-dashboard | legacy single report.json | artifact-pin only |
 | powerbi/report-pbir-retail-performance | exploded PBIR + bookmarks | artifact-pin only |
