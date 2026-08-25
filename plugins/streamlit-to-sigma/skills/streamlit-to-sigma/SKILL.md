@@ -24,6 +24,7 @@ Read before converting:
 1. [`refs/supported-patterns.md`](refs/supported-patterns.md)
 2. [`refs/schema-hints.md`](refs/schema-hints.md)
 3. [`refs/layout-visual-qa.md`](refs/layout-visual-qa.md)
+4. [`../streamlit-assessment/refs/migration-readout.md`](../streamlit-assessment/refs/migration-readout.md)
 <!-- /mandatory-pre-read -->
 
 ## Inputs
@@ -106,8 +107,13 @@ For one project, run discovery and review:
 - dynamic SQL and unsupported dataframe operations
 - session state, callbacks, forms, custom components, and writeback
 - security-sensitive patterns
+- complexity class, delivery class, and implementation dispositions
 
 For an estate/shortlist, use the sibling `streamlit-assessment` skill.
+
+Do not convert the complexity score into a hardcoded calendar promise. Present
+the technical delivery class and drivers; use organization telemetry for any
+local duration mapping.
 
 ## Phase 1 — Discover (C2)
 
@@ -254,12 +260,40 @@ Classify each component:
 
 Plugin generation is not automatic in this foundation release.
 
+## Stateful and operational apps
+
+Do not classify every form, callback, or write as an undifferentiated gap. Assign
+one or more migration dispositions:
+
+1. `spec-native` — controls, formulas, public-spec actions, overlays, or input
+   tables cover the behavior.
+2. `warehouse-backed` — generate/reuse tables, views, procedures, grants, and
+   connection refresh steps.
+3. `manual-ui-finish` — Sigma supports the feature, but workbook GET omits it or
+   POST/PUT rejects the UI-authored host. Name the exact manual wiring step.
+4. `plugin` — a hosted client-side component is justified.
+5. `redesign` / `blocked` — the architecture or source cannot be lowered safely.
+
+Probe the live API before promising action parity. A UI picker is not proof of
+public-spec authorability. Conversely, an OpenAPI discriminator is not enough:
+the chosen element/connection host must pass `/verify`, real POST/PUT, readback,
+and click testing.
+
+For deferred forms, prefer pending controls plus separate applied controls and an
+Apply action. For durable state, prefer warehouse-backed tables/views and
+procedures. If procedure actions are UI-only in the target workspace, generate
+the warehouse contract and a `manual-ui-finish` handoff rather than emitting a
+rejected or silently dropped action shape.
+
 ## Known foundation boundaries
 
-- Deferred `st.form`/Load-button commit semantics (Sigma controls apply live)
-- Arbitrary callbacks and Python execution
-- General session-state state machines
-- Data-editor/writeback design
+- Deferred `st.form`/Load-button semantics require the pending/applied-control
+  redesign until mechanically lowered
+- Arbitrary callbacks and Python execution require capability-specific redesign
+- General session-state state machines require an explicit state architecture
+- Data-editor/writeback requires input-table or warehouse-backed design
+- UI-authored actions omitted from workbook readback require a named
+  `manual-ui-finish` step
 - Runtime-generated element counts beyond literal config expansion
 - Authenticated browser click testing
 - Automatic Snowflake Workspace source download

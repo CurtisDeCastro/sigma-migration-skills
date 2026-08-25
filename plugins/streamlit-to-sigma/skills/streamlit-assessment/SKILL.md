@@ -14,6 +14,9 @@ This skill never executes application code, writes to the source, or posts to
 Sigma. It assesses exported/local source projects and hands selected targets to
 `streamlit-to-sigma`.
 
+Read [`refs/migration-readout.md`](refs/migration-readout.md) before presenting
+complexity, delivery, calendar, or Sigma-benefit claims.
+
 ## Phase 0 — Intake
 
 Accept one or more project directories or main Python files:
@@ -21,7 +24,8 @@ Accept one or more project directories or main Python files:
 ```bash
 python3 scripts/assess-streamlit.py \
   /exports/app-one /exports/app-two \
-  --out /tmp/streamlit-assessment.json
+  --out /tmp/streamlit-assessment.json \
+  --markdown-out /tmp/streamlit-assessment.md
 ```
 
 For Snowflake-hosted apps, export the source first. Do not request or inspect
@@ -49,9 +53,17 @@ Each project receives:
 - `direct` — supported surface with no restructuring/blocking gaps
 - `redesign` — plugin/state/layout redesign required
 - `blocked` — dynamic SQL, writeback, or another blocking gap
+- `complexity.class` — `lite`, `medium`, or `complex`
+- `complexity.deliveryClass` — `Fast / easy`, `Engineer-led`, or
+  `Multi-specialist`
+- `migrationDisposition` plus `migrationDispositions` — `spec-native`,
+  `warehouse-backed`, `manual-ui-finish`, `plugin`, `redesign`, and/or `blocked`
 
 The score combines pages, queries, controls, elements, and weighted gaps. Use it
-to sequence migrations, not as an effort estimate.
+to sequence migrations, not as a calendar estimate. The Markdown readout carries
+the ease-of-migration chart, technical drivers, disposition, and qualified Sigma
+benefits. Calendar ranges must come from observed organization telemetry rather
+than hardcoded source-count promises.
 
 Recommended order:
 
@@ -66,6 +78,11 @@ Recommended order:
 {
   "kind": "streamlit-assessment",
   "readOnly": true,
+  "migrationGuide": {
+    "classes": [],
+    "calendarEstimatePolicy": "..."
+  },
+  "sigmaBenefits": [],
   "projects": [],
   "shortlist": []
 }

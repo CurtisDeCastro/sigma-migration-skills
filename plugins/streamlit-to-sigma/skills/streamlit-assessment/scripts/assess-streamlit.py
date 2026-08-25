@@ -23,6 +23,132 @@ WEIGHTS = {
     "info": 0,
 }
 
+COMPLEXITY_GUIDE = [
+    {
+        "class": "lite",
+        "typicalApp": "SQL-backed dashboard with standard charts, tables, and filters",
+        "migrationPath": "Mostly automated conversion plus parity review",
+        "deliveryClass": "Fast / easy",
+    },
+    {
+        "class": "medium",
+        "typicalApp": "Multipage app with forms, moderate transforms, or simple writeback",
+        "migrationPath": "Assisted conversion with targeted Sigma redesign",
+        "deliveryClass": "Engineer-led",
+    },
+    {
+        "class": "complex",
+        "typicalApp": "Session state, callbacks, auth, custom Python, or transactional CRUD",
+        "migrationPath": "Architecture-led redesign with explicit manual finish gates",
+        "deliveryClass": "Multi-specialist",
+    },
+]
+
+SIGMA_BENEFITS = [
+    {
+        "name": "Governance",
+        "value": "Centralized permissions, row/column security, lineage, and auditability",
+    },
+    {
+        "name": "Production deployment path",
+        "value": "Managed sharing and warehouse-backed execution after security and parity gates pass",
+    },
+    {
+        "name": "Warehouse-native operations",
+        "value": "Durable input, writeback, and procedure patterns without a custom app server",
+    },
+    {
+        "name": "Reusable semantic layer",
+        "value": "Governed data models, metrics, and relationships shared across workbooks",
+    },
+    {
+        "name": "Operational simplicity",
+        "value": "Managed scheduling, exports, collaboration, and API-versioned workbook delivery",
+    },
+]
+
+STATEFUL_GAPS = {
+    "session-state",
+    "deferred-form-state",
+    "data-editor",
+    "streamlit-rerun",
+    "python-transform",
+}
+RESTRUCTURE_GAPS = {
+    "dataframe-column-mutation",
+    "dataframe-restructure-required",
+    "unsupported-dataframe-operation",
+    "conditional-status",
+}
+
+
+def migration_dispositions(ir, readiness: str) -> list[str]:
+    gap_codes = {gap.code for gap in ir.gaps}
+    security_codes = {finding.code for finding in ir.security}
+    dispositions: list[str] = []
+    if "warehouse-write" in security_codes or "data-editor" in gap_codes:
+        dispositions.append("warehouse-backed")
+    if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
+        dispositions.append("plugin")
+    if any(element.kind == "button" for element in ir.elements) and (
+        gap_codes & STATEFUL_GAPS or "warehouse-write" in security_codes
+    ):
+        dispositions.append("manual-ui-finish")
+    if gap_codes & (STATEFUL_GAPS | RESTRUCTURE_GAPS):
+        dispositions.append("redesign")
+    if readiness == "blocked":
+        dispositions.append("blocked")
+    if not dispositions:
+        dispositions.append("spec-native")
+    return dispositions
+
+
+def complexity_profile(ir, score: int, readiness: str) -> dict:
+    gap_codes = {gap.code for gap in ir.gaps}
+    drivers: list[str] = []
+    if len(ir.pages) > 2:
+        drivers.append(f"{len(ir.pages)} pages")
+    if len(ir.queries) > 3:
+        drivers.append(f"{len(ir.queries)} data queries")
+    if gap_codes & STATEFUL_GAPS:
+        drivers.append("stateful forms, callbacks, or Python transforms")
+    if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
+        drivers.append("custom component or plugin work")
+    if any(gap.severity == "blocking" for gap in ir.gaps):
+        drivers.append("blocking source ambiguity or dynamic SQL")
+    if ir.security:
+        drivers.append("security, identity, or warehouse-write review")
+    if len(ir.elements) > 12:
+        drivers.append(f"{len(ir.elements)} visible elements")
+
+    complex_app = (
+        readiness == "blocked"
+        or bool(gap_codes & STATEFUL_GAPS)
+        or bool(ir.security)
+        or any(gap.severity == "plugin-candidate" for gap in ir.gaps)
+        or score >= 60
+    )
+    medium_app = (
+        readiness == "redesign"
+        or score >= 25
+        or len(ir.pages) >= 3
+        or len(ir.controls) >= 5
+    )
+    complexity = "complex" if complex_app else "medium" if medium_app else "lite"
+    delivery = {
+        "lite": "Fast / easy",
+        "medium": "Engineer-led",
+        "complex": "Multi-specialist",
+    }[complexity]
+    if not drivers:
+        drivers.append("standard SQL-backed dashboard surface")
+    return {
+        "class": complexity,
+        "deliveryClass": delivery,
+        "drivers": drivers,
+        "calendarEstimate": None,
+    }
+
 
 def assess(path: Path) -> dict:
     ir = analyze_project(path)
@@ -46,6 +172,8 @@ def assess(path: Path) -> dict:
         or any(gap.severity in {"plugin-candidate", "restructure"} for gap in ir.gaps)
         else "direct"
     )
+    dispositions = migration_dispositions(ir, readiness)
+    complexity = complexity_profile(ir, score, readiness)
     return {
         "project": ir.project_name,
         "path": str(path.resolve()),
@@ -60,14 +188,73 @@ def assess(path: Path) -> dict:
             for finding in ir.security
         ],
         "complexityScore": score,
+        "complexity": complexity,
         "readiness": readiness,
+        "migrationDisposition": dispositions[0],
+        "migrationDispositions": dispositions,
     }
+
+
+def markdown_report(report: dict) -> str:
+    lines = [
+        "# Streamlit → Sigma migration assessment",
+        "",
+        "## Ease of migration",
+        "",
+        "| Complexity | Typical app | Migration path | Delivery class |",
+        "|---|---|---|---|",
+    ]
+    for row in report["migrationGuide"]["classes"]:
+        lines.append(
+            f"| {row['class'].title()} | {row['typicalApp']} | "
+            f"{row['migrationPath']} | {row['deliveryClass']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "> Calendar duration is not inferred from source-code counts. "
+            "Configure local estimates from observed migration telemetry, staffing, "
+            "security review, source access, and parity requirements.",
+            "",
+            "## Project readout",
+            "",
+            "| Project | Readiness | Complexity | Delivery | Primary disposition |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for project in report["projects"]:
+        lines.append(
+            f"| {project['project']} | {project['readiness']} | "
+            f"{project['complexity']['class']} | "
+            f"{project['complexity']['deliveryClass']} | "
+            f"{project['migrationDisposition']} |"
+        )
+    lines.extend(["", "### Complexity drivers", ""])
+    for project in report["projects"]:
+        lines.append(
+            f"- **{project['project']}:** "
+            + "; ".join(project["complexity"]["drivers"])
+            + "."
+        )
+    lines.extend(["", "## Benefits of Sigma", ""])
+    for benefit in report["sigmaBenefits"]:
+        lines.append(f"- **{benefit['name']}:** {benefit['value']}.")
+    lines.extend(
+        [
+            "",
+            "Production-ready is a gated outcome, not an automatic claim: security, "
+            "warehouse parity, interaction parity, and visual QA must pass first.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("sources", nargs="+", help="Project directories/main files")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--markdown-out", type=Path)
     args = parser.parse_args()
     projects = [assess(Path(source)) for source in args.sources]
     projects.sort(
@@ -79,12 +266,22 @@ def main() -> int:
     report = {
         "kind": "streamlit-assessment",
         "readOnly": True,
+        "migrationGuide": {
+            "classes": COMPLEXITY_GUIDE,
+            "calendarEstimatePolicy": (
+                "Not inferred automatically; calibrate with observed organization telemetry."
+            ),
+        },
+        "sigmaBenefits": SIGMA_BENEFITS,
         "projects": projects,
         "shortlist": [
             {
                 "project": item["project"],
                 "readiness": item["readiness"],
                 "complexityScore": item["complexityScore"],
+                "complexity": item["complexity"]["class"],
+                "deliveryClass": item["complexity"]["deliveryClass"],
+                "migrationDisposition": item["migrationDisposition"],
             }
             for item in projects
         ],
@@ -95,6 +292,9 @@ def main() -> int:
         args.out.write_text(body, encoding="utf-8")
     else:
         print(body, end="")
+    if args.markdown_out:
+        args.markdown_out.parent.mkdir(parents=True, exist_ok=True)
+        args.markdown_out.write_text(markdown_report(report), encoding="utf-8")
     return 0
 
 

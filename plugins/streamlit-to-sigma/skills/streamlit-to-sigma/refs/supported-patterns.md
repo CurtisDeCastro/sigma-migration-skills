@@ -18,8 +18,8 @@ converted”; unresolved lineage always becomes a gap.
 | columns | proportional grid | direct |
 | tabs | tabbed container | direct |
 | popover/expander/status | popover overlay | mechanical |
-| button | button | visual; action semantics require classification |
-| data editor | input table/writeback | blocking until explicitly designed |
+| button | button | direct visually; classify action host as spec-native or manual-ui-finish |
+| data editor | input table/writeback | warehouse-backed/redesign until explicitly designed |
 
 ## Controls
 
@@ -76,6 +76,20 @@ or `CHART_TABS` are expanded. Runtime loops over query results produce a
 | `data-editor` | writeback architecture required |
 | `unsupported-dataframe-operation` | lineage outside conservative subset |
 | `dynamic-loop` | runtime-dependent element cardinality |
+
+## Action and state architecture
+
+Use this order for buttons, callbacks, forms, and session state:
+
+1. Public-spec controls/actions/overlays/input tables (`spec-native`).
+2. Warehouse tables, views, and procedures (`warehouse-backed`).
+3. A named UI-only wiring step when GET omits the action or POST/PUT rejects the
+   UI-supported host (`manual-ui-finish`).
+4. Plugin or redesign only when the first three cannot express the behavior.
+
+Never infer public-spec support from the Sigma editor alone. Verify the literal
+shape through POST/PUT and GET readback. If no literal action survives readback,
+do not invent one.
 
 ## Plugin candidates
 

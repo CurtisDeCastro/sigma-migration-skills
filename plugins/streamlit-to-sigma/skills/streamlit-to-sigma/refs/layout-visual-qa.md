@@ -39,6 +39,8 @@ with repeatable `--param ControlId=value`.
 - Detail tables show enough rows
 - Empty/error/default states match or are documented redesigns
 - Navigation/action controls are present
+- Modal footer CTAs are explicitly shown/hidden; no default Primary/Secondary
+  buttons leak into the migration
 - No `null`, “multiple values,” unknown-column text, or clipped labels
 
 ## Responsive differences
@@ -55,3 +57,7 @@ first. When the browser is available, click-test:
 
 Keep a visual-delta ledger. A redesign is not “100% parity”; classify and
 explain it.
+
+For UI-only action finishes, capture the exact manual step separately. A visual
+button match does not prove that its action is present in the public workbook
+spec or can be replayed through POST/PUT.

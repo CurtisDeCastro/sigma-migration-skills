@@ -91,7 +91,55 @@ class SafetyGateTest(unittest.TestCase):
                 check=True,
             )
             report = json.loads(output.read_text())
-            self.assertEqual(report["projects"][0]["readiness"], "blocked")
+            project = report["projects"][0]
+            self.assertEqual(project["readiness"], "blocked")
+            self.assertEqual(project["complexity"]["class"], "complex")
+            self.assertIsNone(project["complexity"]["calendarEstimate"])
+            self.assertIn("warehouse-backed", project["migrationDispositions"])
+            self.assertIn("blocked", project["migrationDispositions"])
+
+    def test_assessment_emits_ease_chart_and_sigma_benefits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                "import streamlit as st\nst.title('Simple app')\nst.metric('Orders', 1)\n",
+                encoding="utf-8",
+            )
+            output = root / "assessment.json"
+            markdown = root / "assessment.md"
+            subprocess.run(
+                [
+                    "python3",
+                    str(
+                        SKILL.parent
+                        / "streamlit-assessment"
+                        / "scripts"
+                        / "assess-streamlit.py"
+                    ),
+                    str(root),
+                    "--out",
+                    str(output),
+                    "--markdown-out",
+                    str(markdown),
+                ],
+                check=True,
+            )
+            report = json.loads(output.read_text())
+            project = report["projects"][0]
+            self.assertEqual(project["complexity"]["class"], "lite")
+            self.assertEqual(project["migrationDisposition"], "spec-native")
+            self.assertEqual(
+                [row["class"] for row in report["migrationGuide"]["classes"]],
+                ["lite", "medium", "complex"],
+            )
+            self.assertIn(
+                "Governance",
+                [item["name"] for item in report["sigmaBenefits"]],
+            )
+            body = markdown.read_text()
+            self.assertIn("## Ease of migration", body)
+            self.assertIn("## Benefits of Sigma", body)
+            self.assertIn("Calendar duration is not inferred", body)
 
     def test_phase6_gate_dependency_closure_loads(self):
         result = subprocess.run(
