@@ -3181,7 +3181,14 @@ end
 # ---------------------------------------------------------------------------
 jp_path = File.join(opts[:tab], 'join-plan.json')
 jp_dm = File.join(opts[:tab], 'dm-spec.json')
-jp_dm_src = File.exist?(jp_dm) ? (File.read(jp_dm) rescue '') : ''
+# encoding: 'UTF-8' is NOT optional (F5 crash class, issue #752). This is the
+# only RAW File.read in this file — every other read feeds JSON.parse, which
+# tolerates locale-tagged bytes. A raw read inherits the locale's default
+# external encoding, so under an unset/C locale a dm-spec.json carrying one
+# em-dash makes the .scan below raise
+# `invalid byte sequence in US-ASCII (ArgumentError)` and the gate exits 1
+# instead of its real verdict. Reproduced on ruby 3.3.12, not just 2.6.
+jp_dm_src = File.exist?(jp_dm) ? (File.read(jp_dm, encoding: 'UTF-8') rescue '') : ''
 jp_dm_join_n = jp_dm_src.scan(/"kind"\s*:\s*"join"/).length
 jp_dm_has_emitted_join = jp_dm_join_n.positive?
 jp_resolved = lambda do |e|

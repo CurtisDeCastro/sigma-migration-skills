@@ -55,6 +55,7 @@ if [ "${CI:-}" = "true" ]; then
   [ -f tools/test-commit-msg-guard.sh ] && { bash tools/test-commit-msg-guard.sh || fail=1; }
   [ -f tools/test-lint-skill-paths.sh ] && { bash tools/test-lint-skill-paths.sh || fail=1; }
   [ -f tools/test-lint-uplift-contracts.rb ] && { ruby tools/test-lint-uplift-contracts.rb || fail=1; }
+  [ -f tools/test-lint-twb-encoding.rb ] && { ruby tools/test-lint-twb-encoding.rb || fail=1; }
 fi
 if [ "$fail" -ne 0 ]; then
   echo "" >&2

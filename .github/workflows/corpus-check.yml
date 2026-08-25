@@ -29,6 +29,19 @@ jobs:
     name: corpus --check (creds-free goldens)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      # Same pin, same reason as ruby-full-suite and the BSD-smoke job below:
+      # UTF-8-heavy fixtures crash under a US-ASCII default external encoding
+      # (F5 crash class). This job was the one that did NOT pin it, which is how
+      # tableau/preagg-kpi could pass in CI and fail on an unset-LANG laptop
+      # (issue #752). run-corpus.sh self-pins as well, which covers a developer
+      # running it directly; this job-level pin covers the OTHER steps here and
+      # means the runner's default locale is never something we rely on.
+      # (Running a single case's `bash checks.sh` by hand still needs a UTF-8
+      # locale in your own shell -- its inline `ruby -e` assertions cannot
+      # self-pin. corpus/README.md says so.)
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -407,7 +420,15 @@ jobs:
         # runner (US-ASCII) it raises Encoding::CompatibilityError on any non-ASCII
         # .twb/XML — which has silently crashed migrations 3+ times. Any read of a
         # .twb / xml / layout file MUST pass `encoding: 'UTF-8'`.
+        # RULE 2 (#752) additionally catches a RAW read whose result is later
+        # regexp-matched, whatever the extension — that is how the
+        # assert-phase6-ran.rb dm-spec.json crash slipped past the .twb-token rule.
         run: ruby tools/lint-twb-encoding.rb   # single source of truth (plugins/ + shared/); also run by .githooks/run-governance-checks.sh
+      - name: Self-test — the F5 gate must FAIL on the #752 shape
+        # A gate nobody has watched fail is not a gate. Plants the exact defect
+        # (raw dm-spec.json read + .scan) in a throwaway tree and asserts exit 1,
+        # plus the safe shapes that must stay quiet.
+        run: ruby tools/test-lint-twb-encoding.rb
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser
