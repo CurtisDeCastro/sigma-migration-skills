@@ -24,7 +24,6 @@ Read before converting:
 1. [`refs/supported-patterns.md`](refs/supported-patterns.md)
 2. [`refs/schema-hints.md`](refs/schema-hints.md)
 3. [`refs/layout-visual-qa.md`](refs/layout-visual-qa.md)
-4. [`../streamlit-assessment/refs/migration-readout.md`](../streamlit-assessment/refs/migration-readout.md)
 <!-- /mandatory-pre-read -->
 
 ## Inputs
@@ -110,6 +109,8 @@ For one project, run discovery and review:
 - complexity class, delivery class, and implementation dispositions
 
 For an estate/shortlist, use the sibling `streamlit-assessment` skill.
+When presenting complexity or Sigma benefits, read
+[`../streamlit-assessment/refs/migration-readout.md`](../streamlit-assessment/refs/migration-readout.md).
 
 Do not convert the complexity score into a hardcoded calendar promise. Present
 the technical delivery class and drivers; use organization telemetry for any
