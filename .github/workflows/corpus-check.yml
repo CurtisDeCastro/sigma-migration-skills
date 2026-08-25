@@ -407,7 +407,15 @@ jobs:
         # runner (US-ASCII) it raises Encoding::CompatibilityError on any non-ASCII
         # .twb/XML — which has silently crashed migrations 3+ times. Any read of a
         # .twb / xml / layout file MUST pass `encoding: 'UTF-8'`.
+        # RULE 2 (#752) additionally catches a RAW read whose result is later
+        # regexp-matched, whatever the extension — that is how the
+        # assert-phase6-ran.rb dm-spec.json crash slipped past the .twb-token rule.
         run: ruby tools/lint-twb-encoding.rb   # single source of truth (plugins/ + shared/); also run by .githooks/run-governance-checks.sh
+      - name: Self-test — the F5 gate must FAIL on the #752 shape
+        # A gate nobody has watched fail is not a gate. Plants the exact defect
+        # (raw dm-spec.json read + .scan) in a throwaway tree and asserts exit 1,
+        # plus the safe shapes that must stay quiet.
+        run: ruby tools/test-lint-twb-encoding.rb
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser
