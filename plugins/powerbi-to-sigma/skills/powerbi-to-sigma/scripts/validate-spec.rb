@@ -66,6 +66,9 @@ elements.each do |el|
   all_element_names << el['id'] if el['id']
 end
 require 'set' rescue nil
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 # RESERVED reference prefixes that are always valid regardless of the spec's own
 # elements. `Metrics` is the governed data-model metric namespace: a column
 # formula may reference a DM metric as [Metrics/<measure name>] (the documented,

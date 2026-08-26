@@ -6,6 +6,10 @@
 require 'json'
 require 'tmpdir'
 require_relative 'mechanical-specs'
+# Ruby 2.6 floor: this test READS a sibling script and eval()s a method out
+# of it, so that script's own require_relative lines never run -- the test
+# must supply the polyfill itself. See shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 HERE = __dir__
 VENDORED = File.expand_path('../converter/tableau.mjs', HERE)

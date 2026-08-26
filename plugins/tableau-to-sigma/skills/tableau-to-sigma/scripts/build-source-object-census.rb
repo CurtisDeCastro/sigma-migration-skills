@@ -11,6 +11,9 @@ require 'set'
 
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'twb_xml'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 class CensusError < StandardError; end
 

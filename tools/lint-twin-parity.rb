@@ -38,6 +38,9 @@
 
 require 'json'
 require 'set'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative '../shared/lib/ruby_compat'
 
 ROOT = ENV['LINT_ROOT'] || File.expand_path('..', __dir__)
 Dir.chdir(ROOT)

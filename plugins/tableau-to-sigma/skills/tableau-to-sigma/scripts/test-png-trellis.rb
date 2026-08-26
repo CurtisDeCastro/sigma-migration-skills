@@ -6,6 +6,10 @@
 # the only reliable discriminator between that and an implicit color grouping.
 
 require_relative 'lib/trellis_emit'
+# Ruby 2.6 floor: this test READS a sibling script and eval()s a method out
+# of it, so that script's own require_relative lines never run -- the test
+# must supply the polyfill itself. See shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 source = File.read(File.join(__dir__, 'build-charts-from-signals.rb'))
 method = source.match(/^def apply_verified_trellis!.*?\n^end$/m) or abort('could not extract apply_verified_trellis!')

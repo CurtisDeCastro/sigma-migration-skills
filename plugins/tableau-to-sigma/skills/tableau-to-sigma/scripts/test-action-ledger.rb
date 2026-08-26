@@ -50,7 +50,11 @@ check(ActionLedger.validate_action(nav_no_target).any?, 'navigate without target
 
 scv = { 'id' => 'a', 'trigger' => 'on-select',
         'effects' => [{ 'effect' => 'set-control-value', 'control' => 'RegionCtl',
-                        'value' => { 'type' => 'column', 'column' => 'c-region' } }] }
+                        # columnId, not `column` -- renamed 2026-08-26. This fixture
+                        # still said `column` and asserted it was well-formed, which
+                        # the new nested validation correctly rejects. `control`
+                        # (above) is one of the three fields NOT renamed.
+                        'value' => { 'type' => 'column', 'columnId' => 'c-region' } }] }
 check(ActionLedger.validate_action(scv).empty?, 'a well-formed set-control-value validates')
 check(ActionLedger.validate_action(
   scv.merge('effects' => [scv['effects'][0].reject { |k, _| k == 'control' }])
