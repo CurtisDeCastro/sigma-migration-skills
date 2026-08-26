@@ -37,7 +37,7 @@
 #     entries — this module does not reshape `values`, callers build it),
 #     clear-control (an ELEMENT-scoped clear-control masked-failed the button
 #     live — only page scope is verified, so this builder only emits
-#     scope:{type:"page",page:}), set-control-value (constant text value).
+#     scope:{type:"page",pageId:}), set-control-value (constant text value).
 #
 # All builders are gated through Actions::SURFACES (same discipline as
 # richness.rb/styling.rb): a NO-GO flip on `button`/`input_table_empty`/
@@ -145,7 +145,7 @@ module Actions
     { 'effect' => 'insert-rows', 'tableElementId' => table_element_id, 'values' => values }
   end
 
-  # Returns a `clear-control` effect Hash: {effect, scope:{type:"page",page:},
+  # Returns a `clear-control` effect Hash: {effect, scope:{type:"page",pageId:},
   # usePublishedValue:true}. Page scope ONLY — an element-scoped
   # clear-control masked-failed the button live (design doc), so this
   # builder never emits any other scope shape. NO-GO surface -> {}.

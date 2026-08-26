@@ -35,7 +35,7 @@ command-center workbook on a test org:
     entries -- this module does not reshape `values`, callers build it),
     clear-control (an ELEMENT-scoped clear-control masked-failed the button
     live -- only page scope is verified, so this builder only emits
-    scope={type:"page",page:}), set-control-value (constant text value).
+    scope={type:"page",pageId:}), set-control-value (constant text value).
 
 All builders are gated through SURFACES (same discipline as richness.py/
 styling.py): a NO-GO flip on `button`/`input_table_empty`/`input_table_linked`
