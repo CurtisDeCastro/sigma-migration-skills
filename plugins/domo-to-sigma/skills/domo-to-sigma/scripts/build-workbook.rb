@@ -222,9 +222,15 @@ CHART_TYPE_MAP = {
 # is tracked as a Sigma CUSTOM PLUGIN follow-up (see the sigma-plugin-development
 # skill) — building one is NOT this converter's job today.
 NO_NATIVE_EQUIVALENT = {
-  'badge_treemap' => 'Domo treemap — no treemap `kind` was found in the Sigma workbook spec ' \
-                      '(verified against the sigma-workbooks skill); degraded to a bar-chart sorted ' \
-                      'descending by measure, which loses the area-proportional hierarchy.',
+  # CORRECTED 2026-08-26: Sigma DOES have a native `treemap-chart` (live-verified:
+  # source + columns + `category: {id: <dim col>}` returns valid:true, creates, and
+  # reads back intact). This converter still degrades, because re-routing needs the
+  # builder to emit `category` instead of the bar axis/stacking/orientation props --
+  # swapping the kind token alone produces an invalid element. Tracked follow-up.
+  'badge_treemap' => 'Domo treemap — degraded to a bar-chart sorted descending by measure, which ' \
+                      'loses the area-proportional hierarchy. NOTE: Sigma now HAS a native ' \
+                      'treemap-chart (as of 2026-08-26); this converter has not been re-routed to it ' \
+                      'yet — see sigma-workbooks reference/specification/charts.md.',
   'badge_word_cloud' => 'Domo word cloud — no word-cloud `kind` exists in Sigma; degraded to a flat ' \
                          'term + frequency table.',
   'badge_calendar' => 'Domo calendar heatmap — no calendar `kind` exists in Sigma; degraded to a flat ' \
