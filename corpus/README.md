@@ -63,6 +63,27 @@ derivations, fixture-mode probes, and final gates against their synthetic
 `checks.sh` must be listed in the MANIFEST expectations artifacts
 (corpus_check enforces this).
 
+### A UTF-8 locale is required (issue #752)
+
+`run-corpus.sh` exports one for you (`C.UTF-8`, else `en_US.UTF-8`), so the
+corpus gives the same verdict on every machine — it previously reported 11/12
+with `LANG` unset and 12/12 with `LANG=en_US.UTF-8`, which made it an unreliable
+oracle for anything built on top of it. Fixtures are full of em-dashes and under
+a US-ASCII default external encoding ruby dies on them.
+
+If you run a single case's `checks.sh` **directly**, set a UTF-8 locale in your
+own shell first:
+
+```
+LC_ALL=en_US.UTF-8 bash tableau/preagg-kpi/checks.sh
+```
+
+The inline `ruby -e` assertions inside those scripts hold non-ASCII characters in
+their *source text*, and a `-e` script's encoding comes from the locale — so they
+cannot `require_relative 'lib/cli_encoding'`, and `RUBYOPT=-EUTF-8` does not fix
+them either (`-E` sets external/internal encoding, not script encoding). Only the
+locale does.
+
 ## Goldens are id-normalized
 
 The converters generate random element/column ids on every run

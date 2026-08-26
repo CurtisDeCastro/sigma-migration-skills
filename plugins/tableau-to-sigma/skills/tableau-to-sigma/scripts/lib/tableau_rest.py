@@ -1,8 +1,24 @@
 """Tableau REST API wrapper for tableau-to-sigma when the MCP isn't available.
 
-Python twin of tableau_rest.rb (P1 runtime-shrink: Ruby -> Python). Behaviour
-parity with the Ruby module is enforced by test_tableau_rest.py and the
-cross-impl parity harness. Stdlib only (urllib) — no third-party deps.
+Python twin of tableau_rest.rb (P1 runtime-shrink: Ruby -> Python). Stdlib only
+(urllib) — no third-party deps.
+
+WHAT ACTUALLY ENFORCES PARITY (corrected, issue #753): there is no "cross-impl
+parity harness" — the phrase existed only in this docstring and sigma_rest.py's —
+and test_tableau_rest.py does not invoke ruby. API-surface parity is checked by
+tools/lint-twin-parity.rb; behavioural equivalence is not machine-checked.
+
+DELIBERATE NON-PORTS (recorded in ALLOWED in tools/lint-twin-parity.rb). The Ruby
+twin exports eight functions with no counterpart here — the largest twin
+divergence in shared/lib:
+  query_datasource, view_data_filtered   — the VizQL/CSV data-fetch spine.
+      Porting needs live-Tableau validation of pagination + filter semantics; a
+      blind translation would be worse than the gap.
+  datasource_connections, workbook_connections, virtual_connections,
+  virtual_connection_connections, graphql_workbook_dashboards,
+  find_workbook_by_content_url           — read/discovery surface, no Python
+      caller yet.
+If you are porting the Tableau skill to Python, these are the real work.
 
 Requires TABLEAU_SERVER_URL, TABLEAU_SITE_ID, TABLEAU_AUTH_TOKEN,
 TABLEAU_API_VERSION in env (set by scripts/get-tableau-token.sh). PAT refresh

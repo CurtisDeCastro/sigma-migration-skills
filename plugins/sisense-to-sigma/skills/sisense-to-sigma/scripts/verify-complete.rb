@@ -8,6 +8,9 @@
 require 'json'
 require 'optparse'
 require_relative 'lib/degradation_ledger'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 TERMINAL = %w[migrated approximated needs-review skipped not-applicable].freeze
 

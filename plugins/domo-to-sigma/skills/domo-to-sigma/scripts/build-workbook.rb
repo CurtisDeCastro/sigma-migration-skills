@@ -24,6 +24,9 @@ require 'json'
 require 'fileutils'
 require 'base64'
 require_relative 'lib/domo_sigma_util'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 include DomoSigma
 
 OUT = ENV['DOMO_DISCOVERY_DIR'] || File.expand_path('../discovery', __dir__)

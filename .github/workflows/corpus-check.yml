@@ -29,6 +29,19 @@ jobs:
     name: corpus --check (creds-free goldens)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      # Same pin, same reason as ruby-full-suite and the BSD-smoke job below:
+      # UTF-8-heavy fixtures crash under a US-ASCII default external encoding
+      # (F5 crash class). This job was the one that did NOT pin it, which is how
+      # tableau/preagg-kpi could pass in CI and fail on an unset-LANG laptop
+      # (issue #752). run-corpus.sh self-pins as well, which covers a developer
+      # running it directly; this job-level pin covers the OTHER steps here and
+      # means the runner's default locale is never something we rely on.
+      # (Running a single case's `bash checks.sh` by hand still needs a UTF-8
+      # locale in your own shell -- its inline `ruby -e` assertions cannot
+      # self-pin. corpus/README.md says so.)
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -407,7 +420,46 @@ jobs:
         # runner (US-ASCII) it raises Encoding::CompatibilityError on any non-ASCII
         # .twb/XML — which has silently crashed migrations 3+ times. Any read of a
         # .twb / xml / layout file MUST pass `encoding: 'UTF-8'`.
+        # RULE 2 (#752) additionally catches a RAW read whose result is later
+        # regexp-matched, whatever the extension — that is how the
+        # assert-phase6-ran.rb dm-spec.json crash slipped past the .twb-token rule.
         run: ruby tools/lint-twb-encoding.rb   # single source of truth (plugins/ + shared/); also run by .githooks/run-governance-checks.sh
+      - name: Self-test — the F5 gate must FAIL on the #752 shape
+        # A gate nobody has watched fail is not a gate. Plants the exact defect
+        # (raw dm-spec.json read + .scan) in a throwaway tree and asserts exit 1,
+        # plus the safe shapes that must stay quiet.
+        run: ruby tools/test-lint-twb-encoding.rb
+      - name: Lint — .rb/.py twin API parity (#753)
+        # The .rb/.py pairing in shared/lib reads as "these are equivalent", but
+        # nothing checked it: check-shared.rb enforces byte-identical VENDORING of
+        # one file into each plugin, not that a .py twin exports what its .rb does.
+        # A ported caller just hits AttributeError at runtime.
+        run: ruby tools/lint-twin-parity.rb
+      - name: Self-test — the twin-parity gate must FAIL on a deleted function
+        # And must stay QUIET on the seven shapes a naive `grep '^def '` diff gets
+        # wrong (Python's `_` privacy marker, ruby `private` regions, `def self.`,
+        # `?`/`!` suffixes, initialize/__init__, declared renames). Five of the nine
+        # rows in the original report were one of those.
+        run: ruby tools/test-lint-twin-parity.rb
+      - name: Lint — layout emitters must not produce legacy tags
+        # The 2026-08-07 contract renamed <LayoutElement>/<GridContainer> to
+        # <Element>/<Container>. domo's scripts/lib/layout.rb — a vendored copy
+        # of tableau's, marked "do not diverge" — sat on the old tags for ~2.5
+        # weeks unnoticed, because CodeRep.document()/.wrap() canonicalize on
+        # the way to the wire. That net only covers adapter paths: a script
+        # writing document.layout directly, or a human hand-building a request
+        # from an intermediate artifact, still gets a 400. Pin the emitters.
+        run: ruby tools/lint-layout-tags.rb
+      - name: Lint — ruby 2.6 floor (polyfill present, in scope, in order)
+        # `ruby -c` CANNOT see this: a missing METHOD is a runtime NoMethodError,
+        # and this job runs 3.3 where filter_map/tally exist. ~60 call sites had
+        # already broken the documented 2.6 floor; under system 2.6, 13 of 277
+        # tableau suites failed and 6 of those emitted silently EMPTY output.
+        run: ruby tools/lint-ruby-floor.rb
+      - name: Self-test — the ruby-floor gate must FAIL on each real mistake
+        # missing require / require nested in a block / require after first use /
+        # ruby-3.0 endless def. All four were made while landing the polyfill.
+        run: ruby tools/test-lint-ruby-floor.rb
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser

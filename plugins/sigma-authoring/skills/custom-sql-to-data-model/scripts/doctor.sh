@@ -49,7 +49,45 @@ echo
 
 # --- ruby ------------------------------------------------------------------
 if command -v ruby >/dev/null 2>&1; then
-  ok "ruby — $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
+  RUBY_V="$(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
+  RUBY_MAJMIN="$(printf '%s' "$RUBY_V" | cut -d. -f1,2)"
+  # Assert the FLOOR, do not just print the version. This was a bare
+  # `ok "ruby — $version"`, so system ruby 2.6.10 passed GREEN while ~60 call
+  # sites needed 2.7+ (filter_map/tally): agents hit a runtime NoMethodError
+  # mid-migration and started hand-installing runtimes or writing their own
+  # polyfills into the customer workdir. The floor is real now -- 2.6 works
+  # because ruby_compat.rb polyfills those methods and tools/lint-ruby-floor.rb
+  # keeps it that way -- so the honest check is ">= 2.6 AND the polyfill
+  # shipped", not ">= 2.7".
+  #
+  # $HERE is not set until much later in this script, so resolve the script dir
+  # locally; reading the empty var would make the polyfill always look missing.
+  _DOCTOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # scripts/lib/ruby_compat.rb in a DEPLOYED plugin; ../lib/ruby_compat.rb
+  # relative to the canonical shared/scripts/ copy. Accept either -- checking
+  # only the first made this doctor fail when invoked from shared/scripts/,
+  # which is how shared/scripts/test-bootstrap.rb drives it (caught in CI's
+  # macOS job, not locally).
+  _RUBY_COMPAT=""
+  for _c in "$_DOCTOR_DIR/lib/ruby_compat.rb" "$_DOCTOR_DIR/../lib/ruby_compat.rb"; do
+    if [ -f "$_c" ]; then _RUBY_COMPAT="$_c"; break; fi
+  done
+  RUBY_OLD=0
+  case "$RUBY_MAJMIN" in
+    1.*|2.0|2.1|2.2|2.3|2.4|2.5) RUBY_OLD=1 ;;
+  esac
+  if [ "$RUBY_OLD" -eq 1 ]; then
+    bad "ruby $RUBY_V is below the 2.6 floor" "Install ruby >= 2.6 (bash scripts/bootstrap.sh), or use the macOS system ruby at /usr/bin/ruby."
+  elif [ "$RUBY_MAJMIN" = "2.6" ] && [ -z "$_RUBY_COMPAT" ]; then
+    # 2.6 with no polyfill is the exact configuration that failed in the field:
+    # 13 of 277 tableau suites broke, and 6 of those emitted silently EMPTY
+    # output instead of crashing.
+    bad "ruby $RUBY_V needs lib/ruby_compat.rb (2.7+ method polyfill) and it is missing" "Re-install/update the plugin so scripts/lib/ruby_compat.rb ships, or use ruby >= 2.7."
+  elif [ "$RUBY_MAJMIN" = "2.6" ]; then
+    ok "ruby — $RUBY_V (2.6 floor; 2.7+ methods polyfilled by ruby_compat.rb)"
+  else
+    ok "ruby — $RUBY_V"
+  fi
 else
   if [ "$OS" = "windows-bash" ]; then
     bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — no-admin install/activation; it re-runs this doctor when done."

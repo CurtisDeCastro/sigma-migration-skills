@@ -80,7 +80,9 @@ logic.
 > REST gotcha — changesets, locks, lowercase response headers, session-bound
 > dossier flows), `ae-row-collapse.md` (the one MSTR behavior no clean SQL
 > reproduces, and the pinning workflow), `viz-type-mapping.md` (dossier viz →
-> Sigma element lookup), `design-notes.md` (architecture + modeling gotchas +
+> Sigma element lookup), `plugin-tier.md` (what to do when a source viz has NO
+> native Sigma analog — `heat_map` is a treemap, and Sigma has none: match it
+> with a plugin, never a shaded table), `design-notes.md` (architecture + modeling gotchas +
 > roadmap), `control-parity.md` (shared control-targeting contract: the
 > control lint, the control-scope.json sidecar, and the flip test). For
 > canonical Sigma spec shapes, defer to the companion `sigma-data-models` /
@@ -487,6 +489,12 @@ explicit-value progress gauges; allowlisted styling; and explicit repeaters.
 Every partial panel/repeater/style translation is recorded in
 `feature-gaps.json`. Box plots remain capability-gated and default to a loud
 table fallback.
+
+**Plugin tier:** viz types with **no native Sigma analog** (`heat_map` — a
+treemap — plus `sankey`, `network`, sunburst) are matched with a bespoke plugin
+element, not degraded to a table; see `refs/plugin-tier.md`. If you do ship a
+degraded tile, the visual-QA report must NAME it as an approximation and say
+what encoding was lost — never fold it into "matches".
 
 **Flagged / roadmap:** unmapped or unwired viz types → flagged table fallback
 (`refs/viz-type-mapping.md`); KPI/pie/combo/scatter and other non-axis-generic

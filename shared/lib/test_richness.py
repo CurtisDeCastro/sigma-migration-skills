@@ -209,7 +209,7 @@ class WidePivotTest(unittest.TestCase):
 
 AGENT_TOOLS = [
     {"toolId": "t-log-note", "kind": "action", "name": "Log note", "description": "Insert a review note.",
-     "steps": [{"kind": "effect", "effect": "insert-rows", "table": "annotations",
+     "steps": [{"kind": "effect", "effect": "insert-rows", "tableElementId": "annotations",
                 "values": {"an-note": {"type": "agent-input", "inputName": "note"}}}]},
 ]
 

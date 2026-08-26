@@ -74,6 +74,9 @@ require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-m
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require 'erb'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|
@@ -8288,10 +8291,12 @@ unless opts[:pages_mode] == :worksheet
                       'control' => ctl['controlId'],
                       # The HOST element's columnId (not a bare column name):
                       # the live-probed shape is
-                      # {type: "column", column: <columnId>}. Resolved just
+                      # {type: "column", columnId: <columnId>}. Resolved just
                       # above against host_el['columns'] — see the
                       # HOST-COLUMN BINDING note there.
-                      'value'   => { 'type' => 'column', 'column' => col_id } }]
+                      # Renamed from `column` in the 2026-08-26 action field
+                      # rename; the bare `column` key is now rejected.
+                      'value'   => { 'type' => 'column', 'columnId' => col_id } }]
     }
     errs = ActionLedger.validate_action(action)
     raise "emitted an invalid parameter-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?

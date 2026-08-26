@@ -37,6 +37,9 @@ require 'rexml/xpath'
 require_relative 'lib/py_resolve' # real-Python resolver (Windows Store-stub safe)
 require_relative 'lib/theme_derive' # shared theme derivation/emission (v5.0)
 require_relative 'lib/sql_ident_check' # #685-C: calc-masquerading-as-physical fixup reuses its scanner/catalog check
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 module MechanicalSpecs
   module_function

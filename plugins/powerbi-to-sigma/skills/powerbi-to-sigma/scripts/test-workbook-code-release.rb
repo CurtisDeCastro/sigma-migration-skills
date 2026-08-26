@@ -8,6 +8,9 @@ require 'tmpdir'
 require 'rbconfig'
 require_relative 'lib/layout_lint'
 require_relative 'lib/layout'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 BUILD = File.join(__dir__, 'build-workbook-from-pbir.rb')
 ASSEMBLE = File.join(__dir__, 'build-workbook-spec.rb')
