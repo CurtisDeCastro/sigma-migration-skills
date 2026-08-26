@@ -347,12 +347,12 @@ def build_spec(home, schema_version)
 
   # ==== SURFACE: Actions.button x3, one per verified effect ================
   btn_reset = Actions.button(id: 'btn-reset', text: 'Reset filters', appearance: 'outline',
-                              effects: [Actions.clear_control_effect(page: PG_ACTIONS)])
+                              effects: [Actions.clear_control_effect(page_id: PG_ACTIONS)])
   btn_preset = Actions.button(id: 'btn-preset', text: 'Preset note', appearance: 'outline',
                                effects: [Actions.set_control_value_effect(control: NOTE_CTL_HANDLE,
                                                                            text: 'Reviewed - looks good')])
   btn_log = Actions.button(id: 'btn-log', text: 'Log note', appearance: 'filled',
-                            effects: [Actions.insert_rows_effect(table: 'review-log',
+                            effects: [Actions.insert_rows_effect(table_element_id: 'review-log',
                                                                   values: { 'rl-note' => { 'type' => 'control',
                                                                                             'control' => NOTE_CTL_HANDLE } })])
 

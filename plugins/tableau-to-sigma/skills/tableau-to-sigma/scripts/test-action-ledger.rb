@@ -114,5 +114,36 @@ Dir.mktmpdir do |d|
         'a missing manifest reads as empty, not an exception')
 end
 
+puts 'EFFECT_REQUIRED uses the POST-RENAME identifier field names'
+# The 2026-08-26 action field rename made identifier properties carry the
+# referenced resource type and an `Id` suffix. EFFECT_REQUIRED is a hand-kept
+# mirror of the API contract, and nothing else in this suite reads its VALUES —
+# so before this check, reverting any entry to its pre-rename spelling left the
+# whole suite green while every emitted action 400'd live. These assertions are
+# the canary for that drift.
+{
+  'insert-rows'   => 'tableElementId',
+  'update-rows'   => 'tableElementId',
+  'delete-rows'   => 'tableElementId',
+  'select-tab'    => 'tabbedContainerElementId',
+  'open-document' => 'documentId'
+}.each do |effect, field|
+  check(ActionLedger::EFFECT_REQUIRED.fetch(effect, []).include?(field),
+        "#{effect} requires #{field} (post-rename name)")
+end
+# Pre-rename spellings must NOT come back.
+%w[table tabbedContainer document].each do |dead|
+  hits = ActionLedger::EFFECT_REQUIRED.select { |_, req| req.include?(dead) }.keys
+  check(hits.empty?, "no effect still requires the pre-rename `#{dead}` (found on: #{hits.inspect})")
+end
+# Deliberately NOT renamed — the bare names are still what the API wants, so a
+# well-meaning "regularise these too" edit should fail here.
+check(ActionLedger::EFFECT_REQUIRED['set-control-value'].include?('control'),
+      'set-control-value still requires the BARE `control` (controlId is rejected live)')
+check(ActionLedger::EFFECT_REQUIRED['navigate'].include?('target'),
+      'navigate still requires the BARE `target` (not renamed)')
+check(ActionLedger::EFFECT_REQUIRED['refresh-element'].include?('target'),
+      'refresh-element still requires the BARE `target` (not renamed)')
+
 puts($fails.empty? ? "\nALL PASS" : "\n#{$fails.size} FAILURES")
 exit($fails.empty? ? 0 : 1)

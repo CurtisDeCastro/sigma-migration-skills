@@ -8288,10 +8288,12 @@ unless opts[:pages_mode] == :worksheet
                       'control' => ctl['controlId'],
                       # The HOST element's columnId (not a bare column name):
                       # the live-probed shape is
-                      # {type: "column", column: <columnId>}. Resolved just
+                      # {type: "column", columnId: <columnId>}. Resolved just
                       # above against host_el['columns'] — see the
                       # HOST-COLUMN BINDING note there.
-                      'value'   => { 'type' => 'column', 'column' => col_id } }]
+                      # Renamed from `column` in the 2026-08-26 action field
+                      # rename; the bare `column` key is now rejected.
+                      'value'   => { 'type' => 'column', 'columnId' => col_id } }]
     }
     errs = ActionLedger.validate_action(action)
     raise "emitted an invalid parameter-action on #{host_el['id']}: #{errs.join('; ')}" if errs.any?
