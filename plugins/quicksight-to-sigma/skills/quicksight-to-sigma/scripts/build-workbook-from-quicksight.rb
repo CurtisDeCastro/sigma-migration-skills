@@ -651,7 +651,10 @@ end
 # union — /v2/workbooks/spec): kpi-chart, bar-chart, line-chart, area-chart,
 # pie-chart, donut-chart, scatter-chart, combo-chart, waterfall-chart, progress,
 # table, pivot-table, AND the three geographic kinds point-map / region-map /
-# geography-map. There is NO native histogram, heat-map, treemap, box-plot,
+# geography-map. There is NO native histogram or heat-map. (CORRECTED 2026-08-26:
+# treemap-chart and box-chart ARE native and live-verified; this converter has not
+# been re-routed to them yet — see sigma-workbooks reference/specification/charts.md.)
+# Historically also listed as unsupported: treemap, box-plot,
 # radar, sankey, or word-cloud kind.
 #
 # Approximations (no native kind, mirror the PBI builder, beads-sigma-1zh9):

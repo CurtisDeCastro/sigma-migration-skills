@@ -435,3 +435,71 @@ no `box-chart` element kind. Keep requests for one pending or use an explicitly
 approved alternative; do not infer support from UI concepts or stale docs.
 
 For element-level reference of `kind: "text"` (free-form Markdown blocks), see `content-elements.md`.
+
+---
+
+## Natively supported chart kinds that converters still degrade (verified live 2026-08-26)
+
+**treemap, sankey, funnel, gauge and box charts are NATIVE.** Several converters
+still route them to a plugin, to a `bar-chart`, or drop them outright, on the
+belief that Sigma has no equivalent. That belief is out of date. Each shape below
+was confirmed against a real org via `POST /v2/workbooks/spec/verify`, and
+`treemap-chart` additionally via a real create + spec readback.
+
+| kind | required beyond `id`/`kind`/`source`/`columns` | shape |
+|---|---|---|
+| `treemap-chart` | `category` | `category: {id: <dim col>}` |
+| `gauge-chart`   | `value`    | `value: {id: <measure col>}` |
+| `sankey-chart`  | `stages`, `value` | `stages: [{id: <dim col>}]`, `value: {id: <measure col>}` |
+| `funnel-chart`  | `stage`, `series` | `stage: {id: <dim col>}`, `series: {id: <measure col>}` |
+| `box-chart`     | `yAxis`    | `yAxis: {columnIds: [<measure col>]}` |
+
+```yaml
+# live-verified: {"valid": true}, created, and read back intact
+- id: tm
+  kind: treemap-chart
+  source: { kind: data-model, dataModelId: <dm>, elementId: <el> }
+  columns:
+    - { id: cDim, formula: '[Master/Category]' }
+    - { id: cMea, formula: 'Sum([Master/Revenue])' }
+  category: { id: cDim }        # the ONLY pointer treemap accepts
+```
+
+### Three traps, all found by probing rather than reading
+
+**1. `treemap-chart` rejects `value` and silently DROPS `size`.** The API's own
+error says *"at least one of category or value is required"*, but sending `value`
+returns `Invalid kind: "treemap-chart"`. And `size` is accepted at create then
+absent from the readback — a classic silent drop. `category` is the only pointer
+that both validates and persists; sizing comes from the measure in `columns`.
+Assert the readback, not the status code.
+
+**2. `Invalid kind: "X"` does NOT mean the kind is unsupported.** It is a
+mislabeled UNION failure: `bar-chart`, unambiguously valid, returns the identical
+error the moment any sibling property has the wrong type. Four kinds read as
+"unsupported" purely because the probe sent `value: "cA"` where the schema wants
+`value: {id: "cA"}`. To test whether a kind exists, satisfy its required
+properties first, then A/B against a known-good kind with the SAME body shape.
+
+**3. The OpenAPI under-documents these kinds.** `treemap-chart`'s union member
+lists only `columns`/`id`/`kind`/`source` — `category` appears nowhere, yet it is
+required in practice. `donut-chart` is likewise absent from the asset's `kind`
+list despite being a real, working chart. So the asset is authoritative for what
+EXISTS but not always for what a kind ACCEPTS; probe before trusting a field list.
+
+### Converters still carrying the stale assumption
+
+Re-routing these needs the builder to emit the per-kind pointer above, not just a
+different `kind` token — swapping the token alone ships a `treemap-chart` carrying
+bar-chart axis props, which is invalid. Tracked as follow-up work:
+
+- `domo-to-sigma` — `badge_treemap` -> `bar-chart` + top-500 filter, listed in
+  `NO_NATIVE_EQUIVALENT` ("no treemap `kind` was found").
+- `powerbi-to-sigma` — `refs/catalogs/viz-kind.json`: `treemap`/`funnel` fold into
+  the `bar` row; `sankeyDiagram` sits in the `unsupported` row (`sigma: null`), so
+  it is **dropped entirely**; `gauge` -> `progress` with `shape: ring`.
+- `tableau-to-sigma` / `powerbi-to-sigma` — `test-coverage-gate.rb` still states
+  "Sigma has no native gauge".
+- `quicksight-to-sigma` — `build-workbook-from-quicksight.rb` comment still says
+  "There is NO native histogram, heat-map, treemap, box-plot". Histogram and
+  heat-map remain true; treemap and box-plot do not.
