@@ -141,6 +141,47 @@ class SafetyGateTest(unittest.TestCase):
             self.assertIn("## Benefits of Sigma", body)
             self.assertIn("Calendar duration is not inferred", body)
 
+    def test_assessment_marks_chat_as_workbook_agent_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    from anthropic import Anthropic
+                    prompt = st.chat_input("Ask")
+                    if prompt:
+                        Anthropic().messages.create(
+                            model="example",
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            output = root / "assessment.json"
+            subprocess.run(
+                [
+                    "python3",
+                    str(
+                        SKILL.parent
+                        / "streamlit-assessment"
+                        / "scripts"
+                        / "assess-streamlit.py"
+                    ),
+                    str(root),
+                    "--out",
+                    str(output),
+                ],
+                check=True,
+            )
+            project = json.loads(output.read_text())["projects"][0]
+            self.assertIn(
+                "workbook-agent-candidate",
+                project["migrationDispositions"],
+            )
+            self.assertEqual(project["complexity"]["class"], "complex")
+
     def test_phase6_gate_dependency_closure_loads(self):
         result = subprocess.run(
             ["ruby", str(SKILL / "scripts" / "assert-phase6-ran.rb"), "--help"],

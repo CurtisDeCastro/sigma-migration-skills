@@ -234,6 +234,34 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertIn("data-editor", codes)
             self.assertIn("opaque-chart-object", codes)
 
+    def test_chat_app_is_a_workbook_agent_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import streamlit as st
+                from openai import OpenAI
+
+                prompt = st.chat_input("Ask about revenue")
+                if prompt:
+                    client = OpenAI()
+                    response = client.chat.completions.create(
+                        model="example",
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    with st.chat_message("assistant"):
+                        st.write(response)
+                """,
+            )
+            ir = analyze_project(root)
+            candidates = [
+                gap for gap in ir.gaps if gap.code == "workbook-agent-candidate"
+            ]
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0].severity, "restructure")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -88,6 +88,10 @@ def migration_dispositions(ir, readiness: str) -> list[str]:
     dispositions: list[str] = []
     if "warehouse-write" in security_codes or "data-editor" in gap_codes:
         dispositions.append("warehouse-backed")
+    if "python-transform" in gap_codes:
+        dispositions.append("python-element-candidate")
+    if "workbook-agent-candidate" in gap_codes:
+        dispositions.append("workbook-agent-candidate")
     if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
         dispositions.append("plugin")
     if any(element.kind == "button" for element in ir.elements) and (
@@ -112,6 +116,8 @@ def complexity_profile(ir, score: int, readiness: str) -> dict:
         drivers.append(f"{len(ir.queries)} data queries")
     if gap_codes & STATEFUL_GAPS:
         drivers.append("stateful forms, callbacks, or Python transforms")
+    if "workbook-agent-candidate" in gap_codes:
+        drivers.append("AI/chat workflow and workbook-agent architecture")
     if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
         drivers.append("custom component or plugin work")
     if any(gap.severity == "blocking" for gap in ir.gaps):
@@ -125,6 +131,7 @@ def complexity_profile(ir, score: int, readiness: str) -> dict:
         readiness == "blocked"
         or bool(gap_codes & STATEFUL_GAPS)
         or bool(ir.security)
+        or "workbook-agent-candidate" in gap_codes
         or any(gap.severity == "plugin-candidate" for gap in ir.gaps)
         or score >= 60
     )

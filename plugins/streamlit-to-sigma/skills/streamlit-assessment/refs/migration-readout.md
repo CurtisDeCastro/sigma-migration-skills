@@ -30,6 +30,8 @@ observed migration telemetry and keep them configurable.
 |---|---|
 | `spec-native` | Workbook/data-model code representation covers the required behavior. |
 | `warehouse-backed` | Generate or reuse warehouse tables, views, procedures, and grants. |
+| `python-element-candidate` | Reviewed Python/code-output path, gated by workspace and connection capabilities. |
+| `workbook-agent-candidate` | Discover and validate an existing workbook agent for AI/chat behavior. |
 | `manual-ui-finish` | Sigma supports the behavior, but the public spec API does not author or read it back. Name the exact UI step. |
 | `plugin` | A client-side custom component is justified and hosting/registration is available. |
 | `redesign` | Replace Streamlit runtime semantics with a different Sigma-native workflow. |

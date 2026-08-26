@@ -57,7 +57,9 @@ Each project receives:
 - `complexity.deliveryClass` — `Fast / easy`, `Engineer-led`, or
   `Multi-specialist`
 - `migrationDisposition` plus `migrationDispositions` — `spec-native`,
-  `warehouse-backed`, `manual-ui-finish`, `plugin`, `redesign`, and/or `blocked`
+  `warehouse-backed`, `python-element-candidate`,
+  `workbook-agent-candidate`, `manual-ui-finish`, `plugin`, `redesign`, and/or
+  `blocked`
 
 The score combines pages, queries, controls, elements, and weighted gaps. Use it
 to sequence migrations, not as a calendar estimate. The Markdown readout carries

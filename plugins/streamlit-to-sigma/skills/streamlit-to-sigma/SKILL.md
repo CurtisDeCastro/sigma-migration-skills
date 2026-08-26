@@ -263,6 +263,10 @@ Plugin generation is not automatic in this foundation release.
 
 ## Stateful and operational apps
 
+Read [`refs/live-api-capabilities.md`](refs/live-api-capabilities.md) before
+authoring Python, selected-row action values, workbook-agent integration, or
+stored-procedure actions.
+
 Do not classify every form, callback, or write as an undifferentiated gap. Assign
 one or more migration dispositions:
 
@@ -274,6 +278,14 @@ one or more migration dispositions:
    POST/PUT rejects the UI-authored host. Name the exact manual wiring step.
 4. `plugin` — a hosted client-side component is justified.
 5. `redesign` / `blocked` — the architecture or source cannot be lowered safely.
+
+Additional capability-gated candidates:
+
+- `python-element-candidate` — reviewed code element plus a named
+  `source.kind: code-output`; only after the workspace, connection, runtime, and
+  output readback probes pass.
+- `workbook-agent-candidate` — discover/list/run an existing workbook agent for
+  AI/chat behavior. The current API does not create agents.
 
 Probe the live API before promising action parity. A UI picker is not proof of
 public-spec authorability. Conversely, an OpenAPI discriminator is not enough:

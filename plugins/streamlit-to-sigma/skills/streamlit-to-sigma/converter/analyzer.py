@@ -105,6 +105,13 @@ SECURITY_PATTERNS = {
     ),
 }
 
+AI_APP_PATTERN = re.compile(
+    r"\b(?:openai|anthropic|langchain|llama_index|ChatOpenAI|ChatAnthropic)\b"
+    r"|\bst\.chat_(?:input|message)\b"
+    r"|\b(?:chat\.completions|messages\.create)\s*\(",
+    re.I,
+)
+
 
 def slug(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9]+", "-", value).strip("-").lower()
@@ -1175,6 +1182,24 @@ def analyze_project(source: str | Path) -> ProjectIR:
                     Provenance(
                         str(path.relative_to(root)),
                         text.count("\n", 0, first) + 1,
+                    ),
+                )
+            )
+        ai_match = AI_APP_PATTERN.search(text)
+        if ai_match:
+            ir.gaps.append(
+                Gap(
+                    "workbook-agent-candidate",
+                    "restructure",
+                    (
+                        "AI/chat behavior requires an explicit Sigma workbook-agent "
+                        "reuse or redesign decision; the public API can list and run "
+                        "existing agents but does not create them."
+                    ),
+                    ai_match.group(0),
+                    Provenance(
+                        str(path.relative_to(root)),
+                        text.count("\n", 0, ai_match.start()) + 1,
                     ),
                 )
             )

@@ -20,6 +20,7 @@ converted”; unresolved lineage always becomes a gap.
 | popover/expander/status | popover overlay | mechanical |
 | button | button | direct visually; classify action host as spec-native or manual-ui-finish |
 | data editor | input table/writeback | warehouse-backed/redesign until explicitly designed |
+| chat input/message and AI client calls | existing workbook agent | workbook-agent-candidate |
 
 ## Controls
 
@@ -59,6 +60,11 @@ KPI expressions and simple group-by chart intent. `merge`, `pivot_table`,
 source-specific sorting remain loud `dataframe-restructure-required` gaps. It
 does not execute Pandas or infer arbitrary Python.
 
+Local Python transforms are `python-element-candidate` only when the target
+workspace and connection pass the code/code-output probes in
+[`live-api-capabilities.md`](live-api-capabilities.md). Detection never executes
+source code.
+
 ## Wrapper/config expansion
 
 Literal module-level lists/dictionaries named like `KPI_CONFIG`, `CHART_CONFIG`,
@@ -90,6 +96,10 @@ Use this order for buttons, callbacks, forms, and session state:
 Never infer public-spec support from the Sigma editor alone. Verify the literal
 shape through POST/PUT and GET readback. If no literal action survives readback,
 do not invent one.
+
+Current selected-row action values use `columnId`, `minColumnId`, and
+`maxColumnId`; Run Python uses `codeElementId`. Use the live-verified builders in
+`converter/api_capabilities.py`.
 
 ## Plugin candidates
 
