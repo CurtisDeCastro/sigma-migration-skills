@@ -20,6 +20,15 @@ module ActionLedger
   # effect => required property names (beyond "effect" itself).
   # NOTE: open-url's `url` is NOT required by the API — a missing url is
   # schema-valid and does nothing. We require it anyway; that is deliberate.
+  #
+  # ACTION FIELD RENAME (live since 2026-08-26, probe-verified): identifier
+  # properties now carry the referenced resource type and an `Id` suffix. The
+  # names below are the post-rename ones; the pre-rename spellings (`table`,
+  # `tabbedContainer`, `document`) are REJECTED by the API.
+  #
+  # `set-control-value` keeps a bare `control`, and `navigate`/`refresh-element`
+  # keep a bare `target` — those were deliberately NOT renamed (probe-confirmed
+  # that the `*Id` form 400s). Don't "regularise" them.
   EFFECT_REQUIRED = {
     'navigate'          => %w[target],
     'set-control-value' => %w[control value],
@@ -27,12 +36,12 @@ module ActionLedger
     'open-url'          => %w[openTarget url],
     'open-overlay'      => %w[overlayId],
     'close-overlay'     => [],
-    'select-tab'        => %w[tabbedContainer selectedTab],
+    'select-tab'        => %w[tabbedContainerElementId selectedTab],
     'refresh-element'   => %w[target],
-    'insert-rows'       => %w[table values],
-    'update-rows'       => %w[table whichRows values],
-    'delete-rows'       => %w[table whichRows],
-    'open-document'     => %w[document documentType openTarget]
+    'insert-rows'       => %w[tableElementId values],
+    'update-rows'       => %w[tableElementId whichRows values],
+    'delete-rows'       => %w[tableElementId whichRows],
+    'open-document'     => %w[documentId documentType openTarget]
   }.freeze
 
   # Action ids must be unique across the ENTIRE workbook, not per element:
