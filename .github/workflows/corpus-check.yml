@@ -441,6 +441,15 @@ jobs:
         # `?`/`!` suffixes, initialize/__init__, declared renames). Five of the nine
         # rows in the original report were one of those.
         run: ruby tools/test-lint-twin-parity.rb
+      - name: Lint — layout emitters must not produce legacy tags
+        # The 2026-08-07 contract renamed <LayoutElement>/<GridContainer> to
+        # <Element>/<Container>. domo's scripts/lib/layout.rb — a vendored copy
+        # of tableau's, marked "do not diverge" — sat on the old tags for ~2.5
+        # weeks unnoticed, because CodeRep.document()/.wrap() canonicalize on
+        # the way to the wire. That net only covers adapter paths: a script
+        # writing document.layout directly, or a human hand-building a request
+        # from an intermediate artifact, still gets a 400. Pin the emitters.
+        run: ruby tools/lint-layout-tags.rb
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser
