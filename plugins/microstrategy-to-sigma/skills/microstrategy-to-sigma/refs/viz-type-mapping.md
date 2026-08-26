@@ -31,6 +31,29 @@ public demo environment (Tutorial, MobileDashboards, Embedded Analytics,
 AI Auto projects, 2026-06) — the extractor walker parsed **all** of them,
 so every listed type is extraction-validated. Counts double as gap priority.
 
+**Tiers.** *native* — a Sigma element kind reproduces the viz. **plugin tier**
+— Sigma has **no native analog**; match it with a bespoke plugin element rather
+than degrading to a table. *fallback* — flagged `table`, data preserved, loud
+warning: the honest last resort, never presented as a match.
+
+Sigma's complete visual set, enumerated from the compiled OpenAPI (2026-08-25):
+`bar-chart · line-chart · area-chart · combo-chart · scatter-chart ·
+donut-chart · pie-chart · kpi-chart · waterfall-chart · pivot-table · table ·
+input-table · geography-map · region-map · point-map · plugin · container ·
+tabbed-container · text · image · button · control · divider`. There is **no
+treemap, sankey, or tile-heatmap**. (`VizTreemap` does appear in the OpenAPI —
+as an *icon* name beside `Wand` and `Webhooks`. It is not a chart type.)
+
+⚠️ **`heat_map` was mismapped here until 2026-08-25.** MicroStrategy's Heat Map
+is a **treemap** — nested rectangles sized by a metric with a header band per
+group — not a grid heatmap. This table previously claimed a `pivot-table` +
+`backgroundScale` analog and marked it hand-build-✓. Shipped against a live
+dossier it read as a plain table with cell shading: it dropped the size
+encoding, the nesting, and the click-to-filter, and it was **rejected on
+sight** by the reviewer. A tile that preserves the numbers but loses the
+encoding is an *approximation*, not a match — say so, or fix it. See
+`refs/plugin-tier.md`.
+
 | MSTR `visualizationType` | n | Sigma element kind | Build |
 |---|---|---|---|
 | `grid` | 1893 | `table` (pivot when `crossTab: true`) | **validated (parity-verified)** |
@@ -39,7 +62,7 @@ so every listed type is extraction-validated. Counts double as gap priority.
 | `geospatial_service` | 331 | `region-map` / `point-map` (by geo attribute granularity — cognos `tiledmap` precedent) | roadmap |
 | `line_chart` | 252 | `line-chart` | **validated** |
 | `bubble_chart` | 221 | `scatter` (size slot) | roadmap |
-| `heat_map` | 188 | `pivot-table` + `conditionalFormats:{type:backgroundScale}` (diverging scheme for signed values); cross-filter a partner bar via a control | **Path B hand-build ✓** (was: flagged — it DOES have an analog) |
+| `heat_map` | 188 | **`plugin`** — a treemap. Sigma has no native one; `github.com/twells89/sigma-treemap-plugin`. Cross-filter a partner viz via a control (MSTR's `visualization_as_filter`) | **plugin tier** (was: pivot+`backgroundScale` — a LOSSY approximation, see below) |
 | `combo_chart` | 182 | `combo` | roadmap |
 | `area_chart` | 170 | `area-chart` | wired, **not live-verified** |
 | `multi_metric_kpi` | 168 | a KPI-card row: per metric a `kpi-chart` with `comparisonColumn`+`comparison:{display:percentage,colorGood/Bad}` (Δ badge) + a "Previous …" subtitle `text` + a composite `area-chart` sparkline stacked below in the same container | **Path B hand-build ✓** (recipe: `path-b-rehost.md` §5) |
