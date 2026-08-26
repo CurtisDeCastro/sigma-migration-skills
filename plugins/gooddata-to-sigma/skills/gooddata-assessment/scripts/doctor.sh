@@ -49,7 +49,36 @@ echo
 
 # --- ruby ------------------------------------------------------------------
 if command -v ruby >/dev/null 2>&1; then
-  ok "ruby — $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
+  RUBY_V="$(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
+  # Assert the FLOOR, do not just print the version. This check used to be a
+  # bare `ok "ruby — $version"`, so system ruby 2.6.10 passed green while ~60
+  # call sites needed 2.7+ (filter_map/tally) -- agents then hit a runtime
+  # NoMethodError mid-migration and started hand-installing runtimes or writing
+  # their own polyfills into the workdir. The floor is now real: 2.6 is
+  # supported because shared/lib/ruby_compat.rb polyfills those methods, and
+  # tools/lint-ruby-floor.rb keeps it that way. So the honest check is
+  # ">= 2.6 AND the polyfill shipped", not ">= 2.7".
+  RUBY_MAJMIN="$(printf '%s' "$RUBY_V" | cut -d. -f1,2)"
+  # NOTE: $HERE is not set until much later in this script, so resolve the
+  # script dir locally rather than reading an empty var (which would make the
+  # polyfill check below always "missing").
+  _DOCTOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  RUBY_OLD=0
+  case "$RUBY_MAJMIN" in
+    1.*|2.0|2.1|2.2|2.3|2.4|2.5) RUBY_OLD=1 ;;
+  esac
+  if [ "$RUBY_OLD" -eq 1 ]; then
+    bad "ruby $RUBY_V is below the 2.6 floor" "Install ruby >= 2.6 (bash scripts/bootstrap.sh), or use the macOS system ruby at /usr/bin/ruby."
+  elif [ "$RUBY_MAJMIN" = "2.6" ] && [ ! -f "$_DOCTOR_DIR/lib/ruby_compat.rb" ]; then
+    # 2.6 without the polyfill is the exact configuration that failed in the
+    # field: 13 of 277 tableau suites broke, and 6 of those emitted silently
+    # EMPTY output rather than crashing.
+    bad "ruby $RUBY_V needs lib/ruby_compat.rb (2.7+ method polyfill) and it is missing" "Re-install/update the plugin so scripts/lib/ruby_compat.rb ships, or use ruby >= 2.7."
+  elif [ "$RUBY_MAJMIN" = "2.6" ]; then
+    ok "ruby — $RUBY_V (2.6 floor; 2.7+ methods polyfilled by lib/ruby_compat.rb)"
+  else
+    ok "ruby — $RUBY_V"
+  fi
 else
   if [ "$OS" = "windows-bash" ]; then
     bad "ruby not found" "Run the bootstrap: bash scripts/bootstrap.sh   — no-admin install/activation; it re-runs this doctor when done."

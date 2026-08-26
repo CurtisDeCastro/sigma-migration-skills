@@ -16,6 +16,9 @@ require 'set'
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_functions'
 require 'code_rep'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten -- see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 opts = { type: nil, dm_context: nil }
 op = OptionParser.new do |p|

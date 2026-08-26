@@ -450,6 +450,16 @@ jobs:
         # writing document.layout directly, or a human hand-building a request
         # from an intermediate artifact, still gets a 400. Pin the emitters.
         run: ruby tools/lint-layout-tags.rb
+      - name: Lint — ruby 2.6 floor (polyfill present, in scope, in order)
+        # `ruby -c` CANNOT see this: a missing METHOD is a runtime NoMethodError,
+        # and this job runs 3.3 where filter_map/tally exist. ~60 call sites had
+        # already broken the documented 2.6 floor; under system 2.6, 13 of 277
+        # tableau suites failed and 6 of those emitted silently EMPTY output.
+        run: ruby tools/lint-ruby-floor.rb
+      - name: Self-test — the ruby-floor gate must FAIL on each real mistake
+        # missing require / require nested in a block / require after first use /
+        # ruby-3.0 endless def. All four were made while landing the polyfill.
+        run: ruby tools/test-lint-ruby-floor.rb
       - name: Run offline test_*.py suites
         # EXPLICIT allow-list — creds-free, network-free Python tests only.
         # PyYAML is needed by the looker offline dashboard parser

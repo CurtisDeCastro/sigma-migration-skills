@@ -74,6 +74,9 @@ require_relative 'lib/kpi_comparison_detect' # Task 5: prior/target comparison-m
 require_relative 'lib/action_ledger' # workbook-wide action id registry + validate/manifest
 require_relative 'lib/action_column_resolver' # Task 5: raw Tableau source-field ref -> emitted Sigma column name
 require 'erb'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 
 opts = { master_id: 'master' }
 OptionParser.new do |p|

@@ -89,6 +89,9 @@ require_relative 'lib/code_rep'
 require_relative 'lib/layout'
 require_relative 'lib/sigma_rest'
 require_relative 'lib/domo_warehouse_column_refs'
+# Ruby 2.6 floor (macOS system ruby): this file uses a 2.7+ Enumerable
+# method. Polyfilled rather than rewritten — see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 include DomoSigma
 
 opts = { mode: 'page-per-worksheet', workbook_name: 'Domo Migration' }

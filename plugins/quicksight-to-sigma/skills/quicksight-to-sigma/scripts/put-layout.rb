@@ -18,6 +18,9 @@ require 'json'
 require 'yaml'
 require 'date'
 require 'optparse'
+# Ruby 2.6 floor (macOS system ruby): this file uses Enumerable#tally (2.7+).
+# Polyfilled rather than rewritten -- see shared/lib/ruby_compat.rb.
+require_relative 'lib/ruby_compat'
 # sigma_rest self-exchanges SIGMA_CLIENT_ID/SECRET (auto-loading
 # ~/.sigma-migration/env) exactly like the phase 1-4 scripts — SIGMA_API_TOKEN
 # is optional, not a hard requirement (bead eqom).
