@@ -1484,9 +1484,6 @@ def analyze_project(source: str | Path) -> ProjectIR:
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
         relative_path = str(path.relative_to(root))
-        has_cortex_agent_definition = has_cortex_agent_definition or bool(
-            re.search(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?CORTEX\s+AGENT\b", text, re.I)
-        )
         if path.suffix == ".py":
             has_cortex_agent_runtime = has_cortex_agent_runtime or bool(
                 re.search(
@@ -1542,7 +1539,9 @@ def analyze_project(source: str | Path) -> ProjectIR:
                 )
             )
         ai_match = AI_APP_PATTERN.search(text)
-        if ai_match:
+        if ai_match and not any(
+            gap.code == "workbook-agent-candidate" for gap in ir.gaps
+        ):
             ir.gaps.append(
                 Gap(
                     "workbook-agent-candidate",
@@ -1574,6 +1573,15 @@ def analyze_project(source: str | Path) -> ProjectIR:
                         Provenance(relative_path, line),
                     )
                 )
+    for sql_path in sorted(root.rglob("*.sql")):
+        sql_text = sql_path.read_text(encoding="utf-8", errors="replace")
+        has_cortex_agent_definition = has_cortex_agent_definition or bool(
+            re.search(
+                r"\bCREATE\s+(?:OR\s+REPLACE\s+)?CORTEX\s+AGENT\b",
+                sql_text,
+                re.I,
+            )
+        )
     if cortex_complete_provenance:
         ir.gaps.append(
             Gap(
