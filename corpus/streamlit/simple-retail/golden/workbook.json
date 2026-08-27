@@ -191,12 +191,22 @@
             "sort": {
               "by": "id0018",
               "direction": "ascending"
+            },
+            "format": {
+              "title": {
+                "text": "Category"
+              }
             }
           },
           "yAxis": {
             "columnIds": [
               "id0019"
-            ]
+            ],
+            "format": {
+              "title": {
+                "text": "Revenue"
+              }
+            }
           },
           "stacking": "none",
           "color": {
@@ -254,7 +264,12 @@
             "id0024",
             "id0025",
             "id0026"
-          ]
+          ],
+          "tableStyle": {
+            "preset": "presentation",
+            "gridLines": "horizontal",
+            "banding": "shown"
+          }
         },
         {
           "id": "id0027",
@@ -266,6 +281,25 @@
         },
         {
           "id": "id0028",
+          "kind": "navigation",
+          "mode": "manual",
+          "options": [
+            {
+              "label": "Streamlit App",
+              "destination": {
+                "type": "page",
+                "pageId": "id0030"
+              }
+            }
+          ],
+          "showIcons": false,
+          "optionStyle": {
+            "orientation": "vertical",
+            "alignment": "left"
+          }
+        },
+        {
+          "id": "id0029",
           "kind": "tabbed-container",
           "tabs": [
             {
@@ -282,19 +316,19 @@
       ],
       "pages": [
         {
-          "id": "id0029",
+          "id": "id0030",
           "name": "Streamlit App",
           "pageWidth": "full",
           "backgroundColor": "#FFFFFF"
         },
         {
-          "id": "id0030",
+          "id": "id0031",
           "name": "Data",
           "visibility": "hidden"
         }
       ],
       "overlays": [],
-      "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"streamlit-app\">\n  <Container elementId=\"sidebar-streamlit-app\" type=\"grid\" gridColumn=\"1 / 5\" gridRow=\"1 / 40\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n    <Element elementId=\"control-region-24-1\" gridColumn=\"2 / 24\" gridRow=\"1 / 6\"/>\n  </Container>\n  <Element elementId=\"text-retail-sales-dashboard-29-2\" gridColumn=\"5 / 25\" gridRow=\"1 / 4\"/>\n  <Element elementId=\"metric-revenue-35-3\" gridColumn=\"5 / 12\" gridRow=\"4 / 10\"/>\n  <Element elementId=\"metric-profit-36-4\" gridColumn=\"12 / 18\" gridRow=\"4 / 10\"/>\n  <Element elementId=\"metric-orders-37-5\" gridColumn=\"18 / 25\" gridRow=\"4 / 10\"/>\n  <TabbedContainer elementId=\"tabs-streamlit-app\" type=\"tabbed-container\" gridColumn=\"5 / 25\" gridRow=\"10 / 25\">\n    <Tab gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n      <Element elementId=\"chart-bar-chart-41-6\" gridColumn=\"1 / 25\" gridRow=\"1 / 13\"/>\n    </Tab>\n    <Tab gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n      <Element elementId=\"table-detail-43-7\" gridColumn=\"1 / 25\" gridRow=\"1 / 15\"/>\n    </Tab>\n  </TabbedContainer>\n</Page>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"data\">\n  <Element elementId=\"source-1-load-sales\" gridColumn=\"1 / 25\" gridRow=\"1 / 15\"/>\n</Page>\n",
+      "layout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"streamlit-app\">\n  <Container elementId=\"sidebar-streamlit-app\" type=\"grid\" gridColumn=\"1 / 5\" gridRow=\"1 / 40\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n    <Element elementId=\"navigation-streamlit-app\" gridColumn=\"2 / 24\" gridRow=\"1 / 13\"/>\n    <Element elementId=\"control-region-24-1\" gridColumn=\"2 / 24\" gridRow=\"13 / 18\"/>\n  </Container>\n  <Element elementId=\"text-retail-sales-dashboa-29-2\" gridColumn=\"5 / 25\" gridRow=\"1 / 4\"/>\n  <Element elementId=\"metric-revenue-35-3\" gridColumn=\"5 / 12\" gridRow=\"4 / 10\"/>\n  <Element elementId=\"metric-profit-36-4\" gridColumn=\"12 / 18\" gridRow=\"4 / 10\"/>\n  <Element elementId=\"metric-orders-37-5\" gridColumn=\"18 / 25\" gridRow=\"4 / 10\"/>\n  <TabbedContainer elementId=\"tabs-streamlit-app\" type=\"tabbed-container\" gridColumn=\"5 / 25\" gridRow=\"10 / 29\">\n    <Tab gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n      <Element elementId=\"chart-bar-chart-41-6\" gridColumn=\"1 / 25\" gridRow=\"1 / 13\"/>\n    </Tab>\n    <Tab gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\">\n      <Element elementId=\"table-detail-43-7\" gridColumn=\"1 / 25\" gridRow=\"1 / 19\"/>\n    </Tab>\n  </TabbedContainer>\n</Page>\n<Page type=\"grid\" gridTemplateColumns=\"repeat(24, 1fr)\" gridTemplateRows=\"auto\" id=\"data\">\n  <Element elementId=\"source-1-load-sales\" gridColumn=\"1 / 25\" gridRow=\"1 / 15\"/>\n</Page>\n",
       "settings": {
         "theme": {
           "name": "Light",
@@ -322,7 +356,7 @@
     "pages": 1,
     "sources": 1,
     "controls": 1,
-    "elements": 10,
+    "elements": 11,
     "gaps": 0
   }
 }

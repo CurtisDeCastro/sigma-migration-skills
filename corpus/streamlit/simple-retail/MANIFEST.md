@@ -62,7 +62,7 @@ python3 plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/streamlit-c
     },
     "workbook.json": {
       "pages": 2,
-      "elements": 10,
+      "elements": 11,
       "columns": 17,
       "metrics": 0,
       "relationships": 0,
@@ -70,14 +70,15 @@ python3 plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/streamlit-c
       "element_names": [
         "Data — Load Sales",
         "Region",
+        "id0010",
         "Revenue",
         "Profit",
         "Orders",
         "Bar Chart",
         "Detail",
-        "id0010",
         "id0027",
-        "id0028"
+        "id0028",
+        "id0029"
       ],
       "metric_names": [],
       "relationship_names": []
