@@ -139,6 +139,57 @@ class WorkbookTest(unittest.TestCase):
             self.assertIn(f"[{source_name}/order_date]", formulas)
             self.assertIn(f"Sum([{source_name}/net_revenue])", formulas)
 
+    def test_multiple_elements_in_one_streamlit_column_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    conn = st.connection("snowflake")
+                    def load_data():
+                        return conn.query(
+                            "SELECT region, revenue FROM db.s.orders"
+                        )
+                    df = load_data()
+                    left, right = st.columns(2)
+                    with left:
+                        st.subheader("Left")
+                        st.bar_chart(df, x="region", y="revenue")
+                    with right:
+                        st.subheader("Right")
+                        st.bar_chart(df, x="region", y="revenue")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            ir = analyze_project(root)
+            result = build_workbook(ir, "connection-1", "folder-1")
+            layout = document(result["workbook"])["layout"]
+            left_text = next(item.id for item in ir.elements if item.label == "Left")
+            left_chart = next(
+                item.id
+                for item in ir.elements
+                if item.kind == "bar-chart"
+                and any(
+                    context.get("kind") == "column"
+                    and context.get("index") == 0
+                    for context in item.context
+                )
+            )
+
+            def row_range(element_id):
+                match = re.search(
+                    rf'elementId="{re.escape(element_id)}"[^>]+gridRow="(\d+) / (\d+)"',
+                    layout,
+                )
+                self.assertIsNotNone(match)
+                return int(match.group(1)), int(match.group(2))
+
+            _, title_end = row_range(left_text)
+            chart_start, _ = row_range(left_chart)
+            self.assertLessEqual(title_end, chart_start)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1334,18 +1334,32 @@ def build_workbook(
                         break
                     group_pairs.append((candidate, candidate_context))
                     index += 1
-                row_height = max(height(pair[0][1]["kind"]) for pair in group_pairs)
                 width = 25 - main_start
-                for (pair, context) in group_pairs:
-                    _, group_element = pair
-                    count = max(1, int(context["count"]))
-                    start = main_start + round(width * int(context["index"]) / count)
-                    end = main_start + round(width * (int(context["index"]) + 1) / count)
-                    page_lines.append(
-                        f'  <Element elementId="{group_element["id"]}" '
-                        f'gridColumn="{start} / {end}" gridRow="{row} / {row + row_height}"/>'
+                pairs_by_column: dict[
+                    int, list[tuple[tuple[Any, dict[str, Any]], dict[str, Any]]]
+                ] = {}
+                for pair, context in group_pairs:
+                    pairs_by_column.setdefault(int(context["index"]), []).append(
+                        (pair, context)
                     )
-                row += row_height
+                column_heights = []
+                for column_index, column_pairs in pairs_by_column.items():
+                    context = column_pairs[0][1]
+                    count = max(1, int(context["count"]))
+                    start = main_start + round(width * column_index / count)
+                    end = main_start + round(width * (column_index + 1) / count)
+                    column_row = row
+                    for pair, _ in column_pairs:
+                        _, group_element = pair
+                        span = height(group_element["kind"])
+                        page_lines.append(
+                            f'  <Element elementId="{group_element["id"]}" '
+                            f'gridColumn="{start} / {end}" '
+                            f'gridRow="{column_row} / {column_row + span}"/>'
+                        )
+                        column_row += span
+                    column_heights.append(column_row - row)
+                row += max(column_heights, default=0)
                 continue
             span = height(converted["kind"])
             page_lines.append(
