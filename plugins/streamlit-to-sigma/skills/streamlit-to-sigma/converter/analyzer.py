@@ -846,7 +846,12 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     dataframe,
                     column,
                     default,
-                    ".sidebar." in path or path.startswith("st.sidebar"),
+                    ".sidebar." in path
+                    or path.startswith("st.sidebar")
+                    or any(
+                        context.get("kind") == "sidebar"
+                        for context in call_context
+                    ),
                     self.page.id,
                     prov,
                 )
