@@ -354,6 +354,25 @@ class AdvancedPatternsTest(unittest.TestCase):
                 )
             )
 
+    def test_empty_result_stop_is_resolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import streamlit as st
+                if df.empty:
+                    st.warning("No rows")
+                    st.stop()
+                st.dataframe(df)
+                """,
+            )
+            ir = analyze_project(root)
+            gap = next(gap for gap in ir.gaps if gap.code == "streamlit-stop")
+            self.assertTrue(gap.resolved)
+            self.assertIn("empty Sigma elements", gap.resolution)
+
 
 if __name__ == "__main__":
     unittest.main()

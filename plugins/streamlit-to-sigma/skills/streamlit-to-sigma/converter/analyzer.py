@@ -1157,6 +1157,16 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 f"st.{leaf}",
                 call,
             )
+            if leaf == "stop" and any(
+                ".empty" in str(context.get("test", ""))
+                for context in call_context
+                if context.get("kind") == "conditional"
+            ):
+                self.ir.gaps[-1].resolved = True
+                self.ir.gaps[-1].resolution = (
+                    "Empty warehouse results naturally produce empty Sigma "
+                    "elements without requiring an execution stop."
+                )
             return
 
         if "component" in path.lower() or leaf == "declare_component":
@@ -1563,7 +1573,7 @@ def analyze_project(source: str | Path) -> ProjectIR:
             "unsupported-dataframe-operation",
             "dataframe-column-mutation",
         } and any(
-            f"`{name}`" in gap.message for name in lowered_dataframes
+            f"`{name}" in gap.message for name in lowered_dataframes
         ):
             gap.resolved = True
             gap.resolution = (
