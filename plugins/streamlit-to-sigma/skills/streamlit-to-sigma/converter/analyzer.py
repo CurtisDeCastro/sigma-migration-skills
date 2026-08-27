@@ -918,10 +918,24 @@ class ModuleAnalyzer(ast.NodeVisitor):
             label = display_text(args[0] if args else None)
             options = args[1] if len(args) > 1 else keyword(call, "options")
             resolved_options = self.resolve_assignment(options)
-            dataframe = self.dataframe_name(resolved_options)
+            dataframe = self.dataframe_name(resolved_options) or self.dataframe_name(
+                options
+            )
             default_node = keyword(call, "default") or keyword(call, "value")
             default = literal(default_node)
             column = first_subscript_column(resolved_options)
+            if dataframe and not column:
+                root_query = self.dataframe_roots.get(dataframe)
+                query = next(
+                    (
+                        candidate
+                        for candidate in self.ir.queries
+                        if candidate.id == root_query
+                    ),
+                    None,
+                )
+                if query and len(query.columns) == 1:
+                    column = query.columns[0]
             self.ir.controls.append(
                 Control(
                     self.new_id("control", label, call),

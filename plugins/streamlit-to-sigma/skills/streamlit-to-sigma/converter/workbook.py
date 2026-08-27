@@ -649,6 +649,43 @@ def build_workbook(
                         "hidden": True,
                     }
                 )
+        if (
+            (not source or not source_column_name)
+            and control.control_type
+            in {"number", "text", "text-area", "checkbox", "switch"}
+        ):
+            item = {
+                "id": control.id,
+                "kind": "control",
+                "controlId": control_handle,
+                "name": control.label,
+                "controlType": control.control_type,
+            }
+            if control.control_type == "number":
+                item.update(
+                    {
+                        "mode": "=",
+                        "value": control.default,
+                        "includeNulls": "when-no-value-is-selected",
+                    }
+                )
+            elif control.control_type in {"text", "text-area"}:
+                item.update(
+                    {
+                        "mode": "equals",
+                        "case": "insensitive",
+                        "includeNulls": "when-no-value-is-selected",
+                        "showOperators": False,
+                    }
+                )
+                if control.default is not None:
+                    item["value"] = control.default
+            else:
+                item["value"] = bool(control.default)
+            primary_controls[control_key] = control_handle
+            control_elements.append(item)
+            elements.append(item)
+            continue
         if not source or not source_column_name:
             warnings.append(
                 {
