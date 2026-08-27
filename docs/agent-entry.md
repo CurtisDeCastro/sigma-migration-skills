@@ -54,7 +54,7 @@ siblings on disk):
 | **None for the core pipeline** | — | Converters drive Sigma via REST (`scripts/get-token.sh`, `lib/sigma_rest.rb`, orchestrators). |
 | **Sigma MCP** | Optional, recommended | Read/query workbooks during parity and exploratory checks. |
 | **Source-tool MCP** (e.g. Tableau) | Optional | Discovery without PAT/CLI when available. |
-| **Hosted data-model converter MCP** | Optional, opt-in | Fallback for formula translation; each skill bundles a **local** converter by default (no data egress). |
+| **Hosted data-model converter MCP** | Optional, opt-in | Fallback for formula translation on some source tools; each skill bundles a **local** converter by default (no data egress). **Alteryx is local-only** — never call a hosted converter for `.yxmd` files. |
 
 Do not block a run solely because an MCP server is missing if the skill
 documents a REST/CLI path.

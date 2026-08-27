@@ -169,6 +169,13 @@
       "description": "Mode Analytics Reports (SQL Queries + Charts) -> Sigma, with parity verification. No formula translation needed -- Mode's SQL already runs in the target warehouse dialect.",
       "category": "migration",
       "keywords": ["mode", "migration", "bi"]
+    },
+    {
+      "name": "alteryx-to-sigma",
+      "source": "./plugins/alteryx-to-sigma",
+          "description": "Alteryx Designer workflow (.yxmd) → Sigma data model. Data-model only; local converter (no MCP). ETL Sigma should not fake is flagged as a dbt offramp. Bundles alteryx-to-sigma + alteryx-assessment.",
+      "category": "migration",
+      "keywords": ["alteryx", "migration", "bi"]
     }
   ]
 }

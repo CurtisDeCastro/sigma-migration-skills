@@ -190,3 +190,22 @@ local mapping:
 | C8 Parity hard gate | Phase 5 — Parity (`verify-parity.rb`, hard-gated by `assert-phase6-ran.rb`); the separate visual-render sub-gate (gate 8) is honestly waived in v1 (`--skip-visual-gate` — no Mode UI render capability), but the parity comparison itself is never skipped |
 | C9 Security/RLS | "Security: RLS/CLS" section — Mode has no row/column-level security on query results; access control is Space/Report visibility only |
 | C10 Enhance | — (scripts vendored; wire flags per adoption checklist) |
+
+## alteryx-to-sigma
+
+Alteryx Designer uses "Phase" numbering. It is **data-model only** (no
+workbook / no layout) — an Alteryx canvas is ETL, not a dashboard. ETL that
+Sigma should not fake is a dbt/warehouse offramp (`refs/dbt-offramp.md`).
+
+| Canonical | alteryx-to-sigma |
+|---|---|
+| C1 Assess | `alteryx-assessment` skill (file-based `.yxmd` folder inventory) |
+| C2 Discover | Phase 1 — parse the `.yxmd` (the file is the source of truth) |
+| C3 Reuse-check | Phase 1.5 — `find-or-pick-dm.rb` (vendored unmodified) |
+| C4 Convert | Phase 2 — `converter/cli.mjs` (local; no MCP). Input/Join/Formula/ungrouped Summarize → DM; everything else censused as ignored / dbt-offramp / gap |
+| C5 Post-DM gate | Phase 3 — `post-and-readback.rb` (hard gate: zero `type=error` columns) |
+| C6 Build workbook | Phase 4 — **N/A** (no dashboard surface; do not invent a workbook) |
+| C7 Layout | Phase 5 — **N/A** (no `put-layout.rb` / `layout.xml`; no last write of layout) |
+| C8 Parity hard gate | Phase 6 — column-type guard after POST (`parity-final.json`); numeric warehouse follow-up when reachable |
+| C9 Security/RLS | Filter tools detected as warnings; apply opt-in |
+| C10 Enhance | — (scripts vendored; wire flags per adoption checklist) |

@@ -34,6 +34,7 @@ skill_for() {
     powerbi) echo powerbi-to-sigma ;;
     quicksight) echo quicksight-to-sigma ;;
     cognos|cognos-report) echo cognos-to-sigma ;;
+    alteryx) echo alteryx-to-sigma ;;
     domo) echo domo-to-sigma ;;
     *) echo "" ;;
   esac
@@ -41,18 +42,32 @@ skill_for() {
 
 WANT=("$@"); [ ${#WANT[@]} -eq 0 ] && WANT=(tableau lookml thoughtspot qlik powerbi quicksight cognos domo)
 
-[ -d "$SRC" ] || { echo "FATAL: converter source not found: $SRC"; exit 1; }
-ESBUILD="$SRC/node_modules/.bin/esbuild"
-[ -x "$ESBUILD" ] || { echo "FATAL: esbuild not at $ESBUILD — run 'npm install' in $SRC"; exit 1; }
+# Alteryx vendors in-skill TS (like cognos) and does not read the hosted
+# converter repo at all. If that's the only module requested, skip the
+# checkout / esbuild probes.
+needs_mcp=0
+for _m in "${WANT[@]}"; do
+  [ "$_m" = "alteryx" ] || needs_mcp=1
+done
+unset _m
 
-# build the converter repo if its artifacts are missing
-if ! ls "$SRC"/build/*.js >/dev/null 2>&1; then
-  echo "→ building converter repo (npm run build)"
-  ( cd "$SRC" && { npm ci --silent || npm install --silent; } && npm run build --silent )
+ESBUILD=""
+SHA="unknown"
+DATE="unknown"
+if [ "$needs_mcp" = 1 ]; then
+  [ -d "$SRC" ] || { echo "FATAL: converter source not found: $SRC"; exit 1; }
+  ESBUILD="$SRC/node_modules/.bin/esbuild"
+  [ -x "$ESBUILD" ] || { echo "FATAL: esbuild not at $ESBUILD — run 'npm install' in $SRC"; exit 1; }
+
+  # build the converter repo if its artifacts are missing
+  if ! ls "$SRC"/build/*.js >/dev/null 2>&1; then
+    echo "→ building converter repo (npm run build)"
+    ( cd "$SRC" && { npm ci --silent || npm install --silent; } && npm run build --silent )
+  fi
+
+  SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  DATE="$(git -C "$SRC" log -1 --format=%cd --date=short 2>/dev/null || echo unknown)"
 fi
-
-SHA="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-DATE="$(git -C "$SRC" log -1 --format=%cd --date=short 2>/dev/null || echo unknown)"
 STAMPED_DIRS=""
 
 for mod in "${WANT[@]}"; do
@@ -76,6 +91,20 @@ for mod in "${WANT[@]}"; do
     # source_sha256 here (single owner: tools/check-cognos-bundle.rb) is what lets the
     # freshness gate detect a converter/*.ts edit that skipped this re-bundle.
     ruby "$ROOT/tools/check-cognos-bundle.rb" --write
+    continue
+  fi
+
+  # Alteryx is the same in-skill-TS flavor as cognos, but conversion is
+  # local-only — never fall back to a hosted converter. Bundle with the
+  # skill's own esbuild (npm run bundle) so this path does not need the
+  # converter-repo checkout.
+  if [ "$mod" = "alteryx" ]; then
+    entry="$dest/cli.ts"
+    out="$dest/cli.mjs"
+    [ -f "$entry" ] || { echo "FATAL: $entry missing (alteryx vendors its own TS converter)"; exit 1; }
+    ( cd "$dest" && { [ -d node_modules/esbuild ] || npm install --silent; } && npm run bundle --silent )
+    echo "✓ $skill/converter/cli.mjs  ($(du -h "$out" | cut -f1))  [bundled from in-skill cli.ts]"
+    ruby "$ROOT/tools/check-alteryx-bundle.rb" --write
     continue
   fi
 

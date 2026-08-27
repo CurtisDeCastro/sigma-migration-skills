@@ -37,6 +37,7 @@ fi
 [ -f tools/lint-twin-parity.rb ] && { ruby tools/lint-twin-parity.rb || fail=1; }
 [ -f tools/lint-ruby-floor.rb ] && { ruby tools/lint-ruby-floor.rb || fail=1; }
 [ -f tools/check-cognos-bundle.rb ] && { ruby tools/check-cognos-bundle.rb || fail=1; }
+[ -f tools/check-alteryx-bundle.rb ] && { ruby tools/check-alteryx-bundle.rb || fail=1; }
 # bootstrap<->doctor KEEP-IN-LOCKSTEP guard (E2.1): bootstrap.sh duplicates
 # doctor.sh's probes (py_real, the vm-node candidate globs, Test-RealPython)
 # under KEEP-IN-LOCKSTEP comments that name this test as the mechanical

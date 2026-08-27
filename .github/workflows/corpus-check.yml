@@ -241,6 +241,11 @@ jobs:
         # re-running tools/vendor-converters.sh — a stale bundle silently ships the OLD
         # behavior. Source-hash gate (not a flaky byte compare); mirrors check-shared.
         run: ruby tools/check-cognos-bundle.rb
+      - name: Alteryx vendored bundle is fresh vs converter/*.ts
+        # alteryx is the same in-skill-TS flavor as cognos, and conversion is
+        # local-only (no hosted converter). Fail if a converter/*.ts edit shipped
+        # without re-bundling cli.mjs.
+        run: ruby tools/check-alteryx-bundle.rb
 
   unit-tests:
     name: offline unit/regression tests (creds-free)
@@ -250,6 +255,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate sigma-workbooks formula and control contracts
         run: bash plugins/sigma-authoring/skills/sigma-workbooks/scripts/test-validate-spec-contract.sh
+      - name: Alteryx converter unit tests (local, no hosted converter)
+        working-directory: plugins/alteryx-to-sigma/skills/alteryx-to-sigma/converter
+        run: |
+          npm install
+          npm test
       - name: Run offline test-*.rb suites
         # EXPLICIT allow-list — only tests that need NO Tableau/Sigma creds or
         # network. Do NOT add test-calc-discovery.rb (needs a Tableau token);

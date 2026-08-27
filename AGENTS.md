@@ -1,7 +1,8 @@
 # AGENTS.md — sigma-migration-skills
 
 Migration skills for moving BI tools (**Tableau, Power BI, Qlik, ThoughtSpot,
-QuickSight, Looker, Cognos, MicroStrategy, Sisense, GoodData, Domo, Hex**) to
+QuickSight, Looker, Cognos, MicroStrategy, Sisense, GoodData, Domo, Hex,
+Alteryx**) to
 **Sigma**: per-tool *converters* (source → Sigma data model + workbook, with
 warehouse parity verification) and read-only *assessments* (tenant inventory →
 migration-readiness readout + shortlist).
@@ -63,6 +64,8 @@ Maturity labels (`gold` / `live` / `foundation` / `scaffold`) are defined in
 | Convert a Mode Report (SQL Queries + Charts) → Sigma | `mode-to-sigma` | foundation | `plugins/mode-to-sigma/skills/mode-to-sigma/` |
 | Author / repair Sigma workbooks (canonical spec) | `sigma-workbooks` | live | `plugins/sigma-authoring/skills/sigma-workbooks/` |
 | Author / repair Sigma data models (canonical spec) | `sigma-data-models` | live | `plugins/sigma-authoring/skills/sigma-data-models/` |
+| Convert an Alteryx workflow (.yxmd) → Sigma data model (ETL that does not fit Sigma is a dbt offramp) | `alteryx-to-sigma` | foundation | `plugins/alteryx-to-sigma/skills/alteryx-to-sigma/` |
+| Scope/assess a folder of Alteryx workflows | `alteryx-assessment` | foundation | `plugins/alteryx-to-sigma/skills/alteryx-assessment/` |
 
 Assessments are read-only (never write to the source or post to Sigma); run one
 to pick what to convert, then hand off to the matching converter.
