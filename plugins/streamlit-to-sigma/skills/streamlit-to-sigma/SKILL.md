@@ -259,7 +259,7 @@ Classify each component:
    `sigma-plugin-authoring` and require durable HTTPS hosting/registration.
 3. Python backend, auth, or unsupported bidirectional state — redesign gap.
 
-Plugin generation is not automatic in this foundation release.
+Plugin generation is not automatic in the current release.
 
 ## Stateful and operational apps
 
@@ -298,7 +298,7 @@ procedures. If procedure actions are UI-only in the target workspace, generate
 the warehouse contract and a `manual-ui-finish` handoff rather than emitting a
 rejected or silently dropped action shape.
 
-## Known foundation boundaries
+## Known boundaries
 
 - Deferred `st.form`/Load-button semantics require the pending/applied-control
   redesign until mechanically lowered

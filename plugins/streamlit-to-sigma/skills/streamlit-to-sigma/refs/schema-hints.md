@@ -29,7 +29,7 @@ controls:
     column: Region
 ```
 
-The foundation CLI does not yet consume this YAML automatically. Treat this as
+The CLI does not yet consume this YAML automatically. Treat this as
 the stable design contract for the next implementation increment; until then,
 replace unresolved values in `streamlit-ir.json` through an explicit,
 reviewed preprocessing step.
