@@ -341,6 +341,9 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertEqual(labels.count("Region"), 2)
             self.assertEqual(len({control.id for control in ir.controls}), 4)
             self.assertTrue(all(control.sidebar for control in ir.controls))
+            self.assertTrue(
+                all(len(control.id) <= 52 for control in ir.controls)
+            )
 
 
 if __name__ == "__main__":

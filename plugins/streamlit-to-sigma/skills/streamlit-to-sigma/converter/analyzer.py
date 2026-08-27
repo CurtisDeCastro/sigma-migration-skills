@@ -446,11 +446,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
 
     def new_id(self, kind: str, label: str, node: ast.AST) -> str:
         self.counter += 1
-        namespace = f"-{slug(self.id_namespace)}" if self.id_namespace else ""
-        return (
-            f"{kind}-{slug(label)[:36]}-{getattr(node, 'lineno', 1)}"
+        namespace = (
+            f"-{slug(self.id_namespace)[:12]}" if self.id_namespace else ""
+        )
+        identifier = (
+            f"{kind}-{slug(label)[:20]}-{getattr(node, 'lineno', 1)}"
             f"-{self.counter}{namespace}"
         )
+        return identifier[:52].rstrip("-")
 
     def add_gap(
         self,
