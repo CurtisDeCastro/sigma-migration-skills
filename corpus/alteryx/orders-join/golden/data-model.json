@@ -22,7 +22,8 @@
             "columns": [
               {
                 "id": "inode-NORM0003/CUSTOMER_KEY",
-                "formula": "[CUSTOMER_DIM/Customer Key]"
+                "formula": "[CUSTOMER_DIM/Customer Key]",
+                "hidden": true
               },
               {
                 "id": "inode-NORM0004/FIRST_NAME",
@@ -127,7 +128,7 @@
               },
               {
                 "id": "id0019",
-                "formula": "If([ORDER_FACT/CUSTOMER_DIM/Customer Segment] = \"Premium\", [Gross Revenue] * 1.1, [Gross Revenue])",
+                "formula": "If([ORDER_FACT/CUSTOMER_DIM/Customer Segment] = \"Premium\", [ORDER_FACT/Gross Revenue] * 1.1, [ORDER_FACT/Gross Revenue])",
                 "name": "Segment Adjusted Revenue",
                 "format": {
                   "kind": "number",
@@ -163,7 +164,7 @@
   "warnings": [
     "Input \"ORDER_FACT\": 4 columns",
     "Input \"CUSTOMER_DIM\": 3 columns",
-    "Join: ORDER_FACT.CUSTOMER_KEY → CUSTOMER_DIM.CUSTOMER_KEY",
+    "Join: ORDER_FACT.CUSTOMER_KEY=CUSTOMER_DIM.CUSTOMER_KEY (assumed N:1 on ORDER_FACT → CUSTOMER_DIM)",
     "Formula \"SEGMENT_ADJUSTED_REVENUE\" → If([Customer Segment] = \"Premium\", [Gross Revenue] * 1.1, [G",
     "ℹ 1 calc col(s) moved to derived \"Order Fact View\" (cross-element refs)"
   ],

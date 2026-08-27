@@ -9,11 +9,12 @@ Sigma cannot represent honestly is a **dbt offramp** — see
 | Family | Alteryx plugin (typical) | Disposition |
 |---|---|---|
 | input | `DbFileInput` | **converted** → warehouse-table element. File/CSV/YXDB sources additionally offramp (land in the warehouse first). |
-| join | `Join` (two inputs) | **converted** → `relationships[]` (N:1), keys traced back to inputs |
+| join | `Join` (two inputs, **Join/J output**) | **converted** → `relationships[]` (assumed N:1 on the wider/fact side; composite keys supported) |
+| join-unjoin | `Join` Left/Right unjoin output | **dbt-offramp** (anti-join grain Sigma cannot express) |
 | formula | `Formula` | **converted** → calc column on the upstream input. Unmapped functions (regex, DateTimeParse, Switch, …) offramp to dbt. |
 | summarize | `Summarize` without GroupBy | **converted** → metrics (`Sum`/`Avg`/`CountDistinct`/…) |
 | summarize-groupby | `Summarize` **with** GroupBy | **dbt-offramp** — new grain, not a metric on the ungrouped table |
-| select | `AlteryxSelect` | **converted** (renames are warnings) |
+| select | `AlteryxSelect` | **converted** (deselected columns hidden; renames applied as `name`) |
 | filter | `Filter` | **converted** as a warning / optional RLS — never invented as a policy |
 | ui | Browse, Comment, Tool Container | **ignored** (no data change) |
 | sort | `Sort` | **ignored** (Sigma orders at query time) |

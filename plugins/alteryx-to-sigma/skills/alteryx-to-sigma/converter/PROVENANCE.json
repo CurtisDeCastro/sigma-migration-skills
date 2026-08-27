@@ -2,7 +2,7 @@
   "source": "in-skill converter/cli.ts (alteryx.ts + cli.ts + sigma-ids.ts)",
   "bundler": "esbuild --bundle --format=esm --platform=node",
   "vendored_modules": "cli.mjs",
-  "source_sha256": "044b1c29d83622e54ba1e3cf454c3e9729f8c73759eec27deb2a4ced3d89a465",
+  "source_sha256": "41ac277307ae7739e32359f5102ec007bf23adafc2f0990e79d6ca7e71ffb082",
   "sources": [
     "alteryx.ts",
     "cli.ts",

@@ -4357,6 +4357,65 @@ function buildDerivedElements(elements) {
 }
 
 // alteryx.ts
+function joinInfoFields(ji) {
+  const raw = ji?.Field;
+  const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return arr.map((f) => {
+    if (typeof f === "string") return f.trim();
+    return String(f?.["@_field"] || f?.["#text"] || "").trim();
+  }).filter(Boolean);
+}
+function joinOutputKind(fromConn) {
+  const c = (fromConn || "").trim().toLowerCase();
+  if (!c || c === "join" || c === "j") return "inner";
+  if (c === "left" || c === "l") return "left-unjoin";
+  if (c === "right" || c === "r") return "right-unjoin";
+  return "other";
+}
+function isJoinTool(plugin, entryPoint) {
+  const p = `${plugin} ${entryPoint}`;
+  return /AlteryxJoin\b|\.Join\./i.test(p) && !/JoinMultiple/i.test(p);
+}
+function selectFieldList(config) {
+  if (!config) return [];
+  const raw = config.SelectFields?.SelectField || config.SelectField || [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+function pickFact(leftSrc, rightSrc) {
+  if ((rightSrc.element.columns?.length || 0) > (leftSrc.element.columns?.length || 0)) {
+    return { fact: rightSrc, dim: leftSrc, factIsLeft: false };
+  }
+  return { fact: leftSrc, dim: rightSrc, factIsLeft: true };
+}
+function findColumn(entry, field) {
+  const up = field.toUpperCase();
+  const id = entry.colIdMap[up] || entry.colIdMap[sigmaDisplayName(field).toUpperCase()];
+  if (id) return entry.element.columns.find((c) => c.id === id);
+  return entry.element.columns.find((c) => (c.id.split("/").pop() || "").toUpperCase() === up);
+}
+function applySelectFields(entry, selectFields, _warnings) {
+  let renamed = 0;
+  let hidden = 0;
+  for (const sf of selectFields) {
+    const field = String(sf["@_field"] || "").trim();
+    if (!field || field === "*Unknown") continue;
+    const selected = String(sf["@_selected"] ?? "True").toLowerCase() !== "false";
+    const rename = String(sf["@_rename"] || "").trim();
+    const col = findColumn(entry, field);
+    if (!col) continue;
+    if (!selected) {
+      col.hidden = true;
+      hidden++;
+    }
+    if (rename && rename !== field) {
+      col.name = sigmaDisplayName(rename);
+      entry.colIdMap[rename.toUpperCase()] = col.id;
+      entry.colIdMap[sigmaDisplayName(rename).toUpperCase()] = col.id;
+      renamed++;
+    }
+  }
+  return { renamed, hidden };
+}
 function convertAlteryxToSigma(xmlText, options = {}) {
   resetIds();
   const { connectionId = "<CONNECTION_ID>", database: dbOverride = "", schema: schOverride = "", modelName: nameOverride } = options;
@@ -4414,12 +4473,6 @@ function convertAlteryxToSigma(xmlText, options = {}) {
       warnings.push(`Unsupported Tool ${toolId} (${plugin || entryPoint}): ${cls.reason}`);
     }
   }
-  const connGraph = rawConns.map((c) => ({
-    fromId: c.Origin?.["@_ToolID"] || "",
-    fromConn: c.Origin?.["@_Connection"] || "",
-    toId: c.Destination?.["@_ToolID"] || "",
-    toConn: c.Destination?.["@_Connection"] || ""
-  }));
   const elements = [];
   const elementMap = {};
   const emptyMeta = /* @__PURE__ */ new Set();
@@ -4476,6 +4529,43 @@ function convertAlteryxToSigma(xmlText, options = {}) {
     elementMap[inp.toolId] = { element, colIdMap, tableName, toolId: inp.toolId };
     warnings.push(`Input "${tableName}": ${columns.length} columns`);
   }
+  const connGraph = rawConns.map((c) => ({
+    fromId: c.Origin?.["@_ToolID"] || "",
+    fromConn: c.Origin?.["@_Connection"] || "",
+    toId: c.Destination?.["@_ToolID"] || "",
+    toConn: c.Destination?.["@_Connection"] || ""
+  }));
+  function joinSides(joinToolId) {
+    const leftConn = connGraph.find((c) => c.toId === joinToolId && /^left$/i.test(c.toConn));
+    const rightConn = connGraph.find((c) => c.toId === joinToolId && /^right$/i.test(c.toConn));
+    return {
+      left: leftConn ? traceToInput(leftConn.fromId) : null,
+      right: rightConn ? traceToInput(rightConn.fromId) : null
+    };
+  }
+  function traceToInput(toolId) {
+    const visited = /* @__PURE__ */ new Set();
+    let current = toolId;
+    let arrivedFromConn = "";
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      if (elementMap[current]) return elementMap[current];
+      const info = nodeMap[current];
+      if (info && isJoinTool(info.plugin || "", info.entryPoint || "")) {
+        const { left, right } = joinSides(current);
+        const kind = joinOutputKind(arrivedFromConn);
+        if (kind === "left-unjoin") return left;
+        if (kind === "right-unjoin") return right;
+        if (left && right) return pickFact(left, right).fact;
+        return left || right;
+      }
+      const prevConn = connGraph.find((c) => c.toId === current);
+      if (!prevConn) return null;
+      arrivedFromConn = prevConn.fromConn;
+      current = prevConn.fromId;
+    }
+    return null;
+  }
   if (emptyMeta.size > 0) {
     warnings.push("\u26A0 Workflow MetaInfo is empty \u2014 columns are inferred from Formula/Summarize tools. For accurate columns, run the workflow in Alteryx Designer first, then re-upload.");
     const formulaOutputs = /* @__PURE__ */ new Set();
@@ -4486,102 +4576,123 @@ function convertAlteryxToSigma(xmlText, options = {}) {
         if (f) formulaOutputs.add(f.toUpperCase());
       }
     }
-    const inferredNames = /* @__PURE__ */ new Set();
-    for (const summ of summarizes) {
-      const sfs = summ.config?.SummarizeFields?.SummarizeField || summ.config?.SummarizeField || [];
-      for (const sf of sfs) {
-        const f = sf["@_field"] || "";
-        if (f && !formulaOutputs.has(f.toUpperCase())) inferredNames.add(f.toUpperCase());
-      }
-    }
-    for (const form of formulas) {
-      const ffs = form.config?.FormulaFields?.FormulaField || form.config?.FormulaField || [];
-      for (const ff of ffs) {
-        const expr = ff["@_expression"] || "";
-        const refs = expr.match(/\[([A-Z][A-Z0-9_]{2,})\]/g) || [];
-        for (const r of refs) {
-          const n = r.replace(/^\[|\]$/g, "");
-          if (!formulaOutputs.has(n)) inferredNames.add(n);
+    for (const inp of inputs) {
+      if (!emptyMeta.has(inp.toolId)) continue;
+      const entry = elementMap[inp.toolId];
+      if (!entry) continue;
+      const inferredNames = /* @__PURE__ */ new Set();
+      for (const summ of summarizes) {
+        if (traceToInput(summ.toolId)?.toolId !== inp.toolId) continue;
+        const sfs = summ.config?.SummarizeFields?.SummarizeField || summ.config?.SummarizeField || [];
+        for (const sf of sfs) {
+          const f = sf["@_field"] || "";
+          if (f && !formulaOutputs.has(f.toUpperCase())) inferredNames.add(f.toUpperCase());
         }
       }
-    }
-    const firstEmptyInp = inputs.find((inp) => emptyMeta.has(inp.toolId));
-    if (firstEmptyInp && inferredNames.size > 0) {
-      const entry = elementMap[firstEmptyInp.toolId];
+      for (const form of formulas) {
+        if (traceToInput(form.toolId)?.toolId !== inp.toolId) continue;
+        const ffs = form.config?.FormulaFields?.FormulaField || form.config?.FormulaField || [];
+        for (const ff of ffs) {
+          const expr = ff["@_expression"] || "";
+          const refs = expr.match(/\[([A-Z][A-Z0-9_]{2,})\]/g) || [];
+          for (const r of refs) {
+            const n = r.replace(/^\[|\]$/g, "");
+            if (!formulaOutputs.has(n)) inferredNames.add(n);
+          }
+        }
+      }
       for (const name of inferredNames) {
         const dn = sigmaDisplayName(name);
         const id = sigmaShortId();
         entry.element.columns.push({ id, formula: `[${entry.tableName}/${dn}]` });
         entry.element.order.push(id);
         entry.colIdMap[name] = id;
+        entry.colIdMap[name.toUpperCase()] = id;
         entry.colIdMap[dn.toUpperCase()] = id;
       }
-      warnings.push(`Inferred ${inferredNames.size} column(s) for ${firstEmptyInp.toolId}`);
+      if (inferredNames.size > 0) {
+        warnings.push(`Inferred ${inferredNames.size} column(s) for Input ${inp.toolId} (${entry.tableName})`);
+      }
     }
   }
-  function traceToInput(toolId) {
-    const visited = /* @__PURE__ */ new Set();
-    let current = toolId;
-    while (current && !visited.has(current)) {
-      visited.add(current);
-      if (elementMap[current]) return elementMap[current];
-      const prevConn = connGraph.find((c) => c.toId === current);
-      current = prevConn ? prevConn.fromId : null;
+  function ensureJoinKey(entry, field) {
+    let colId = entry.colIdMap[field.toUpperCase()] || entry.colIdMap[sigmaDisplayName(field).toUpperCase()];
+    if (!colId && emptyMeta.has(entry.toolId)) {
+      const id = sigmaShortId();
+      const dn = sigmaDisplayName(field);
+      entry.element.columns.push({ id, formula: `[${entry.tableName}/${dn}]` });
+      entry.element.order.push(id);
+      entry.colIdMap[field.toUpperCase()] = id;
+      entry.colIdMap[dn.toUpperCase()] = id;
+      colId = id;
     }
-    return null;
+    return colId;
   }
   for (const join of joins) {
     if (!join.config) continue;
     const joinInfos = join.config.JoinInfo || [];
-    let leftField = "", rightField = "";
+    let leftFields = [];
+    let rightFields = [];
     for (const ji of joinInfos) {
       const conn = ji["@_connection"] || "";
-      const fieldName = (Array.isArray(ji.Field) ? ji.Field[0] : ji.Field)?.["@_field"] || "";
-      if (conn === "Left") leftField = fieldName;
-      else if (conn === "Right") rightField = fieldName;
+      const fields = joinInfoFields(ji);
+      if (/^left$/i.test(conn)) leftFields = fields;
+      else if (/^right$/i.test(conn)) rightFields = fields;
     }
-    const leftConn = connGraph.find((c) => c.toId === join.toolId && c.toConn === "Left");
-    const rightConn = connGraph.find((c) => c.toId === join.toolId && c.toConn === "Right");
-    const leftSrc = leftConn ? traceToInput(leftConn.fromId) : null;
-    const rightSrc = rightConn ? traceToInput(rightConn.fromId) : null;
-    if (leftSrc && rightSrc && leftField && rightField) {
-      let srcColId = leftSrc.colIdMap[leftField.toUpperCase()] || leftSrc.colIdMap[sigmaDisplayName(leftField).toUpperCase()];
-      let tgtColId = rightSrc.colIdMap[rightField.toUpperCase()] || rightSrc.colIdMap[sigmaDisplayName(rightField).toUpperCase()];
-      if (!srcColId && emptyMeta.has(leftSrc.toolId)) {
-        const id = sigmaShortId(), dn = sigmaDisplayName(leftField);
-        leftSrc.element.columns.push({ id, formula: `[${leftSrc.tableName}/${dn}]` });
-        leftSrc.element.order.push(id);
-        leftSrc.colIdMap[leftField.toUpperCase()] = id;
-        leftSrc.colIdMap[dn.toUpperCase()] = id;
-        srcColId = id;
+    const { left: leftSrc, right: rightSrc } = joinSides(join.toolId);
+    const outs = connGraph.filter((c) => c.fromId === join.toolId);
+    const outKinds = new Set(outs.map((c) => joinOutputKind(c.fromConn)));
+    const usesUnjoin = outKinds.has("left-unjoin") || outKinds.has("right-unjoin");
+    const usesInner = outKinds.has("inner") || outs.length === 0;
+    if (usesUnjoin) {
+      const reason = `Join Tool ${join.toolId} uses the Left/Right unjoin output (anti-join). Sigma relationships cannot express unmatched-row grain.`;
+      gaps.push({
+        toolId: join.toolId,
+        plugin: join.plugin || "Join",
+        family: "join-unjoin",
+        kind: "dbt-offramp",
+        reason,
+        dbtHint: "Port the unjoin to dbt as a LEFT/RIGHT JOIN \u2026 WHERE right.key IS NULL (or vice versa) and point Sigma at that model."
+      });
+      warnings.push(`dbt-offramp Tool ${join.toolId} (join-unjoin): L/R unjoin is ETL \u2014 do not fake as an inner relationship.`);
+    }
+    if (!usesInner) {
+      warnings.push(`Join (Tool ${join.toolId}): only unjoin output(s) used \u2014 no Sigma relationship emitted.`);
+      continue;
+    }
+    if (leftSrc && rightSrc && leftFields.length && rightFields.length) {
+      const pairCount = Math.min(leftFields.length, rightFields.length);
+      if (leftFields.length !== rightFields.length) {
+        warnings.push(`Join (Tool ${join.toolId}): ${leftFields.length} left keys vs ${rightFields.length} right keys \u2014 pairing the first ${pairCount}.`);
       }
-      if (!tgtColId && emptyMeta.has(rightSrc.toolId)) {
-        const id = sigmaShortId(), dn = sigmaDisplayName(rightField);
-        rightSrc.element.columns.push({ id, formula: `[${rightSrc.tableName}/${dn}]` });
-        rightSrc.element.order.push(id);
-        rightSrc.colIdMap[rightField.toUpperCase()] = id;
-        rightSrc.colIdMap[dn.toUpperCase()] = id;
-        tgtColId = id;
+      const { fact, dim, factIsLeft } = pickFact(leftSrc, rightSrc);
+      const factFields = factIsLeft ? leftFields : rightFields;
+      const dimFields = factIsLeft ? rightFields : leftFields;
+      const keys = [];
+      for (let i = 0; i < pairCount; i++) {
+        const srcColId = ensureJoinKey(fact, factFields[i]);
+        const tgtColId = ensureJoinKey(dim, dimFields[i]);
+        if (srcColId && tgtColId) keys.push({ sourceColumnId: srcColId, targetColumnId: tgtColId });
       }
-      if (srcColId && tgtColId) {
-        if (!leftSrc.element.relationships) leftSrc.element.relationships = [];
-        leftSrc.element.relationships.push({
+      if (keys.length) {
+        if (!fact.element.relationships) fact.element.relationships = [];
+        fact.element.relationships.push({
           id: sigmaShortId(),
-          targetElementId: rightSrc.element.id,
-          keys: [{ sourceColumnId: srcColId, targetColumnId: tgtColId }],
-          name: rightSrc.tableName,
+          targetElementId: dim.element.id,
+          keys,
+          name: dim.tableName,
           relationshipType: "N:1"
         });
-        warnings.push(`Join: ${leftSrc.tableName}.${leftField} \u2192 ${rightSrc.tableName}.${rightField}`);
+        const pairs = keys.map((_, i) => `${fact.tableName}.${factFields[i]}=${dim.tableName}.${dimFields[i]}`).join(", ");
+        warnings.push(`Join: ${pairs} (assumed N:1 on ${fact.tableName} \u2192 ${dim.tableName})`);
       } else {
-        warnings.push(`Join: could not resolve columns ${leftField} / ${rightField}`);
+        warnings.push(`Join: could not resolve columns ${leftFields.join(",")} / ${rightFields.join(",")}`);
       }
     } else {
       warnings.push(`Join (Tool ${join.toolId}): could not trace input sources`);
     }
   }
-  const factEl = elements.find((e) => e.relationships?.length) || (elements.length > 0 ? elements.reduce((best, e) => (e.columns?.length || 0) > (best.columns?.length || 0) ? e : best, elements[0]) : null);
-  if (factEl) {
+  if (elements.length) {
     for (const form of formulas) {
       const formulaFields = form.config?.FormulaFields?.FormulaField || form.config?.FormulaField || [];
       const traced = traceToInput(form.toolId);
@@ -4671,15 +4782,25 @@ function convertAlteryxToSigma(xmlText, options = {}) {
       }
     }
     for (const sel of selects) {
-      const selectFields = sel.config?.SelectFields?.SelectField || sel.config?.SelectField || [];
-      const renameCount = selectFields.filter((sf) => {
-        const field = sf["@_field"] || "";
-        const rename = sf["@_rename"] || "";
-        return rename && rename !== field && field !== "*Unknown";
-      }).length;
-      if (renameCount > 0) {
-        warnings.push(`Select tool has ${renameCount} rename(s) \u2014 review column names in the JSON editor`);
+      const selectFields = selectFieldList(sel.config);
+      const traced = traceToInput(sel.toolId);
+      if (!traced) {
+        warnings.push(`Select Tool ${sel.toolId}: could not trace to a warehouse Input.`);
+        continue;
       }
+      const n = applySelectFields(traced, selectFields, warnings);
+      if (n.renamed || n.hidden) {
+        warnings.push(`Select Tool ${sel.toolId}: hid ${n.hidden}, renamed ${n.renamed} column(s)`);
+      }
+    }
+    for (const join of joins) {
+      const fields = selectFieldList(join.config?.SelectConfiguration);
+      if (!fields.length) continue;
+      const { left, right } = joinSides(join.toolId);
+      const leftFields = fields.filter((sf) => !String(sf["@_field"] || "").startsWith("Right_"));
+      const rightFields = fields.filter((sf) => String(sf["@_field"] || "").startsWith("Right_")).map((sf) => ({ ...sf, "@_field": String(sf["@_field"]).replace(/^Right_/, "") }));
+      if (left) applySelectFields(left, leftFields, warnings);
+      if (right) applySelectFields(right, rightFields, warnings);
     }
     for (const filt of filters) {
       const expr = filt.config?.Expression?.["#text"] || filt.config?.Expression || "";
@@ -4766,7 +4887,7 @@ function convertAlteryxToSigma(xmlText, options = {}) {
           const fm = tc.formula.match(/^\[([^\]]+)\]$/);
           if (!fm) continue;
           const inner = fm[1];
-          const s = inner.lastIndexOf("/");
+          const s = inner.indexOf("/");
           const dispName = s >= 0 ? inner.slice(s + 1) : inner;
           if (!(dispName in relatedNameMap)) {
             relatedNameMap[dispName] = `${srcBaseName}/${rel.name}/${dispName}`;
@@ -4774,11 +4895,26 @@ function convertAlteryxToSigma(xmlText, options = {}) {
         }
       }
     }
+    const localDisp = {};
+    for (const col of srcEl.columns || []) {
+      let disp;
+      const fm = col.formula?.match(/^\[([^\/\]]+)\/([^\]]+)\]$/);
+      if (fm) disp = fm[2];
+      else if (col.name) disp = col.name;
+      if (!disp || disp.includes("/")) continue;
+      localDisp[disp] = disp;
+      localDisp[disp.toUpperCase()] = disp;
+      const phys = col.id.split("/").pop();
+      if (phys) localDisp[phys] = disp;
+    }
     for (const c of calcs) {
-      if (c.formula && Object.keys(relatedNameMap).length) {
+      if (c.formula) {
         c.formula = c.formula.replace(/\[([^\]\/]+)\]/g, (match, refName) => {
-          const rewritten = relatedNameMap[refName];
-          return rewritten ? `[${rewritten}]` : match;
+          const related = relatedNameMap[refName] || relatedNameMap[sigmaDisplayName(refName)];
+          if (related) return `[${related}]`;
+          const local = localDisp[refName] || localDisp[refName.toUpperCase()] || localDisp[sigmaDisplayName(refName)];
+          if (local) return `[${srcBaseName}/${local}]`;
+          return match;
         });
       }
       de.columns.push(c);
@@ -5046,7 +5182,7 @@ function classifyAlteryxTool(plugin, entryPoint) {
     return { kind: "converted", family: "summarize", reason: "ungrouped Summarize \u2192 metrics; GroupBy is a later dbt offramp" };
   }
   if (/AlteryxSelect|\.Select\.|AlteryxSelect\b/i.test(p) && !/DynamicSelect|SelectRecords/i.test(p)) {
-    return { kind: "converted", family: "select", reason: "Select (renames flagged as warnings)" };
+    return { kind: "converted", family: "select", reason: "Select \u2192 hide deselected columns / apply renames" };
   }
   if (/\.Filter\.|AlteryxFilter\b/i.test(p)) {
     return { kind: "converted", family: "filter", reason: "Filter \u2192 warning / optional RLS" };

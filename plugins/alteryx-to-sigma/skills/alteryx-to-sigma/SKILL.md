@@ -91,10 +91,10 @@ Mapping (see `refs/yxmd-coverage.md` for the full tool list):
 | Alteryx | Sigma |
 |---|---|
 | Input Data (`DbFileInput`) | `warehouse-table` element (`source.path` from the ODBC File string) |
-| Join | `relationships[]` on the left-hand element (traced back to inputs) |
+| Join | `relationships[]` on the **fact** side (assumed N:1; composite keys; L/R unjoin → dbt) |
 | Formula | calculated columns (Alteryx functions → Sigma; IF/ENDIF → `If()`) |
 | Summarize | metrics (`Sum`/`Avg`/`CountDistinct`/…) |
-| Select (renames) | warning only — review names |
+| Select (renames / deselects) | hide deselected columns; apply `name` overrides |
 | Filter | warning — consider as RLS (Phase Security) |
 | Cross-element Formula refs | moved onto the derived `"<Table> View"` element as `[SRC/REL/Field]` |
 

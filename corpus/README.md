@@ -42,6 +42,8 @@ corpus/
 | domo/orders-presentation | synthetic Domo cards + card-data snapshot | presentation-override derivation pin (checks.sh, no golden DM) |
 | sisense/ecommerce-smoke | existing Sample ECommerce model + dashboard fixtures | DM + workbook + structured gap report (checks.sh also verifies layout) |
 | alteryx/orders-join | Alteryx .yxmd (warehouse Input + Join + cross-element Formula) | DM (3 elements, derived view); local converter only |
+| alteryx/union-offramp | Alteryx .yxmd (two Inputs + Union) | DM (2 warehouse tables) + dbt-offramp lock; local converter only |
+| alteryx/retail-star | Alteryx .yxmd (6 Inputs + 2 Joins + IIF + Filter) | DM (7 elements); local converter only |
 
 ## Runner
 

@@ -5,6 +5,7 @@
 #
 #   ruby tools/new-skill.rb <tool> ["Display Name"]
 #   ruby tools/new-skill.rb sisense "Sisense"
+#   ruby tools/new-skill.rb --dm-only alteryx "Alteryx"   # no workbook shared scripts
 #
 # Produces a skeleton that already passes the governance gates:
 #   - converter + assessment skill dirs with SKILL.md (every mandatory arc gate
@@ -24,10 +25,12 @@ require 'fileutils'
 ROOT = File.expand_path('..', __dir__)
 Dir.chdir(ROOT)
 
-tool = ARGV[0]
-abort "usage: ruby tools/new-skill.rb <tool> [\"Display Name\"]" if tool.nil? || tool.empty?
+args = ARGV.dup
+dm_only = !args.delete('--dm-only').nil?
+tool = args[0]
+abort "usage: ruby tools/new-skill.rb [--dm-only] <tool> [\"Display Name\"]" if tool.nil? || tool.empty?
 abort "tool must be lowercase letters/digits/hyphens (e.g. 'sisense')" unless tool.match?(/\A[a-z0-9][a-z0-9-]*\z/)
-display = ARGV[1] || tool.split('-').map(&:capitalize).join(' ')
+display = args[1] || tool.split('-').map(&:capitalize).join(' ')
 
 plugin   = "plugins/#{tool}-to-sigma"
 conv_dir = "#{plugin}/skills/#{tool}-to-sigma"
@@ -35,12 +38,20 @@ asmt_dir = "#{plugin}/skills/#{tool}-assessment"
 abort "#{plugin} already exists — refusing to overwrite." if Dir.exist?(plugin)
 
 # --- core shared infra a new converter / assessment should vendor ----------
-CONV_SHARED = %w[
-  shared/lib/sigma_rest.rb shared/lib/preflight_lint.rb shared/lib/layout_lint.rb
-  shared/lib/control_lint.rb shared/scripts/escalate-gap.py shared/scripts/probe-controls.rb
-  shared/scripts/find-or-pick-dm.rb shared/scripts/assert-phase6-ran.rb
-  shared/scripts/get-token.sh shared/scripts/sigma-export-png.py
+# Workbook-only scripts (assert-phase6, probe-controls, layout/control lint,
+# PNG export) require a dependency closure this scaffolder does not fan out.
+# Data-model-only converters (Alteryx-style ETL) must pass --dm-only or the
+# shared-script-closure CI gate fails.
+CONV_SHARED_CORE = %w[
+  shared/lib/sigma_rest.rb shared/scripts/escalate-gap.py
+  shared/scripts/find-or-pick-dm.rb shared/scripts/get-token.sh
 ].freeze
+CONV_SHARED_WORKBOOK = %w[
+  shared/lib/preflight_lint.rb shared/lib/layout_lint.rb
+  shared/lib/control_lint.rb shared/scripts/probe-controls.rb
+  shared/scripts/assert-phase6-ran.rb shared/scripts/sigma-export-png.py
+].freeze
+CONV_SHARED = (CONV_SHARED_CORE + (dm_only ? [] : CONV_SHARED_WORKBOOK)).freeze
 ASMT_SHARED = %w[shared/assessment/dup-dashboards.py].freeze
 
 def target_for(canonical, skill_dir)
@@ -76,60 +87,116 @@ end
 File.write('shared/manifest.json', JSON.pretty_generate(manifest) + "\n")
 
 # --- 3. converter SKILL.md skeleton (documents every mandatory gate) -------
-File.write("#{conv_dir}/SKILL.md", <<~MD)
-  ---
-  name: #{tool}-to-sigma
-  description: Convert a #{display} model + dashboards into a Sigma data model and matching workbook. Discovery, calc translation, DM + workbook creation via REST, layout, and warehouse parity verification.
-  ---
+skill_body = if dm_only
+  <<~MD
+    ---
+    name: #{tool}-to-sigma
+    description: Convert a #{display} artifact into a Sigma data model. Data-model only — no workbook.
+    ---
 
-  # #{display} → Sigma
+    # #{display} → Sigma (data model)
 
-  > SCAFFOLD — fill every TODO before first live run. Phase numbering is local to
-  > this skill; the canonical Assess→Discover→Reuse→Convert→Post-DM→Build→Layout→
-  > Parity→Security→Enhance arc and this skill's mapping live in
-  > `docs/phase-schema.md` (full clone only). Add this skill's column there.
+    > SCAFFOLD — **data-model only** (`--dm-only`). Fill every TODO before first live run.
+    > Phase numbering is local to this skill; the canonical arc lives in
+    > `docs/phase-schema.md` (full clone only).
 
-  ## Phase 0 — Assess (C1)
-  TODO: feature-gap scan + scope. Defer tenant inventory to the `#{tool}-assessment` skill.
+    ## Phase 0 — Assess (C1)
+    TODO: feature-gap scan + scope. Defer tenant inventory to the `#{tool}-assessment` skill.
 
-  ## Phase 1 — Discover (C2)
-  TODO: pull the #{display} model + dashboard/report definitions and the warehouse columns.
+    ## Phase 1 — Discover (C2)
+    TODO: pull the #{display} source and the warehouse columns.
 
-  ## Phase 1.5 — Reuse-check (C3)
-  Before creating a DM, score existing Sigma DMs and reuse on a strong match
-  (avoid sprawl). Mirrors tableau Phase 1.5:
-  `ruby scripts/find-or-pick-dm.rb --workbook-signature <sig.json>`.
+    ## Phase 1.5 — Reuse-check (C3)
+    Before creating a DM, score existing Sigma DMs and reuse on a strong match
+    (avoid sprawl): `ruby scripts/find-or-pick-dm.rb --workbook-signature <sig.json>`.
 
-  ## Phase 2 — Convert (C4)
-  TODO: #{display} model → Sigma data-model JSON.
+    ## Phase 2 — Convert (C4)
+    TODO: #{display} → Sigma data-model JSON.
 
-  ## Phase 3 — Post the data model + read back (C5)  ← HARD GATE
-  POST the DM, then **read back** the real element/column ids and wire the
-  workbook to those — never to client-side ids: `ruby scripts/post-and-readback.rb`.
+    ## Phase 3 — Post the data model + read back (C5)  ← HARD GATE
+    POST the DM, then **read back** the real element/column ids:
+    `ruby scripts/post-and-readback.rb`. Zero `type=error` columns.
 
-  ## Phase 4 — Build the workbook (C6)
-  TODO: dashboards → Sigma workbook spec wired to the read-back ids.
+    ## Phase 4 — Workbook (C6) — N/A
+    Data-model only. **Do not** invent a workbook.
 
-  ## Phase 5 — Layout (C7)
-  Apply the grid layout as the **LAST write** (a bare spec PUT wipes layout):
-  `ruby scripts/put-layout.rb --workbook <id> --layout layout.xml`. Then run the
-  visual-QA PNG check (`scripts/sigma-export-png.py`); see
-  `refs/layout-visual-qa.md`.
+    ## Phase 5 — Layout (C7) — N/A
+    No workbook is built, so there is no `put-layout.rb` / `layout.xml` and no
+    last write of layout. Visual PNG QA is N/A; see `refs/layout-visual-qa.md`.
 
-  ## Phase 6 — Verify parity (C8)  ← HARD GATE, never skip
-  Compare #{display} values vs Sigma (vs warehouse where possible). Gated by
-  `scripts/assert-phase6-ran.rb`. A migration is not done until parity is GREEN.
+    ## Phase 6 — Verify parity (C8)  ← HARD GATE, never skip
+    The hard parity gate is the C5 column-type guard. `assert-phase6-ran.rb` is
+    **not** vendored — there is no workbook to point it at.
 
-  ## Security: RLS / CLS (C9)
-  Detect #{display} row-level/column-level security always; apply to Sigma
-  user-attributes + DM filters opt-in. TODO: document the #{display} mechanism.
+    ## Security: RLS / CLS (C9)
+    Detect #{display} row-level/column-level security always; apply to Sigma
+    user-attributes + DM filters opt-in.
 
-  ## Gaps
-  Unsupported source features → `python3 scripts/escalate-gap.py` (opt-in issue filer). Never fake a feature; flag it.
-MD
+    ## Gaps
+    Unsupported source features → `python3 scripts/escalate-gap.py --category skill`. Never fake a feature; flag it.
+  MD
+else
+  <<~MD
+    ---
+    name: #{tool}-to-sigma
+    description: Convert a #{display} model + dashboards into a Sigma data model and matching workbook. Discovery, calc translation, DM + workbook creation via REST, layout, and warehouse parity verification.
+    ---
+
+    # #{display} → Sigma
+
+    > SCAFFOLD — fill every TODO before first live run. Phase numbering is local to
+    > this skill; the canonical Assess→Discover→Reuse→Convert→Post-DM→Build→Layout→
+    > Parity→Security→Enhance arc and this skill's mapping live in
+    > `docs/phase-schema.md` (full clone only). Add this skill's column there.
+
+    ## Phase 0 — Assess (C1)
+    TODO: feature-gap scan + scope. Defer tenant inventory to the `#{tool}-assessment` skill.
+
+    ## Phase 1 — Discover (C2)
+    TODO: pull the #{display} model + dashboard/report definitions and the warehouse columns.
+
+    ## Phase 1.5 — Reuse-check (C3)
+    Before creating a DM, score existing Sigma DMs and reuse on a strong match
+    (avoid sprawl). Mirrors tableau Phase 1.5:
+    `ruby scripts/find-or-pick-dm.rb --workbook-signature <sig.json>`.
+
+    ## Phase 2 — Convert (C4)
+    TODO: #{display} model → Sigma data-model JSON.
+
+    ## Phase 3 — Post the data model + read back (C5)  ← HARD GATE
+    POST the DM, then **read back** the real element/column ids and wire the
+    workbook to those — never to client-side ids: `ruby scripts/post-and-readback.rb`.
+
+    ## Phase 4 — Build the workbook (C6)
+    TODO: dashboards → Sigma workbook spec wired to the read-back ids.
+
+    ## Phase 5 — Layout (C7)
+    Apply the grid layout as the **LAST write** (a bare spec PUT wipes layout):
+    `ruby scripts/put-layout.rb --workbook <id> --layout layout.xml`. Then run the
+    visual-QA PNG check (`scripts/sigma-export-png.py`); see
+    `refs/layout-visual-qa.md`.
+
+    ## Phase 6 — Verify parity (C8)  ← HARD GATE, never skip
+    Compare #{display} values vs Sigma (vs warehouse where possible). Gated by
+    `scripts/assert-phase6-ran.rb`. A migration is not done until parity is GREEN.
+
+    ## Security: RLS / CLS (C9)
+    Detect #{display} row-level/column-level security always; apply to Sigma
+    user-attributes + DM filters opt-in. TODO: document the #{display} mechanism.
+
+    ## Gaps
+    Unsupported source features → `python3 scripts/escalate-gap.py` (opt-in issue filer). Never fake a feature; flag it.
+  MD
+end
+File.write("#{conv_dir}/SKILL.md", skill_body)
 
 File.write("#{conv_dir}/QUICKSTART.md", "# #{display} → Sigma — Quickstart\n\nTODO: minimal end-to-end example. Auth: `eval \"$(scripts/get-token.sh)\"`.\n")
-File.write("#{conv_dir}/refs/layout-visual-qa.md", "# Visual QA (#{display})\n\nTODO: render each page to PNG via scripts/sigma-export-png.py and compare to source.\n")
+layout_qa = if dm_only
+  "# Visual QA (#{display})\n\nN/A — data-model only. No workbook, no `put-layout.rb` / `layout.xml`, no last write of layout.\n"
+else
+  "# Visual QA (#{display})\n\nTODO: render each page to PNG via scripts/sigma-export-png.py and compare to source.\n"
+end
+File.write("#{conv_dir}/refs/layout-visual-qa.md", layout_qa)
 
 # --- 4. assessment SKILL.md skeleton ---------------------------------------
 File.write("#{asmt_dir}/SKILL.md", <<~MD)

@@ -31,8 +31,11 @@ Rebuild after a `.ts` edit: `cd .../converter && npm install && npm run bundle`.
 
 - DbFileInput ODBC File string → warehouse-table `source.path`
 - Join → `relationships[]` (keys traced back to inputs)
-- Formula `IIF` → Sigma `If()`, moved onto derived `"Order Fact View"` because
-  it references a related-table column
+- Formula `IIF` → Sigma `If()`, moved onto derived `"Order Fact View"` with
+  both related (`[ORDER_FACT/CUSTOMER_DIM/…]`) and same-table
+  (`[ORDER_FACT/Gross Revenue]`) refs fully qualified
+- Join → `relationships[]` (assumed N:1 on the fact; composite keys supported
+  on other canvases)
 - Tool census: 4/4 converted, 0 dbt-offramps, 0 silent drops
 - Local-only: `migrate-alteryx.rb --print-converter` resolves to `converter/cli.mjs`
 

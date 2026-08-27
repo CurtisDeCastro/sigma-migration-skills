@@ -61,4 +61,38 @@ mv /tmp/AGENTS.md.bak AGENTS.md
 mv /tmp/phase-schema.md.bak docs/phase-schema.md
 mv /tmp/manifest.json.bak shared/manifest.json
 
+# --- --dm-only: workbook shared scripts must NOT be registered --------------
+cp .claude-plugin/marketplace.json /tmp/marketplace.json.bak
+cp AGENTS.md /tmp/AGENTS.md.bak
+cp docs/phase-schema.md /tmp/phase-schema.md.bak
+cp shared/manifest.json /tmp/manifest.json.bak
+
+DM_TOOL="zzdmonly"
+DM_PLUGIN="plugins/${DM_TOOL}-to-sigma"
+abort_dm() {
+  echo "FAIL: $*" >&2
+  rm -rf "$DM_PLUGIN"
+  git checkout -- .claude-plugin/marketplace.json AGENTS.md docs/phase-schema.md shared/manifest.json 2>/dev/null || true
+  exit 1
+}
+ruby tools/new-skill.rb --dm-only "$DM_TOOL" "Zz Dm Only" >/tmp/new-skill-dm-out.txt \
+  || abort_dm "new-skill.rb --dm-only exited non-zero"
+[ -f "$DM_PLUGIN/skills/${DM_TOOL}-to-sigma/scripts/lib/sigma_rest.rb" ] \
+  || abort_dm "dm-only missing sigma_rest.rb"
+[ ! -f "$DM_PLUGIN/skills/${DM_TOOL}-to-sigma/scripts/assert-phase6-ran.rb" ] \
+  || abort_dm "dm-only must not vendor assert-phase6-ran.rb"
+[ ! -f "$DM_PLUGIN/skills/${DM_TOOL}-to-sigma/scripts/probe-controls.rb" ] \
+  || abort_dm "dm-only must not vendor probe-controls.rb"
+if grep -q "plugins/${DM_TOOL}-to-sigma/.*/assert-phase6-ran.rb" shared/manifest.json; then
+  abort_dm "dm-only registered assert-phase6-ran.rb in shared/manifest.json"
+fi
+grep -q "data-model only" "$DM_PLUGIN/skills/${DM_TOOL}-to-sigma/SKILL.md" \
+  || abort_dm "dm-only SKILL.md missing N/A workbook language"
+
+rm -rf "$DM_PLUGIN"
+mv /tmp/marketplace.json.bak .claude-plugin/marketplace.json
+mv /tmp/AGENTS.md.bak AGENTS.md
+mv /tmp/phase-schema.md.bak docs/phase-schema.md
+mv /tmp/manifest.json.bak shared/manifest.json
+
 echo "OK: tools/test-new-skill-registry.sh"

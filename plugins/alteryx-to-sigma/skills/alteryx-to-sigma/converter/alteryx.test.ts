@@ -43,6 +43,7 @@
  */
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { convertAlteryxToSigma, sqlCaseToIf, classifyAlteryxTool } from './alteryx.js';
 
 function buildXml(expression: string, fieldName: string): string {
@@ -357,5 +358,181 @@ describe('Alteryx tool census: nothing silently dropped', () => {
     const el = result.model.pages[0].elements[0] as { source?: { path?: string[] } };
     assert.deepEqual(el.source?.path, ['DEMO_DB', 'DEMO', 'ORDERS']);
     assert.equal((result.gaps || []).filter((g) => g.family === 'file-input').length, 0);
+  });
+});
+
+function warehouseInput(toolId: string, table: string, fields: string[]): string {
+  const rec = fields.map((n) => `            <Field name="${n}" type="V_WString"/>`).join('\n');
+  return `    <Node ToolID="${toolId}">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"><Position x="1" y="1"/></GuiSettings>
+      <Properties>
+        <Configuration><File>DEMO_DB.DEMO.${table}</File></Configuration>
+        <MetaInfo connection="Output"><RecordInfo>
+${rec}
+        </RecordInfo></MetaInfo>
+      </Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxDbFileInput"/>
+    </Node>`;
+}
+
+describe('Alteryx join / select / inference correctness', () => {
+  test('derived-view calc qualifies same-table refs as well as related refs', () => {
+    const xml = readFileSync(new URL('../fixtures/orders-join.yxmd', import.meta.url), 'utf8');
+    const result = convertAlteryxToSigma(xml, { connectionId: 'c' });
+    const view = (result.model.pages[0].elements as any[]).find((e) => e.name === 'Order Fact View');
+    const calc = view?.columns.find((c: any) => c.name === 'Segment Adjusted Revenue');
+    assert.ok(calc, 'calc landed on Order Fact View');
+    assert.match(calc.formula, /\[ORDER_FACT\/CUSTOMER_DIM\/Customer Segment\]/);
+    assert.match(calc.formula, /\[ORDER_FACT\/Gross Revenue\]/);
+    assert.equal((calc.formula.match(/\[Gross Revenue\]/g) || []).length, 0);
+  });
+
+  test('composite Join keys emit every pair, not just the first Field', () => {
+    const xml = `<?xml version="1.0"?><AlteryxDocument><Nodes>
+${warehouseInput('1', 'ORDER_FACT', ['CUSTOMER_KEY', 'REGION', 'AMOUNT'])}
+${warehouseInput('2', 'CUSTOMER_DIM', ['CUSTOMER_KEY', 'REGION', 'NAME'])}
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration>
+        <JoinInfo connection="Left"><Field field="CUSTOMER_KEY"/><Field field="REGION"/></JoinInfo>
+        <JoinInfo connection="Right"><Field field="CUSTOMER_KEY"/><Field field="REGION"/></JoinInfo>
+      </Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxJoin"/>
+    </Node>
+    </Nodes><Connections>
+      <Connection><Origin ToolID="1" Connection="Output"/><Destination ToolID="3" Connection="Left"/></Connection>
+      <Connection><Origin ToolID="2" Connection="Output"/><Destination ToolID="3" Connection="Right"/></Connection>
+    </Connections></AlteryxDocument>`;
+    const result = convertAlteryxToSigma(xml, {});
+    const rels = (result.model.pages[0].elements as any[]).flatMap((e) => e.relationships || []);
+    assert.equal(rels.length, 1);
+    assert.equal(rels[0].keys.length, 2, 'both join keys must be in relationships[].keys');
+  });
+
+  test('Join Left/Right unjoin output is a dbt offramp, not an inner relationship', () => {
+    const xml = `<?xml version="1.0"?><AlteryxDocument><Nodes>
+${warehouseInput('1', 'ORDER_FACT', ['CUSTOMER_KEY', 'AMOUNT'])}
+${warehouseInput('2', 'CUSTOMER_DIM', ['CUSTOMER_KEY', 'NAME'])}
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration>
+        <JoinInfo connection="Left"><Field field="CUSTOMER_KEY"/></JoinInfo>
+        <JoinInfo connection="Right"><Field field="CUSTOMER_KEY"/></JoinInfo>
+      </Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxJoin"/>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.BrowseV2.BrowseV2"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration/></Properties>
+    </Node>
+    </Nodes><Connections>
+      <Connection><Origin ToolID="1" Connection="Output"/><Destination ToolID="3" Connection="Left"/></Connection>
+      <Connection><Origin ToolID="2" Connection="Output"/><Destination ToolID="3" Connection="Right"/></Connection>
+      <Connection><Origin ToolID="3" Connection="Left"/><Destination ToolID="4" Connection="Input"/></Connection>
+    </Connections></AlteryxDocument>`;
+    const result = convertAlteryxToSigma(xml, {});
+    const hit = (result.gaps || []).find((g) => g.family === 'join-unjoin');
+    assert.ok(hit, 'unjoin must be a dbt-offramp');
+    assert.equal(hit.kind, 'dbt-offramp');
+    const rels = (result.model.pages[0].elements as any[]).flatMap((e) => e.relationships || []);
+    assert.equal(rels.length, 0, 'do not emit an inner N:1 relationship for an unjoin-only Join');
+  });
+
+  test('relationship lives on the wider (fact) side when dim is Left and fact is Right', () => {
+    const xml = `<?xml version="1.0"?><AlteryxDocument><Nodes>
+${warehouseInput('1', 'CUSTOMER_DIM', ['CUSTOMER_KEY', 'NAME'])}
+${warehouseInput('2', 'ORDER_FACT', ['ORDER_ID', 'CUSTOMER_KEY', 'GROSS_REVENUE', 'DISCOUNT_AMOUNT', 'COGS'])}
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration>
+        <JoinInfo connection="Left"><Field field="CUSTOMER_KEY"/></JoinInfo>
+        <JoinInfo connection="Right"><Field field="CUSTOMER_KEY"/></JoinInfo>
+      </Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxJoin"/>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><FormulaFields>
+        <FormulaField expression="IIF([GROSS_REVENUE] &gt; 0, 1, 0)" field="HAS_REV" type="Int32"/>
+      </FormulaFields></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxFormula"/>
+    </Node>
+    </Nodes><Connections>
+      <Connection><Origin ToolID="1" Connection="Output"/><Destination ToolID="3" Connection="Left"/></Connection>
+      <Connection><Origin ToolID="2" Connection="Output"/><Destination ToolID="3" Connection="Right"/></Connection>
+      <Connection><Origin ToolID="3" Connection="Join"/><Destination ToolID="4" Connection="Input"/></Connection>
+    </Connections></AlteryxDocument>`;
+    const result = convertAlteryxToSigma(xml, {});
+    const fact = (result.model.pages[0].elements as any[]).find((e) => e.source?.path?.includes('ORDER_FACT'));
+    const dim = (result.model.pages[0].elements as any[]).find((e) => e.source?.path?.includes('CUSTOMER_DIM'));
+    assert.ok(fact?.relationships?.length, 'relationship must live on ORDER_FACT (more columns)');
+    assert.equal(dim?.relationships?.length || 0, 0, 'do not hang the relationship off the dim');
+    assert.equal(fact.relationships[0].targetElementId, dim.id);
+    const hasRev = [...(fact.columns || []), ...((result.model.pages[0].elements as any[]).find((e) => e.name?.includes('View'))?.columns || [])]
+      .find((c: any) => c.name === 'Has Rev');
+    assert.ok(hasRev, 'formula after the join attaches to the fact, not the dim');
+  });
+
+  test('empty MetaInfo infers columns onto the traced Input, not the first empty one', () => {
+    const xml = `<?xml version="1.0"?><AlteryxDocument><Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><File>DEMO_DB.DEMO.ORDERS</File></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxDbFileInput"/>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><File>DEMO_DB.DEMO.CUSTOMERS</File></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxDbFileInput"/>
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><FormulaFields>
+        <FormulaField expression="[FOO]" field="FOO_OUT" type="V_WString"/>
+      </FormulaFields></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxFormula"/>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><FormulaFields>
+        <FormulaField expression="[BAR]" field="BAR_OUT" type="V_WString"/>
+      </FormulaFields></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxFormula"/>
+    </Node>
+    </Nodes><Connections>
+      <Connection><Origin ToolID="1" Connection="Output"/><Destination ToolID="3" Connection="Input"/></Connection>
+      <Connection><Origin ToolID="2" Connection="Output"/><Destination ToolID="4" Connection="Input"/></Connection>
+    </Connections></AlteryxDocument>`;
+    const result = convertAlteryxToSigma(xml, {});
+    const orders = (result.model.pages[0].elements as any[]).find((e) => e.source?.path?.includes('ORDERS'));
+    const customers = (result.model.pages[0].elements as any[]).find((e) => e.source?.path?.includes('CUSTOMERS'));
+    const ordersPhys = (orders.columns || []).map((c: any) => (c.id.split('/').pop() || '') + (c.name || '') + (c.formula || ''));
+    const custPhys = (customers.columns || []).map((c: any) => (c.id.split('/').pop() || '') + (c.name || '') + (c.formula || ''));
+    assert.ok(ordersPhys.some((s: string) => /FOO/i.test(s)), 'FOO inferred on ORDERS');
+    assert.ok(!ordersPhys.some((s: string) => /BAR/i.test(s)), 'BAR must not be dumped onto ORDERS');
+    assert.ok(custPhys.some((s: string) => /BAR/i.test(s)), 'BAR inferred on CUSTOMERS');
+    assert.ok(!custPhys.some((s: string) => /FOO/i.test(s)), 'FOO must not be dumped onto CUSTOMERS');
+  });
+
+  test('Select hides deselected columns and applies renames', () => {
+    const xml = `<?xml version="1.0"?><AlteryxDocument><Nodes>
+${warehouseInput('1', 'ORDERS', ['COL_A', 'COL_B'])}
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.AlteryxSelect"><Position x="1" y="1"/></GuiSettings>
+      <Properties><Configuration><SelectFields>
+        <SelectField field="COL_A" selected="False"/>
+        <SelectField field="COL_B" selected="True" rename="NEW_B"/>
+      </SelectFields></Configuration></Properties>
+      <EngineSettings EngineDllEntryPoint="AlteryxSelect"/>
+    </Node>
+    </Nodes><Connections>
+      <Connection><Origin ToolID="1" Connection="Output"/><Destination ToolID="2" Connection="Input"/></Connection>
+    </Connections></AlteryxDocument>`;
+    const result = convertAlteryxToSigma(xml, {});
+    const el = result.model.pages[0].elements[0] as any;
+    const colA = el.columns.find((c: any) => /COL_A/i.test(c.id) || /Col A/.test(c.formula));
+    const colB = el.columns.find((c: any) => /COL_B/i.test(c.id) || /Col B/.test(c.formula));
+    assert.equal(colA?.hidden, true);
+    assert.equal(colB?.name, 'New B');
   });
 });
