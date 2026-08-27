@@ -190,6 +190,63 @@ class WorkbookTest(unittest.TestCase):
             chart_start, _ = row_range(left_chart)
             self.assertLessEqual(title_end, chart_start)
 
+    def test_horizontal_kpis_and_conditional_empty_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    conn = st.connection("snowflake")
+                    def load_data():
+                        return conn.query(
+                            "SELECT order_id, revenue, profit FROM db.s.orders"
+                        )
+                    df = load_data()
+                    if df.empty:
+                        st.info("No data matches the current filters.")
+                    with st.container(horizontal=True):
+                        st.metric("Revenue", df["revenue"].sum())
+                        st.metric("Profit", df["profit"].sum())
+                    """
+                ),
+                encoding="utf-8",
+            )
+            ir = analyze_project(root)
+            result = build_workbook(ir, "connection-1", "folder-1")
+            doc = document(result["workbook"])
+            text_bodies = [
+                item["body"]
+                for item in workbook_elements(result["workbook"])
+                if item["kind"] == "text"
+            ]
+            self.assertNotIn(
+                "No data matches the current filters.",
+                text_bodies,
+            )
+            kpi_ids = [
+                item["id"]
+                for item in workbook_elements(result["workbook"])
+                if item["kind"] == "kpi-chart"
+            ]
+            placements = [
+                re.search(
+                    rf'elementId="{re.escape(kpi_id)}"[^>]+'
+                    rf'gridColumn="([^"]+)" gridRow="([^"]+)"',
+                    doc["layout"],
+                )
+                for kpi_id in kpi_ids
+            ]
+            self.assertTrue(all(placements))
+            self.assertEqual(
+                len({placement.group(2) for placement in placements}),
+                1,
+            )
+            self.assertEqual(
+                len({placement.group(1) for placement in placements}),
+                2,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

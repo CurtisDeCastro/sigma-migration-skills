@@ -695,7 +695,19 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 leaf = call_path(expression.func).split(".")[-1]
                 if leaf in {"container", "expander", "popover", "status", "form"}:
                     label = display_text(expression.args[0] if expression.args else None)
-                    self.context.append({"kind": leaf, "name": label})
+                    context_kind = (
+                        "horizontal"
+                        if leaf == "container"
+                        and literal(keyword(expression, "horizontal")) is True
+                        else leaf
+                    )
+                    self.context.append(
+                        {
+                            "kind": context_kind,
+                            "name": label,
+                            "group": f"{context_kind}-{expression.lineno}",
+                        }
+                    )
                     pushed += 1
                     if leaf == "form":
                         self.add_gap(
@@ -730,10 +742,26 @@ class ModuleAnalyzer(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> Any:
         if isinstance(node.test, ast.Call):
             self.record_call(node.test)
+        self.context.append(
+            {
+                "kind": "conditional",
+                "branch": "if",
+                "test": unparse(node.test),
+            }
+        )
         for statement in node.body:
             self.visit(statement)
+        self.context.pop()
+        self.context.append(
+            {
+                "kind": "conditional",
+                "branch": "else",
+                "test": unparse(node.test),
+            }
+        )
         for statement in node.orelse:
             self.visit(statement)
+        self.context.pop()
         return None
 
     def expand_config(self, name: str, value: Any, node: ast.AST) -> None:

@@ -682,6 +682,24 @@ def build_workbook(
     converted_by_page: dict[str, list[tuple[IRElement, dict[str, Any]]]] = {
         page.id: [] for page in ir.pages
     }
+    suppressed_titles = set()
+    for index, candidate in enumerate(ir.elements[:-1]):
+        following = ir.elements[index + 1]
+        if (
+            candidate.kind == "text"
+            and candidate.bindings.get("style") == "subheader"
+            and following.page == candidate.page
+            and following.kind
+            in {
+                "line-chart",
+                "bar-chart",
+                "area-chart",
+                "scatter-chart",
+                "table",
+            }
+        ):
+            suppressed_titles.add(candidate.id)
+
     for item in ir.elements:
         query_id = root_query_id(
             ir, item.dataframe, query_by_id, dataframe_roots
@@ -702,12 +720,29 @@ def build_workbook(
         converted: dict[str, Any] | None = None
 
         if item.kind == "text":
+            conditional = any(
+                context.get("kind") == "conditional"
+                for context in item.context
+            )
+            if item.id in suppressed_titles or (
+                conditional
+                and item.bindings.get("style") in {"info", "warning"}
+            ):
+                continue
             body = item.label or " "
             style = item.bindings.get("style")
             if style == "title":
                 body = f"# **{body}**"
             elif style in {"header", "subheader"}:
                 body = f"## **{body}**"
+            elif (
+                style == "caption"
+                and "exception rows" in item.label
+            ):
+                body = (
+                    "{{Count([Exception Rows/Order ID]) | ,.0f}} "
+                    "exception rows"
+                )
             converted = {"id": item.id, "kind": "text", "body": body or " "}
         elif item.kind == "metric" and source:
             value_id = f"{item.id}-value"
@@ -1055,7 +1090,16 @@ def build_workbook(
             converted = {
                 "id": item.id,
                 "kind": "table",
-                "name": item.label or "Data",
+                "name": (
+                    "Top 10 Slowest Stores"
+                    if dataframe_name == "store_speed"
+                    else "Category Detail"
+                    if dataframe_name == "detail"
+                    else "Exception Rows"
+                    if item.page == "exception-explorer"
+                    else item.label
+                    or "Data"
+                ),
                 "source": {"kind": "table", "elementId": source["id"]},
                 "columns": columns,
                 "order": [column["id"] for column in columns],
@@ -1157,7 +1201,11 @@ def build_workbook(
             converted = {
                 "id": item.id,
                 "kind": "button",
-                "text": item.label or "Continue",
+                "text": str(
+                    item.bindings.get("label")
+                    or item.label
+                    or "Continue"
+                ),
                 "appearance": "outline",
                 "actions": [
                     {
@@ -1228,6 +1276,12 @@ def build_workbook(
             )
         ]
         normal_pairs = [pair for pair in page_pairs if pair not in sidebar_pairs]
+        sidebar_pairs.sort(
+            key=lambda pair: getattr(pair[0].provenance, "line", 0)
+        )
+        normal_pairs.sort(
+            key=lambda pair: getattr(pair[0].provenance, "line", 0)
+        )
 
         # Popover/status/expander children move to native overlays.
         overlay_groups: dict[tuple[str, str], list[tuple[Any, dict[str, Any]]]] = {}
@@ -1251,6 +1305,43 @@ def build_workbook(
             else:
                 retained_pairs.append(pair)
         normal_pairs = retained_pairs
+        for (context_kind, context_name), pairs in overlay_groups.items():
+            overlay_id = f"overlay-{page.id}-{slug(context_name)[:24]}"
+            button_id = f"button-{overlay_id}"
+            button_element = {
+                "id": button_id,
+                "kind": "button",
+                "text": context_name or context_kind.title(),
+                "appearance": "outline",
+            }
+            elements.append(button_element)
+            normal_pairs.append((pairs[0][0], button_element))
+            overlays.append(
+                {
+                    "id": overlay_id,
+                    "type": "popover",
+                    "name": context_name or context_kind.title(),
+                    "popover": {"triggerElementId": button_id},
+                }
+            )
+            overlay_row = 1
+            overlay_lines = [
+                '<Page type="grid" gridTemplateColumns="repeat(12, 1fr)" '
+                f'gridTemplateRows="auto" id="{overlay_id}">'
+            ]
+            for _, overlay_element in pairs:
+                span = height(overlay_element["kind"])
+                overlay_lines.append(
+                    f'  <Element elementId="{overlay_element["id"]}" '
+                    f'gridColumn="1 / 13" '
+                    f'gridRow="{overlay_row} / {overlay_row + span}"/>'
+                )
+                overlay_row += span
+            overlay_lines.append("</Page>")
+            overlay_pages.append("\n".join(overlay_lines))
+        normal_pairs.sort(
+            key=lambda pair: getattr(pair[0].provenance, "line", 0)
+        )
 
         page_lines = [
             f'<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" '
@@ -1309,6 +1400,51 @@ def build_workbook(
         index = 0
         while index < len(non_tab_pairs):
             source_item, converted = non_tab_pairs[index]
+            horizontal_context = next(
+                (
+                    item
+                    for item in getattr(source_item, "context", [])
+                    if item.get("kind") == "horizontal"
+                ),
+                None,
+            )
+            if horizontal_context:
+                group = horizontal_context["group"]
+                group_pairs = []
+                while index < len(non_tab_pairs):
+                    candidate = non_tab_pairs[index]
+                    candidate_context = next(
+                        (
+                            item
+                            for item in getattr(candidate[0], "context", [])
+                            if item.get("kind") == "horizontal"
+                        ),
+                        None,
+                    )
+                    if (
+                        not candidate_context
+                        or candidate_context.get("group") != group
+                    ):
+                        break
+                    group_pairs.append(candidate)
+                    index += 1
+                width = 25 - main_start
+                count = len(group_pairs)
+                row_height = max(
+                    height(pair[1]["kind"]) for pair in group_pairs
+                )
+                for item_index, (_, group_element) in enumerate(group_pairs):
+                    start = main_start + round(width * item_index / count)
+                    end = main_start + round(
+                        width * (item_index + 1) / count
+                    )
+                    page_lines.append(
+                        f'  <Element elementId="{group_element["id"]}" '
+                        f'gridColumn="{start} / {end}" '
+                        f'gridRow="{row} / {row + row_height}"/>'
+                    )
+                row += row_height
+                continue
             column_context = next(
                 (
                     item
@@ -1404,45 +1540,6 @@ def build_workbook(
             page_lines.extend(tab_inner)
             page_lines.append("  </TabbedContainer>")
             row += outer_height
-
-        for (context_kind, context_name), pairs in overlay_groups.items():
-            overlay_id = f"overlay-{page.id}-{slug(context_name)[:24]}"
-            button_id = f"button-{overlay_id}"
-            elements.append(
-                {
-                    "id": button_id,
-                    "kind": "button",
-                    "text": context_name or context_kind.title(),
-                    "appearance": "outline",
-                }
-            )
-            page_lines.append(
-                f'  <Element elementId="{button_id}" gridColumn="{main_start} / '
-                f'{min(25, main_start + 8)}" gridRow="{row} / {row + 4}"/>'
-            )
-            row += 4
-            overlays.append(
-                {
-                    "id": overlay_id,
-                    "type": "popover",
-                    "name": context_name or context_kind.title(),
-                    "popover": {"triggerElementId": button_id},
-                }
-            )
-            overlay_row = 1
-            overlay_lines = [
-                '<Page type="grid" gridTemplateColumns="repeat(12, 1fr)" '
-                f'gridTemplateRows="auto" id="{overlay_id}">'
-            ]
-            for _, converted in pairs:
-                span = height(converted["kind"])
-                overlay_lines.append(
-                    f'  <Element elementId="{converted["id"]}" gridColumn="1 / 13" '
-                    f'gridRow="{overlay_row} / {overlay_row + span}"/>'
-                )
-                overlay_row += span
-            overlay_lines.append("</Page>")
-            overlay_pages.append("\n".join(overlay_lines))
 
         page_lines.append("</Page>")
         layout_pages.append("\n".join(page_lines))
