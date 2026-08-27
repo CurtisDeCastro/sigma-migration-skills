@@ -37,6 +37,28 @@ def canonical_column(columns: list[str], requested: str) -> str:
     return requested
 
 
+def infer_control_column(label: str, columns: list[str]) -> str | None:
+    label_parts = [
+        token
+        for token in slug(label).split("-")
+        if token not in {"filter", "filters", "range", "select", "choose"}
+    ]
+    label_tokens = set(label_parts)
+    if not label_tokens:
+        return None
+    exact = [column for column in columns if slug(column) == "-".join(label_parts)]
+    if len(exact) == 1:
+        return exact[0]
+    candidates = [
+        column
+        for column in columns
+        if label_tokens <= set(slug(column).split("-"))
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def format_for(label: str) -> dict[str, str] | None:
     lowered = label.lower()
     if any(
@@ -315,7 +337,20 @@ def build_workbook(
             )
 
     control_elements: list[dict[str, Any]] = []
+    primary_controls: dict[str, str] = {}
     for control in ir.controls:
+        control_key = slug(control.label)
+        control_handle = f"ctl-{control_key[:28]}"
+        if control_key in primary_controls:
+            item = {
+                "id": control.id,
+                "kind": "control",
+                "controlId": primary_controls[control_key],
+                "controlType": "synced",
+            }
+            control_elements.append(item)
+            elements.append(item)
+            continue
         query_id = root_query_id(
             ir,
             control.dataframe,
@@ -323,7 +358,14 @@ def build_workbook(
             dataframe_roots,
         )
         source = source_elements.get(query_id or "")
-        if not source or not control.column:
+        query = query_by_id.get(query_id)
+        source_columns = list(query.columns) if query else []
+        source_column_name = (
+            canonical_column(source_columns, control.column)
+            if control.column
+            else infer_control_column(control.label, source_columns)
+        )
+        if not source or not source_column_name:
             warnings.append(
                 {
                     "code": "control-lineage-unresolved",
@@ -332,16 +374,11 @@ def build_workbook(
                 }
             )
             continue
-        query = query_by_id.get(query_id)
-        source_column_name = canonical_column(
-            list(query.columns) if query else [],
-            control.column,
-        )
         source_column_id = column_id(source["id"], source_column_name)
         item = {
             "id": control.id,
             "kind": "control",
-            "controlId": f"ctl-{slug(control.label)[:28]}",
+            "controlId": control_handle,
             "name": control.label,
             "controlType": control.control_type,
             "filters": [
@@ -372,6 +409,7 @@ def build_workbook(
             item["mode"] = "between"
             if isinstance(control.default, (list, tuple)) and len(control.default) == 2:
                 item["startDate"], item["endDate"] = control.default
+        primary_controls[control_key] = control_handle
         control_elements.append(item)
         elements.append(item)
 

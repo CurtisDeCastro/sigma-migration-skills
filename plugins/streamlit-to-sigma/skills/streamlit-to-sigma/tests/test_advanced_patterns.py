@@ -262,6 +262,86 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0].severity, "restructure")
 
+    def test_external_sql_and_shared_sidebar_filters_expand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "snowflake.yml",
+                """
+                definition_version: 2
+                entities:
+                  app:
+                    type: streamlit
+                    main_file: streamlit_app.py
+                    artifacts:
+                      - streamlit_app.py
+                      - app_pages/one.py
+                      - app_pages/two.py
+                      - lib/data.py
+                      - lib/filters.py
+                      - sql/orders.sql
+                """,
+            )
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import streamlit as st
+                from lib.filters import render_sidebar_filters
+                render_sidebar_filters(raw_df)
+                page = st.navigation([
+                    st.Page("app_pages/one.py", title="One"),
+                    st.Page("app_pages/two.py", title="Two"),
+                ])
+                page.run()
+                """,
+            )
+            self.write(root, "app_pages/one.py", "import streamlit as st\nst.title('One')")
+            self.write(root, "app_pages/two.py", "import streamlit as st\nst.title('Two')")
+            self.write(
+                root,
+                "lib/data.py",
+                """
+                import os
+                def load_orders(_conn):
+                    sql_path = os.path.join(
+                        os.path.dirname(__file__), "..", "sql", "orders.sql"
+                    )
+                    with open(sql_path, "r") as handle:
+                        sql = handle.read()
+                    return _conn.query(sql)
+                """,
+            )
+            self.write(
+                root,
+                "lib/filters.py",
+                """
+                import streamlit as st
+                def render_sidebar_filters(df):
+                    regions = sorted(df["region"].unique().tolist())
+                    with st.sidebar:
+                        with st.form("filters"):
+                            st.date_input("Date Range")
+                            st.multiselect("Region", options=regions)
+                            st.form_submit_button("Apply")
+                """,
+            )
+            self.write(
+                root,
+                "sql/orders.sql",
+                "SELECT ORDER_DATE AS order_date, REGION AS region FROM DB.S.ORDERS",
+            )
+            ir = analyze_project(root)
+            self.assertEqual(len(ir.queries), 1)
+            self.assertFalse(ir.queries[0].dynamic)
+            self.assertEqual(ir.queries[0].columns, ["order_date", "region"])
+            labels = [control.label for control in ir.controls]
+            self.assertEqual(labels.count("Date Range"), 2)
+            self.assertEqual(labels.count("Region"), 2)
+            self.assertEqual(len({control.id for control in ir.controls}), 4)
+            self.assertTrue(all(control.sidebar for control in ir.controls))
+
 
 if __name__ == "__main__":
     unittest.main()

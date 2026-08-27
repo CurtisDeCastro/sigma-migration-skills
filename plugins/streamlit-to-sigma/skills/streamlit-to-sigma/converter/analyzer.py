@@ -272,6 +272,86 @@ def extract_string(
     return unparse(node), True
 
 
+def resolve_project_path(
+    node: ast.AST | None,
+    assignments: dict[str, ast.AST],
+    source_file: Path,
+) -> Path | None:
+    if isinstance(node, ast.Name) and node.id in assignments:
+        return resolve_project_path(assignments[node.id], assignments, source_file)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return Path(node.value)
+    if isinstance(node, ast.Call) and call_path(node.func) == "os.path.dirname":
+        if node.args and isinstance(node.args[0], ast.Name):
+            if node.args[0].id == "__file__":
+                return source_file.parent
+    if isinstance(node, ast.Call) and call_path(node.func) == "os.path.join":
+        parts = [
+            resolve_project_path(argument, assignments, source_file)
+            for argument in node.args
+        ]
+        if parts and all(part is not None for part in parts):
+            result = parts[0]
+            assert result is not None
+            for part in parts[1:]:
+                assert part is not None
+                result /= part
+            return result
+    return None
+
+
+def external_sql_from_function(
+    function: ast.FunctionDef,
+    source_file: Path,
+    root: Path,
+    query_argument: ast.AST,
+    assignments: dict[str, ast.AST],
+) -> str | None:
+    resolved = query_argument
+    if isinstance(resolved, ast.Name):
+        resolved = assignments.get(resolved.id, resolved)
+    if not (
+        isinstance(resolved, ast.Call)
+        and isinstance(resolved.func, ast.Attribute)
+        and resolved.func.attr == "read"
+        and isinstance(resolved.func.value, ast.Name)
+    ):
+        return None
+    handle = resolved.func.value.id
+    for item in ast.walk(function):
+        if not isinstance(item, ast.With):
+            continue
+        for with_item in item.items:
+            if not (
+                isinstance(with_item.optional_vars, ast.Name)
+                and with_item.optional_vars.id == handle
+                and isinstance(with_item.context_expr, ast.Call)
+                and call_path(with_item.context_expr.func) == "open"
+                and with_item.context_expr.args
+            ):
+                continue
+            sql_path = resolve_project_path(
+                with_item.context_expr.args[0],
+                assignments,
+                source_file,
+            )
+            if sql_path is None:
+                return None
+            candidate = (
+                sql_path
+                if sql_path.is_absolute()
+                else source_file.parent / sql_path
+            ).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                return None
+            if candidate.suffix.lower() != ".sql" or not candidate.is_file():
+                return None
+            return candidate.read_text(encoding="utf-8", errors="replace")
+    return None
+
+
 def parse_project_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -342,6 +422,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
         page: Page,
         query_functions: dict[str, Query],
         constants: dict[str, Any],
+        id_namespace: str = "",
     ) -> None:
         self.ir = ir
         self.root = root
@@ -358,13 +439,18 @@ class ModuleAnalyzer(ast.NodeVisitor):
         self.context: list[dict[str, Any]] = []
         self.counter = 0
         self.expanded_configs: set[str] = set()
+        self.id_namespace = id_namespace
 
     def provenance(self, node: ast.AST) -> Provenance:
         return Provenance(self.relative, getattr(node, "lineno", 1))
 
     def new_id(self, kind: str, label: str, node: ast.AST) -> str:
         self.counter += 1
-        return f"{kind}-{slug(label)[:36]}-{getattr(node, 'lineno', 1)}-{self.counter}"
+        namespace = f"-{slug(self.id_namespace)}" if self.id_namespace else ""
+        return (
+            f"{kind}-{slug(label)[:36]}-{getattr(node, 'lineno', 1)}"
+            f"-{self.counter}{namespace}"
+        )
 
     def add_gap(
         self,
@@ -405,6 +491,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
             query = self.query_functions.get(node.func.id)
             if query:
                 return query.id
+            if node.func.id == "apply_filters" and len(self.query_functions) == 1:
+                return next(iter(self.query_functions.values())).id
+        if (
+            len(self.query_functions) == 1
+            and "session_state" in unparse(node)
+            and "_raw_df" in unparse(node)
+        ):
+            return next(iter(self.query_functions.values())).id
         return None
 
     def resolve_assignment(self, node: ast.AST | None) -> ast.AST | None:
@@ -588,6 +682,12 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     }
                 )
                 pushed += 1
+            elif (
+                isinstance(expression, ast.Attribute)
+                and call_path(expression) == "st.sidebar"
+            ):
+                self.context.append({"kind": "sidebar"})
+                pushed += 1
             elif isinstance(expression, ast.Call):
                 leaf = call_path(expression.func).split(".")[-1]
                 if leaf in {"container", "expander", "popover", "status", "form"}:
@@ -622,6 +722,15 @@ class ModuleAnalyzer(ast.NodeVisitor):
             "for",
             node,
         )
+        return None
+
+    def visit_If(self, node: ast.If) -> Any:
+        if isinstance(node.test, ast.Call):
+            self.record_call(node.test)
+        for statement in node.body:
+            self.visit(statement)
+        for statement in node.orelse:
+            self.visit(statement)
         return None
 
     def expand_config(self, name: str, value: Any, node: ast.AST) -> None:
@@ -1035,6 +1144,16 @@ def query_from_function(
             ):
                 continue
         sql, dynamic = extract_string(call.args[0], assignments)
+        if dynamic:
+            external_sql = external_sql_from_function(
+                function,
+                path,
+                root,
+                call.args[0],
+                assignments,
+            )
+            if external_sql is not None:
+                sql, dynamic = external_sql, False
         module = slug(str(path.relative_to(root).with_suffix("")))
         return Query(
             f"query-{module}-{slug(function.name)}",
@@ -1081,11 +1200,13 @@ def analyze_project(source: str | Path) -> ProjectIR:
         except SyntaxError as error:
             raise SyntaxError(f"{path}: {error}") from error
 
+    function_definitions: dict[str, list[tuple[Path, ast.FunctionDef]]] = {}
     query_candidates: dict[str, list[Query]] = {}
     for path, tree in trees.items():
         for function in (
             item for item in tree.body if isinstance(item, ast.FunctionDef)
         ):
+            function_definitions.setdefault(function.name, []).append((path, function))
             query = query_from_function(path, root, function)
             if query:
                 query_candidates.setdefault(function.name, []).append(query)
@@ -1168,6 +1289,44 @@ def analyze_project(source: str | Path) -> ProjectIR:
             ir, root, path, page, query_functions, constants
         )
         analyzer.visit(trees[path])
+
+    called_from_main = {
+        call_path(item.func).split(".")[-1]
+        for item in ast.walk(trees[main_path])
+        if isinstance(item, ast.Call)
+    }
+    for helper_name in sorted(called_from_main):
+        definitions = function_definitions.get(helper_name, [])
+        if len(definitions) != 1:
+            continue
+        helper_path, function = definitions[0]
+        has_streamlit_ui = any(
+            isinstance(item, ast.Call)
+            and call_path(item.func).startswith("st.")
+            for item in ast.walk(function)
+        )
+        if not has_streamlit_ui:
+            continue
+        helper_constants: dict[str, Any] = {}
+        for item in trees[helper_path].body:
+            if isinstance(item, ast.Assign) and len(item.targets) == 1:
+                target = item.targets[0]
+                if isinstance(target, ast.Name):
+                    value = literal(item.value)
+                    if value is not None:
+                        helper_constants[target.id] = value
+        for page in ir.pages:
+            analyzer = ModuleAnalyzer(
+                ir,
+                root,
+                helper_path,
+                page,
+                query_functions,
+                helper_constants,
+                id_namespace=f"{page.id}-{helper_name}",
+            )
+            for statement in function.body:
+                analyzer.visit(statement)
 
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
