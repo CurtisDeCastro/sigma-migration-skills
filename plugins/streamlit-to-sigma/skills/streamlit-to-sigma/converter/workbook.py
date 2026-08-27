@@ -665,10 +665,11 @@ def build_workbook(
                 item.update(
                     {
                         "mode": "=",
-                        "value": control.default,
                         "includeNulls": "when-no-value-is-selected",
                     }
                 )
+                if control.default is not None:
+                    item["value"] = control.default
             elif control.control_type in {"text", "text-area"}:
                 item.update(
                     {

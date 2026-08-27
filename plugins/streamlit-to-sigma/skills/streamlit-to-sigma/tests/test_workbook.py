@@ -479,6 +479,41 @@ class WorkbookTest(unittest.TestCase):
                 ],
             )
 
+    def test_standalone_form_controls_do_not_require_column_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    name = st.text_input("Scenario name")
+                    adjustment = st.number_input("Adjustment", value=2)
+                    approved = st.checkbox("Approved")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = build_workbook(
+                analyze_project(root),
+                "connection-1",
+                "folder-1",
+            )
+            controls = [
+                item
+                for item in workbook_elements(result["workbook"])
+                if item["kind"] == "control"
+            ]
+            self.assertEqual(
+                {item["controlType"] for item in controls},
+                {"text", "number", "checkbox"},
+            )
+            self.assertFalse(
+                any(
+                    warning["code"] == "control-lineage-unresolved"
+                    for warning in result["warnings"]
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
