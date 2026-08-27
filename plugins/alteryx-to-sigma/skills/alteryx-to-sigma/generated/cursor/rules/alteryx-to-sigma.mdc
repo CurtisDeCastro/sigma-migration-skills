@@ -137,8 +137,8 @@ workbook. If the user wants charts on the posted DM, hand off to
 ## Phase 5 — Layout (C7) — N/A
 
 No workbook is built, so there is no `put-layout.rb` / `layout.xml` and no
-last write of layout. Visual PNG QA (`scripts/sigma-export-png.py`) is also
-N/A; see `refs/layout-visual-qa.md`.
+last write of layout. Visual PNG QA is also N/A; see
+`refs/layout-visual-qa.md`.
 
 ## Phase 6 — Verify parity (C8)  ← HARD GATE, never skip
 
@@ -151,9 +151,10 @@ same warehouse is reachable (query the posted DM's metrics against the
 Input Data tables). There is no Alteryx engine API to query for a
 three-way check. Never skip the column-type gate; never fake GREEN.
 
-`assert-phase6-ran.rb` is vendored for family consistency. Its workbook
-gates (layout, tiles, visual PNG) are N/A here — do not point them at a
-workbook that was never built.
+`assert-phase6-ran.rb` is **not** vendored — Alteryx is data-model-only,
+so the workbook completion gate (layout, tiles, visual PNG) has nothing
+to point at. The C5 column-type guard plus `parity-final.json` is the
+hard gate.
 
 ## Security: RLS / CLS (C9)
 
