@@ -166,6 +166,8 @@ Current mechanical translations include:
 - `st.tabs` → tabbed container
 - popover/status/expander contexts → native popover overlays
 - common sum/mean/distinct-count/arithmetic/conditional formulas
+- static `st.link_button`, `st.page_link`, and button-wrapped
+  `st.switch_page` → public `open-url` / `navigate` actions
 
 Do not fake unresolved bindings. Omit the affected output and add a warning/gap.
 
@@ -292,16 +294,18 @@ public-spec authorability. Conversely, an OpenAPI discriminator is not enough:
 the chosen element/connection host must pass `/verify`, real POST/PUT, readback,
 and click testing.
 
-For deferred forms, prefer pending controls plus separate applied controls and an
-Apply action. For durable state, prefer warehouse-backed tables/views and
-procedures. If procedure actions are UI-only in the target workspace, generate
-the warehouse contract and a `manual-ui-finish` handoff rather than emitting a
-rejected or silently dropped action shape.
+For bounded forms, prefer a native form or pending controls plus separate applied
+controls. For durable state, prefer input-table row actions or warehouse-backed
+tables/views/procedures. Require a browser-triggered sandbox write before
+declaring `insert-rows`, `update-rows`, or `delete-rows` complete. If procedure
+actions are UI-only in the target workspace, generate the warehouse contract and
+a `manual-ui-finish` handoff rather than emitting a rejected or silently dropped
+action shape.
 
 ## Known boundaries
 
-- Deferred `st.form`/Load-button semantics require the pending/applied-control
-  redesign until mechanically lowered
+- Arbitrary `st.form` callbacks beyond native form actions or staged/applied
+  controls require an explicit redesign
 - Arbitrary callbacks and Python execution require capability-specific redesign
 - General session-state state machines require an explicit state architecture
 - Data-editor/writeback requires input-table or warehouse-backed design

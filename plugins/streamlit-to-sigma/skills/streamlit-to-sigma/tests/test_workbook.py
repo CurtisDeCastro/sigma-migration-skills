@@ -417,6 +417,68 @@ class WorkbookTest(unittest.TestCase):
                 rf'<Page[^>]+id="data">[\s\S]*elementId="{target["id"]}"',
             )
 
+    def test_link_and_switch_page_buttons_use_public_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pages").mkdir()
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    page = st.navigation([
+                        st.Page("pages/overview.py", title="Overview"),
+                        st.Page("pages/detail.py", title="Detail"),
+                    ])
+                    page.run()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / "pages" / "overview.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    st.link_button("Documentation", "https://example.com/docs")
+                    if st.button("Open detail"):
+                        st.switch_page("pages/detail.py")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / "pages" / "detail.py").write_text(
+                "import streamlit as st\nst.title('Detail')\n",
+                encoding="utf-8",
+            )
+            result = build_workbook(
+                analyze_project(root),
+                "connection-1",
+                "folder-1",
+            )
+            buttons = {
+                item["text"]: item
+                for item in workbook_elements(result["workbook"])
+                if item["kind"] == "button"
+            }
+            self.assertEqual(
+                buttons["Documentation"]["actions"][0]["effects"],
+                [
+                    {
+                        "effect": "open-url",
+                        "url": "https://example.com/docs",
+                        "openTarget": "_blank",
+                    }
+                ],
+            )
+            self.assertEqual(
+                buttons["Open detail"]["actions"][0]["effects"],
+                [
+                    {
+                        "effect": "navigate",
+                        "target": {"type": "page", "page": "detail"},
+                    }
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

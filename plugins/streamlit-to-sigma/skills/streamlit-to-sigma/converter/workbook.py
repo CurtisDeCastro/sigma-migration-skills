@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import keyword, literal, referenced_names, slug
-from .api_capabilities import download_element_effect
+from .api_capabilities import (
+    download_element_effect,
+    navigate_effect,
+    open_url_effect,
+)
 from .model import Element as IRElement
 from .model import ProjectIR
 
@@ -729,6 +733,22 @@ def build_workbook(
         ):
             suppressed_titles.add(candidate.id)
 
+    def page_id_for_target(target: Any) -> str | None:
+        if not isinstance(target, str):
+            return None
+        normalized = target.replace("\\", "/").removeprefix("./")
+        target_stem = Path(normalized).stem.casefold()
+        for page in ir.pages:
+            page_file = page.file.replace("\\", "/").removeprefix("./")
+            if (
+                normalized.casefold() == page_file.casefold()
+                or target_stem == Path(page_file).stem.casefold()
+                or slug(target) == page.id
+                or slug(target) == slug(page.name)
+            ):
+                return page.id
+        return None
+
     for item in ir.elements:
         query_id = root_query_id(
             ir, item.dataframe, query_by_id, dataframe_roots
@@ -1286,20 +1306,32 @@ def build_workbook(
                     if export_element
                     else []
                 )
-            else:
+            elif item.bindings.get("url"):
+                button_effects = [
+                    open_url_effect(str(item.bindings["url"]))
+                ]
+            elif item.bindings.get("navigate_page"):
+                target_page_id = page_id_for_target(
+                    item.bindings["navigate_page"]
+                )
                 button_effects = (
-                    [
-                        {
-                            "effect": "refresh-element",
-                            "target": {
-                                "type": "element",
-                                "element": source["id"],
-                            },
-                        }
-                    ]
-                    if source
+                    [navigate_effect(page_id=target_page_id)]
+                    if target_page_id
                     else []
                 )
+                if not target_page_id:
+                    warnings.append(
+                        {
+                            "code": "navigation-target-unresolved",
+                            "element": button_text,
+                            "message": (
+                                "Button navigation was omitted because the "
+                                "target page was not discovered."
+                            ),
+                        }
+                    )
+            else:
+                button_effects = []
             converted = {
                 "id": item.id,
                 "kind": "button",
@@ -1312,7 +1344,7 @@ def build_workbook(
                 ),
                 "actions": [
                     {
-                        "id": f"{item.id}-refresh",
+                        "id": f"{item.id}-action",
                         "trigger": "on-click",
                         "effects": button_effects,
                     }

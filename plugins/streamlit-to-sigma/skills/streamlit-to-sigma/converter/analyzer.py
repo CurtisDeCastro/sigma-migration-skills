@@ -226,8 +226,15 @@ def infer_sql_columns(sql: str) -> list[str]:
     match = re.search(r"\bSELECT\b(.*?)\bFROM\b", sql, re.I | re.S)
     if not match:
         return []
+    select_list = re.sub(
+        r"^\s*(?:DISTINCT|ALL)\s+",
+        "",
+        match.group(1),
+        count=1,
+        flags=re.I,
+    )
     columns: list[str] = []
-    for expression in split_select_list(match.group(1)):
+    for expression in split_select_list(select_list):
         expression = re.sub(r"--.*?$", "", expression, flags=re.M).strip()
         if expression == "*" or expression.endswith(".*"):
             continue
@@ -756,8 +763,26 @@ class ModuleAnalyzer(ast.NodeVisitor):
         return None
 
     def visit_If(self, node: ast.If) -> Any:
+        trigger_element: Element | None = None
+        switch_targets = [
+            call
+            for statement in node.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call)
+            and call_path(call.func).split(".")[-1] == "switch_page"
+        ]
         if isinstance(node.test, ast.Call):
             self.record_call(node.test)
+            if (
+                call_path(node.test.func).split(".")[-1] == "button"
+                and self.ir.elements
+                and self.ir.elements[-1].kind == "button"
+            ):
+                trigger_element = self.ir.elements[-1]
+                if switch_targets and switch_targets[0].args:
+                    target = literal(switch_targets[0].args[0])
+                    if isinstance(target, str):
+                        trigger_element.bindings["navigate_page"] = target
         self.context.append(
             {
                 "kind": "conditional",
@@ -778,6 +803,19 @@ class ModuleAnalyzer(ast.NodeVisitor):
         for statement in node.orelse:
             self.visit(statement)
         self.context.pop()
+        if trigger_element and switch_targets:
+            target_lines = {
+                getattr(target, "lineno", -1) for target in switch_targets
+            }
+            for gap in self.ir.gaps:
+                if (
+                    gap.code == "streamlit-switch_page"
+                    and gap.provenance.line in target_lines
+                ):
+                    gap.resolved = True
+                    gap.resolution = (
+                        "Mapped the triggering button to a public navigate action."
+                    )
         return None
 
     def expand_config(self, name: str, value: Any, node: ast.AST) -> None:
@@ -1111,13 +1149,44 @@ class ModuleAnalyzer(ast.NodeVisitor):
             "button",
             "form_submit_button",
             "download_button",
+            "link_button",
+            "page_link",
         }:
-            label = display_text(args[0] if args else None) or leaf.title()
+            if leaf == "page_link":
+                label_node = keyword(call, "label")
+                label = display_text(label_node) or display_text(
+                    args[0] if args else None
+                )
+            else:
+                label = display_text(args[0] if args else None) or leaf.title()
             kind = (
                 "button"
-                if leaf in {"form_submit_button", "download_button"}
+                if leaf
+                in {
+                    "form_submit_button",
+                    "download_button",
+                    "link_button",
+                    "page_link",
+                }
                 else leaf
             )
+            bindings = {
+                item.arg: literal(item.value, unparse(item.value))
+                for item in call.keywords
+                if item.arg
+            }
+            if leaf == "form_submit_button":
+                bindings["form_submit"] = True
+            elif leaf == "link_button" and len(args) > 1:
+                bindings["url"] = literal(args[1], unparse(args[1]))
+            elif leaf == "page_link" and args:
+                destination = literal(args[0], unparse(args[0]))
+                if isinstance(destination, str) and re.match(
+                    r"^https?://", destination
+                ):
+                    bindings["url"] = destination
+                else:
+                    bindings["navigate_page"] = destination
             self.ir.elements.append(
                 Element(
                     self.new_id(kind, label, call),
@@ -1125,11 +1194,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     label,
                     self.page.id,
                     None,
-                    {
-                        item.arg: literal(item.value, unparse(item.value))
-                        for item in call.keywords
-                        if item.arg
-                    },
+                    bindings,
                     None,
                     call_context,
                     prov,

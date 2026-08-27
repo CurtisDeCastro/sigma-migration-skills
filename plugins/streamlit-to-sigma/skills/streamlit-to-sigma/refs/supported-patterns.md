@@ -21,9 +21,12 @@ converted”; unresolved lineage always becomes a gap.
 | navigation/pages | page metadata plus vertical navigation element | direct |
 | popover/expander/status | popover overlay | mechanical |
 | button | button | direct visually; classify action host as spec-native or manual-ui-finish |
+| link button / page link | button + `open-url` / `navigate` | direct for static destinations |
+| button + `st.switch_page` | button + `navigate` | direct when the target page is discovered |
 | download button over displayed data | browser export action | direct when target element and format resolve |
-| data editor | input table/writeback | warehouse-backed/redesign until explicitly designed |
-| chat input/message and AI client calls | existing workbook agent | workbook-agent-candidate |
+| static form fields | native form | capability-gated; submit/reset effects must be bounded |
+| data editor | input table + row actions | warehouse-backed when schema, connection, keys, and writes are proven |
+| chat input/message and AI client calls | workbook agent + chat | workbook-agent-candidate |
 
 ## Controls
 
@@ -80,7 +83,7 @@ or `CHART_TABS` are expanded. Runtime loops over query results produce a
 |---|---|
 | `dynamic-sql` | SQL contains runtime interpolation |
 | `session-state` | cross-rerun state machine |
-| `deferred-form-state` | Apply/Load semantics differ from live controls |
+| `deferred-form-state` | use a native form or staged/applied controls; arbitrary callbacks remain redesign |
 | `custom-component` | native mapping or plugin decision required |
 | `data-editor` | writeback architecture required |
 | `unsupported-dataframe-operation` | lineage outside conservative subset |
@@ -103,6 +106,11 @@ do not invent one.
 Current selected-row action values use `columnId`, `minColumnId`, and
 `maxColumnId`; Run Python uses `codeElementId`. Use the live-verified builders in
 `converter/api_capabilities.py`.
+
+Those builders also cover native forms, input-table row writes, current-workbook
+navigation, external links, tab selection, and chat reset. Treat writeback as
+complete only after an authenticated click changes the intended sandbox row and
+readback confirms the result.
 
 A literal sort selector over known table columns maps to `custom-sort` effects.
 Use `elementId` for the target and a table-level sort object:

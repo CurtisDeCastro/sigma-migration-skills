@@ -1,6 +1,6 @@
 # Live workbook API capabilities
 
-Last probed: **2026-08-26** against the current compiled public OpenAPI and a
+Last probed: **2026-08-27** against the current compiled public OpenAPI and a
 live Sigma organization. Treat the OpenAPI as the shape contract and the live
 probe as the entitlement/host contract.
 
@@ -81,6 +81,47 @@ For a Streamlit sort selector whose direction varies by option, attach an
 `on-change` action to the control and branch to one `custom-sort` effect per
 option with `if-else`.
 
+## Native forms and input-table writes
+
+The public workbook schema includes `kind: form`. Static fields support text,
+number, date, checkbox, choice, and file-upload inputs, validation, defaults,
+footer CTAs, and actions. `set-form-values` targets a `formElementId`;
+submitted values use `{type: form-field, fieldId: ...}`. `reset-form` resets
+the host form.
+
+Live `/verify` accepted a native form plus `set-form-values`.
+
+Input-table actions are public:
+
+- `insert-rows` — non-linked input tables only
+- `update-rows` — linked or non-linked input tables
+- `delete-rows` — non-linked input tables only
+
+All three require target input-table column IDs, not display names. Update and
+delete row selectors can use a primary-key map, a target-table formula, or a
+column match. A combined live `/verify` probe passed. Browser-triggered
+warehouse mutation remains a hard gate; the automated browser did not have a
+Sigma UI session, so do not call writeback complete from verification alone.
+
+## Navigation, links, tabs, selection, and chat
+
+Live `/verify` accepted:
+
+- `navigate` to a current-workbook page or element
+- `open-url` with `_self`, `_blank`, or `_parent`
+- `select-tab` by zero-based index or next/previous direction
+- `clear-chat-element-messages`
+
+Use these for `st.switch_page`, `st.page_link`, `st.link_button`, wizard steps,
+and explicit chat reset. Tables/charts also expose `on-select`; selected values
+must use `columnId` or `minColumnId`/`maxColumnId`.
+
+A popover trigger button cannot also have actions. Live `/verify` rejected that
+host combination; use the overlay's `triggerElementId` metadata instead.
+
+`call-api` requires an existing governed API connector. The probed organization
+had none, so no runtime claim is made.
+
 ## Python and `code-output`
 
 The OpenAPI now exposes a downstream source for one named `sigma.output()`:
@@ -114,9 +155,9 @@ Before lowering Python:
 5. Run the Python element, query the named output, and GET the workbook spec
    before marking the path supported.
 
-## Workbook agents (Beta)
+## Workbook agents and chat
 
-The API can now:
+Dedicated endpoints can:
 
 - list agents across the organization (`GET /v2/workbookAgents`);
 - list agents in one workbook;
@@ -125,9 +166,11 @@ The API can now:
 Live list and run calls returned HTTP 200. The run honored `maxTurns`,
 `maxOutputTokens`, metadata, and a text response format.
 
-The API does **not** create workbook agents. Streamlit AI/chat apps therefore
-become `workbook-agent-candidate`: discover/reuse and validate an existing agent,
-or emit an explicit redesign/manual setup step.
+Workbook code representation can also author `document.agents` and `kind: chat`
+elements. A live workbook round-tripped both. Dedicated endpoints still do not
+create agents independently of a workbook spec. Streamlit AI/chat apps therefore
+remain capability-gated: create/reuse the workbook agent, publish, and validate
+its data sources, tools, and responses before claiming parity.
 
 ## Stored procedures remain UI-finish
 

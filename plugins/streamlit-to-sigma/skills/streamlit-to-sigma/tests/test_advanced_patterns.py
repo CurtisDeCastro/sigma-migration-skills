@@ -91,6 +91,21 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertIn("session-state", codes)
             self.assertIn("streamlit-switch_page", codes)
             self.assertIn("custom-component", codes)
+            switch_gap = next(
+                gap
+                for gap in ir.gaps
+                if gap.code == "streamlit-switch_page"
+            )
+            self.assertTrue(switch_gap.resolved)
+            detail_button = next(
+                element
+                for element in ir.elements
+                if element.kind == "button" and element.label == "Detail"
+            )
+            self.assertEqual(
+                detail_button.bindings["navigate_page"],
+                "app_pages/detail.py",
+            )
 
     def test_config_driven_kpis_and_charts_expand(self):
         with tempfile.TemporaryDirectory() as tmp:

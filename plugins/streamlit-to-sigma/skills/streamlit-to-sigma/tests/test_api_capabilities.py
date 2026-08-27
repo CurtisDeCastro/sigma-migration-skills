@@ -7,11 +7,20 @@ SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL))
 
 from converter import (  # noqa: E402
+    clear_chat_effect,
     code_output_source,
+    delete_rows_effect,
     download_element_effect,
+    form_field_value,
+    insert_rows_effect,
+    native_form_element,
+    navigate_effect,
+    open_url_effect,
     run_python_effect,
+    select_tab_effect,
     selected_column_range_value,
     selected_column_value,
+    update_rows_effect,
 )
 
 
@@ -75,6 +84,86 @@ class ApiCapabilitiesTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             download_element_effect("")
+
+    def test_native_form_and_writeback_shapes(self):
+        field_value = form_field_value("scenario-name")
+        form = native_form_element(
+            "scenario-form",
+            [
+                {
+                    "fieldId": "scenario-name",
+                    "type": "short-text",
+                    "label": "Scenario",
+                }
+            ],
+            primary_label="Save",
+        )
+        self.assertEqual(field_value, {
+            "type": "form-field",
+            "fieldId": "scenario-name",
+        })
+        self.assertEqual(form["kind"], "form")
+        self.assertEqual(form["footer"]["primary"]["label"], "Save")
+        self.assertEqual(
+            insert_rows_effect("scenario-input", {"name": field_value}),
+            {
+                "effect": "insert-rows",
+                "tableElementId": "scenario-input",
+                "values": {"name": field_value},
+            },
+        )
+        selector = {"type": "formula", "formula": "False"}
+        self.assertEqual(
+            update_rows_effect(
+                "scenario-input",
+                selector,
+                {"name": field_value},
+            )["whichRows"],
+            selector,
+        )
+        self.assertEqual(
+            delete_rows_effect("scenario-input", selector),
+            {
+                "effect": "delete-rows",
+                "tableElementId": "scenario-input",
+                "whichRows": selector,
+            },
+        )
+
+    def test_navigation_tab_url_and_chat_shapes(self):
+        self.assertEqual(
+            navigate_effect(page_id="details"),
+            {
+                "effect": "navigate",
+                "target": {"type": "page", "page": "details"},
+            },
+        )
+        self.assertEqual(
+            open_url_effect("https://example.com"),
+            {
+                "effect": "open-url",
+                "url": "https://example.com",
+                "openTarget": "_blank",
+            },
+        )
+        self.assertEqual(
+            select_tab_effect("tabs", direction="next"),
+            {
+                "effect": "select-tab",
+                "tabbedContainerElementId": "tabs",
+                "selectedTab": {
+                    "type": "direction",
+                    "direction": "next",
+                },
+            },
+        )
+        self.assertEqual(
+            clear_chat_effect("chat"),
+            {
+                "effect": "clear-chat-element-messages",
+                "chatElementId": "chat",
+            },
+        )
 
 
 if __name__ == "__main__":

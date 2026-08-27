@@ -8,6 +8,7 @@ SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL))
 
 from converter import analyze_project  # noqa: E402
+from converter.analyzer import infer_sql_columns  # noqa: E402
 
 
 class AnalyzerTest(unittest.TestCase):
@@ -54,6 +55,14 @@ class AnalyzerTest(unittest.TestCase):
         body = json.dumps(self.ir.to_dict())
         self.assertIn("streamlit_app.py", body)
         self.assertTrue(all(item.provenance.line > 0 for item in self.ir.elements))
+
+    def test_distinct_select_columns_are_inferred(self):
+        self.assertEqual(
+            infer_sql_columns(
+                "SELECT DISTINCT REGION, CATEGORY AS product_category FROM sales"
+            ),
+            ["REGION", "product_category"],
+        )
 
 
 if __name__ == "__main__":
