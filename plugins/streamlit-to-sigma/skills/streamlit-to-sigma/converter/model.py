@@ -47,6 +47,7 @@ class Control:
     sidebar: bool
     page: str
     provenance: Provenance
+    context: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

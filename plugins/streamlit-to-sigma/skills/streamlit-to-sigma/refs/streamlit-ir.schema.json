@@ -233,6 +233,12 @@
         "page": {
           "type": "string"
         },
+        "context": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
         "provenance": {
           "$ref": "#/$defs/provenance"
         }

@@ -32,8 +32,10 @@ with repeatable `--param ControlId=value`.
 - Same visible element count and kinds
 - Correct page/tab/overlay ownership
 - KPI labels, values, deltas, and formats
-- Chart axes, aggregation, sorting, stacking, and colors
+- Chart axis titles/labels, aggregation, sorting, stacking, and colors
 - Control type, default, scope, and reach
+- Weighted control/chart columns preserve the source proportions
+- Form boundaries, Apply/Reset placement, and button alignment match the source
 - Column widths and row heights
 - No dead space caused by fixed tab height
 - Detail tables show enough rows

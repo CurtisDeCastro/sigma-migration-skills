@@ -344,6 +344,15 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertTrue(
                 all(len(control.id) <= 52 for control in ir.controls)
             )
+            self.assertTrue(
+                all(
+                    any(
+                        context.get("kind") == "form"
+                        for context in control.context
+                    )
+                    for control in ir.controls
+                )
+            )
 
 
 if __name__ == "__main__":

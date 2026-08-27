@@ -16,6 +16,7 @@ converted”; unresolved lineage always becomes a gap.
 | divider | divider | direct |
 | progress | progress | direct for resolvable/static value |
 | columns | proportional grid | direct |
+| horizontal container | equal-width element row | direct |
 | tabs | tabbed container | direct |
 | navigation/pages | page metadata plus vertical navigation element | direct |
 | popover/expander/status | popover overlay | mechanical |

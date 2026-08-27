@@ -138,6 +138,17 @@ class WorkbookTest(unittest.TestCase):
             )
             self.assertIn(f"[{source_name}/order_date]", formulas)
             self.assertIn(f"Sum([{source_name}/net_revenue])", formulas)
+            chart = next(
+                item for item in elements if item["kind"] == "line-chart"
+            )
+            self.assertEqual(
+                chart["xAxis"]["format"]["title"]["text"],
+                "Order Date",
+            )
+            self.assertEqual(
+                chart["yAxis"]["format"]["title"]["text"],
+                "Net Revenue",
+            )
 
     def test_multiple_elements_in_one_streamlit_column_stack(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,7 +163,7 @@ class WorkbookTest(unittest.TestCase):
                             "SELECT region, revenue FROM db.s.orders"
                         )
                     df = load_data()
-                    left, right = st.columns(2)
+                    left, right = st.columns([2, 1])
                     with left:
                         st.caption("Left note")
                         st.bar_chart(df, x="region", y="revenue")
@@ -191,6 +202,35 @@ class WorkbookTest(unittest.TestCase):
             _, title_end = row_range(left_text)
             chart_start, _ = row_range(left_chart)
             self.assertLessEqual(title_end, chart_start)
+            left_placement = re.search(
+                rf'elementId="{re.escape(left_chart)}"[^>]+'
+                rf'gridColumn="(\d+) / (\d+)"',
+                layout,
+            )
+            right_chart = next(
+                item.id
+                for item in ir.elements
+                if item.kind == "bar-chart"
+                and any(
+                    context.get("kind") == "column"
+                    and context.get("index") == 1
+                    for context in item.context
+                )
+            )
+            right_placement = re.search(
+                rf'elementId="{re.escape(right_chart)}"[^>]+'
+                rf'gridColumn="(\d+) / (\d+)"',
+                layout,
+            )
+            self.assertIsNotNone(left_placement)
+            self.assertIsNotNone(right_placement)
+            left_width = int(left_placement.group(2)) - int(
+                left_placement.group(1)
+            )
+            right_width = int(right_placement.group(2)) - int(
+                right_placement.group(1)
+            )
+            self.assertGreater(left_width, right_width)
 
     def test_horizontal_kpis_and_conditional_empty_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,6 +405,13 @@ class WorkbookTest(unittest.TestCase):
                 [option["label"] for option in navigation[0]["options"]],
                 ["One", "Two"],
             )
+            filter_cards = [
+                item
+                for item in elements
+                if item["kind"] == "container"
+                and item["id"].startswith("filter-card-")
+            ]
+            self.assertEqual(len(filter_cards), 2)
             self.assertRegex(
                 document(result["workbook"])["layout"],
                 rf'<Page[^>]+id="data">[\s\S]*elementId="{target["id"]}"',

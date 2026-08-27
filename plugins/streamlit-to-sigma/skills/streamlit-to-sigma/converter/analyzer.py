@@ -434,7 +434,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
         self.assignments: dict[str, ast.AST] = {}
         self.dataframe_roots: dict[str, str] = {}
         self.dataframe_ops: dict[str, list[str]] = {}
-        self.columns: dict[str, tuple[str, int, int]] = {}
+        self.columns: dict[str, tuple[str, int, int, list[float]]] = {}
         self.tabs: dict[str, str] = {}
         self.context: list[dict[str, Any]] = []
         self.counter = 0
@@ -543,8 +543,23 @@ class ModuleAnalyzer(ast.NodeVisitor):
             leaf = path.split(".")[-1]
             if leaf == "columns" and tuple_targets:
                 count = len(tuple_targets)
+                requested = literal(
+                    node.value.args[0] if node.value.args else None
+                )
+                weights = (
+                    [float(value) for value in requested]
+                    if isinstance(requested, (list, tuple))
+                    and len(requested) == count
+                    and all(isinstance(value, (int, float)) for value in requested)
+                    else [1.0] * count
+                )
                 for index, name in enumerate(tuple_targets):
-                    self.columns[name] = (f"columns-{node.lineno}", index, count)
+                    self.columns[name] = (
+                        f"columns-{node.lineno}",
+                        index,
+                        count,
+                        weights,
+                    )
                 return None
             if leaf == "tabs" and tuple_targets:
                 labels = literal(node.value.args[0] if node.value.args else None, [])
@@ -675,13 +690,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
                 self.context.append({"kind": "tab", "name": self.tabs[expression.id]})
                 pushed += 1
             elif isinstance(expression, ast.Name) and expression.id in self.columns:
-                group, index, count = self.columns[expression.id]
+                group, index, count, weights = self.columns[expression.id]
                 self.context.append(
                     {
                         "kind": "column",
                         "group": group,
                         "index": index,
                         "count": count,
+                        "weights": weights,
                     }
                 )
                 pushed += 1
@@ -829,13 +845,14 @@ class ModuleAnalyzer(ast.NodeVisitor):
         call_context = self.context.copy()
         root_name = path.split(".", 1)[0]
         if root_name in self.columns:
-            group, index, count = self.columns[root_name]
+            group, index, count, weights = self.columns[root_name]
             call_context.append(
                 {
                     "kind": "column",
                     "group": group,
                     "index": index,
                     "count": count,
+                    "weights": weights,
                 }
             )
         if path.startswith("st.sidebar."):
@@ -885,6 +902,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     ),
                     self.page.id,
                     prov,
+                    call_context,
                 )
             )
             return
@@ -907,6 +925,7 @@ class ModuleAnalyzer(ast.NodeVisitor):
                     False,
                     self.page.id,
                     prov,
+                    call_context,
                 )
             )
             return

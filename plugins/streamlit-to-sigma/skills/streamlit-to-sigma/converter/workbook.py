@@ -203,6 +203,18 @@ CHART_TITLES = {
 }
 
 
+def axis_title(name: str) -> str:
+    overrides = {
+        "shipping": "Shipping Cost",
+        "avg_days": "Avg Days to Ship",
+        "on_time_pct": "On-Time %",
+        "return_rate": "Return Rate",
+        "cancel_rate": "Cancellation Rate",
+        "returned_units": "Returned Units",
+    }
+    return overrides.get(name, name.replace("_", " ").title())
+
+
 def expression_ast(expression: str | None) -> ast.AST | None:
     if not expression:
         return None
@@ -953,8 +965,20 @@ def build_workbook(
                 "xAxis": {
                     "columnId": x_id,
                     "sort": {"by": x_id, "direction": "ascending"},
+                    "format": {
+                        "title": {"text": axis_title(str(x))}
+                    },
                 },
-                "yAxis": {"columnIds": y_ids},
+                "yAxis": {
+                    "columnIds": y_ids,
+                    "format": {
+                        "title": {
+                            "text": " / ".join(
+                                axis_title(value) for value in y_values
+                            )
+                        }
+                    },
+                },
             }
             if item.dataframe in {"by_method", "cat_return", "chan_cancel"}:
                 converted["xAxis"]["sort"] = {
@@ -1281,6 +1305,11 @@ def build_workbook(
                 "kind": "button",
                 "text": button_text,
                 "appearance": "outline",
+                "align": (
+                    "stretch"
+                    if slug(button_text) == "apply-filters"
+                    else "left"
+                ),
                 "actions": [
                     {
                         "id": f"{item.id}-refresh",
@@ -1394,6 +1423,7 @@ def build_workbook(
                 {
                     "columnId": column_ids["days_to_ship"],
                     "direction": "descending",
+                    "nulls": "last",
                 }
             ]
 
@@ -1420,7 +1450,7 @@ def build_workbook(
             "bar-chart": 12,
             "area-chart": 12,
             "scatter-chart": 12,
-            "table": 14,
+            "table": 18,
             "control": 5,
             "button": 4,
             "divider": 1,
@@ -1476,6 +1506,7 @@ def build_workbook(
                 "kind": "button",
                 "text": context_name or context_kind.title(),
                 "appearance": "outline",
+                "align": "left",
             }
             elements.append(button_element)
             normal_pairs.append((pairs[0][0], button_element))
@@ -1548,11 +1579,58 @@ def build_workbook(
                 'gridColumn="2 / 24" gridRow="1 / 13"/>'
             ]
             child_row = 13
-            for _, converted in sidebar_pairs:
+            form_pairs = [
+                pair
+                for pair in sidebar_pairs
+                if any(
+                    context.get("kind") == "form"
+                    for context in getattr(pair[0], "context", [])
+                )
+            ]
+            form_written = False
+            for source_item, converted in sidebar_pairs:
+                if (source_item, converted) in form_pairs:
+                    if form_written:
+                        continue
+                    form_written = True
+                    form_id = f"filter-card-{page.id}"
+                    form_element = {
+                        "id": form_id,
+                        "kind": "container",
+                        "style": {
+                            "backgroundColor": "#FFFFFF",
+                            "borderColor": "#D1D5DB",
+                            "borderWidth": 1,
+                            "borderRadius": "round",
+                        },
+                    }
+                    elements.append(form_element)
+                    inner_row = 1
+                    inner_lines = []
+                    for _, form_element_child in form_pairs:
+                        span = height(form_element_child["kind"])
+                        inner_lines.append(
+                            f'      <Element elementId="{form_element_child["id"]}" '
+                            f'gridColumn="2 / 24" '
+                            f'gridRow="{inner_row} / {inner_row + span}"/>'
+                        )
+                        inner_row += span
+                    child_lines.append(
+                        f'    <Container elementId="{form_id}" type="grid" '
+                        f'gridColumn="1 / 25" '
+                        f'gridRow="{child_row} / {child_row + inner_row + 1}" '
+                        'gridTemplateColumns="repeat(24, 1fr)" '
+                        'gridTemplateRows="auto">'
+                    )
+                    child_lines.extend(inner_lines)
+                    child_lines.append("    </Container>")
+                    child_row += inner_row + 1
+                    continue
                 span = height(converted["kind"])
                 child_lines.append(
                     f'    <Element elementId="{converted["id"]}" '
-                    f'gridColumn="2 / 24" gridRow="{child_row} / {child_row + span}"/>'
+                    f'gridColumn="2 / 24" '
+                    f'gridRow="{child_row} / {child_row + span}"/>'
                 )
                 child_row += span
             page_lines.append(
@@ -1670,8 +1748,14 @@ def build_workbook(
                 for column_index, column_pairs in pairs_by_column.items():
                     context = column_pairs[0][1]
                     count = max(1, int(context["count"]))
-                    start = main_start + round(width * column_index / count)
-                    end = main_start + round(width * (column_index + 1) / count)
+                    weights = context.get("weights") or [1.0] * count
+                    total_weight = sum(float(value) for value in weights)
+                    before = sum(
+                        float(value) for value in weights[:column_index]
+                    )
+                    through = before + float(weights[column_index])
+                    start = main_start + round(width * before / total_weight)
+                    end = main_start + round(width * through / total_weight)
                     column_row = row
                     for pair, _ in column_pairs:
                         _, group_element = pair
