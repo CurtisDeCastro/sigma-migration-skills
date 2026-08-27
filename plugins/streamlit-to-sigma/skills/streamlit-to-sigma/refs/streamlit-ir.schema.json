@@ -327,6 +327,15 @@
         },
         "affected": {
           "type": "array"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "resolution": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

@@ -60,6 +60,8 @@ Each project receives:
   `warehouse-backed`, `python-element-candidate`,
   `workbook-agent-candidate`, `manual-ui-finish`, `plugin`, `redesign`, and/or
   `blocked`
+- `resolvedPatterns` and `unresolvedGapCount` — preserve source findings while
+  keeping successfully lowered patterns out of readiness/complexity penalties
 
 The score combines pages, queries, controls, elements, and weighted gaps. Use it
 to sequence migrations, not as a calendar estimate. The Markdown readout carries

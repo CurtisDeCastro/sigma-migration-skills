@@ -79,6 +79,8 @@ class Gap:
     feature: str
     provenance: Provenance
     affected: list[str] = field(default_factory=list)
+    resolved: bool = False
+    resolution: str | None = None
 
 
 @dataclass

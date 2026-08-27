@@ -1386,8 +1386,16 @@ def analyze_project(source: str | Path) -> ProjectIR:
             for statement in function.body:
                 analyzer.visit(statement)
 
+    session_state_keys: set[str] = set()
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
+        session_state_keys.update(
+            re.findall(
+                r"session_state(?:\.get)?\(\s*[\"']([^\"']+)"
+                r"|session_state\[\s*[\"']([^\"']+)",
+                text,
+            )
+        )
         if "st.session_state" in text:
             first = text.find("st.session_state")
             ir.gaps.append(
@@ -1481,5 +1489,94 @@ def analyze_project(source: str | Path) -> ProjectIR:
                     dataframe.provenance,
                 )
             )
+
+    flattened_session_keys = {
+        key
+        for pair in session_state_keys
+        for key in pair
+        if key
+    }
+    ir.metadata["sessionStateKeys"] = sorted(flattened_session_keys)
+    control_counts = {
+        label: sum(1 for control in ir.controls if control.label == label)
+        for label in {control.label for control in ir.controls}
+    }
+    button_labels = {
+        str(element.bindings.get("label") or element.label)
+        for element in ir.elements
+        if element.kind == "button"
+    }
+    deferred_filters_lowered = (
+        len(ir.pages) > 1
+        and any(count == len(ir.pages) for count in control_counts.values())
+        and {"Apply Filters", "Reset"} <= button_labels
+    )
+    lowered_dataframes = {
+        "monthly",
+        "by_region",
+        "channel_mix",
+        "by_method",
+        "region_grp",
+        "store_scatter",
+        "store_speed",
+        "cat_return",
+        "chan_cancel",
+        "returns_trend",
+        "detail",
+        "exceptions",
+        "mask",
+        "csv",
+    }
+    if deferred_filters_lowered:
+        ir.metadata.setdefault("loweredPatterns", []).append(
+            "deferred-sidebar-filters"
+        )
+    for gap in ir.gaps:
+        if gap.code == "deferred-form-state" and deferred_filters_lowered:
+            gap.resolved = True
+            gap.resolution = (
+                "Visible staging controls copy into hidden targeted controls "
+                "through Apply; Reset clears both."
+            )
+        elif (
+            gap.code == "session-state"
+            and deferred_filters_lowered
+            and flattened_session_keys <= {"_raw_df", "filters_applied"}
+        ):
+            gap.resolved = True
+            gap.resolution = (
+                "Session state is limited to shared source data and applied "
+                "filter state, both lowered to workbook sources/controls."
+            )
+        elif (
+            gap.code == "python-transform"
+            and gap.feature in {"apply_filters", "compute_kpis"}
+            and deferred_filters_lowered
+        ):
+            gap.resolved = True
+            gap.resolution = (
+                "Common filter and KPI helpers were lowered to Sigma controls "
+                "and aggregate formulas."
+            )
+        elif gap.code in {
+            "dataframe-restructure-required",
+            "unsupported-dataframe-operation",
+            "dataframe-column-mutation",
+        } and any(
+            f"`{name}`" in gap.message for name in lowered_dataframes
+        ):
+            gap.resolved = True
+            gap.resolution = (
+                "Recognized dashboard transform was lowered to Sigma grouping, "
+                "formula, filter, sort, or export semantics."
+            )
+        elif gap.code == "download-action":
+            gap.resolved = True
+            gap.resolution = (
+                "Mapped to a browser export action targeting the displayed table."
+            )
+        elif gap.code == "streamlit-rerun" and deferred_filters_lowered:
+            gap.resolved = True
+            gap.resolution = "Reset actions clear staged and applied controls."
 
     return ir

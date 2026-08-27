@@ -17,8 +17,8 @@ entities:
       - lib/metrics.py
       - sql/orders.sql
     identifier:
-      database: CSA
-      schema: TJ
+      database: DEMO_DB
+      schema: DEMO
       name: RETAIL_FULFILLMENT_CONTROL_TOWER
     title: retail-fulfillment-control-tower
     query_warehouse: SIGMA_WH

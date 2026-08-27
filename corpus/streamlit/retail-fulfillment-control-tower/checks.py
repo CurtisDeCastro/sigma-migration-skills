@@ -13,6 +13,15 @@ ROOT = CASE.parents[2]
 SKILL = ROOT / "plugins" / "streamlit-to-sigma" / "skills" / "streamlit-to-sigma"
 FIXTURE = SKILL / "fixtures" / "retail-fulfillment-control-tower"
 CONVERT = SKILL / "scripts" / "streamlit-convert.py"
+ASSESS = (
+    ROOT
+    / "plugins"
+    / "streamlit-to-sigma"
+    / "skills"
+    / "streamlit-assessment"
+    / "scripts"
+    / "assess-streamlit.py"
+)
 NORMALIZE = ROOT / "corpus" / "lib" / "corpus_check.py"
 
 
@@ -93,12 +102,25 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(ir["queries"][0]["columns"]) == 17
     assert len(ir["controls"]) == 22
     assert "dynamic-sql" not in {gap["code"] for gap in ir["gaps"]}
+    assert "deferred-sidebar-filters" in ir["metadata"]["loweredPatterns"]
+    assert any(
+        gap["code"] == "deferred-form-state" and gap["resolved"]
+        for gap in ir["gaps"]
+    )
 
     result = json.loads((output / "workbook-result.json").read_text())
     assert result["warnings"] == []
     document = result["workbook"]["document"]
     elements = document["elements"]
     assert len([item for item in elements if item["kind"] == "navigation"]) == 4
+    assert len(
+        [
+            item
+            for item in elements
+            if item["kind"] == "container"
+            and item["id"].startswith("filter-card-")
+        ]
+    ) == 4
     assert len(
         [
             item
@@ -175,7 +197,31 @@ with tempfile.TemporaryDirectory() as tmp:
         item for item in elements if item["kind"] == "scatter-chart"
     )
     assert scatter["source"].get("groupingId")
+    charts = [
+        item for item in elements if item["kind"].endswith("-chart")
+    ]
+    assert all(
+        chart["xAxis"]["format"]["title"].get("text")
+        for chart in charts
+        if chart["kind"] != "kpi-chart"
+    )
     assert_no_sibling_collisions(document["layout"])
+
+    assessment_path = Path(tmp) / "assessment.json"
+    subprocess.run(
+        [
+            "python3",
+            str(ASSESS),
+            str(FIXTURE),
+            "--out",
+            str(assessment_path),
+        ],
+        check=True,
+    )
+    assessment = json.loads(assessment_path.read_text())["projects"][0]
+    assert assessment["readiness"] == "direct"
+    assert assessment["complexity"]["class"] == "medium"
+    assert assessment["migrationDisposition"] == "spec-native"
 
 print(
     "Streamlit retail-fulfillment-control-tower reconverts byte-identical "

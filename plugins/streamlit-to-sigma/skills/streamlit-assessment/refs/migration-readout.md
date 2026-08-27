@@ -40,6 +40,10 @@ observed migration telemetry and keep them configurable.
 A project can carry more than one disposition. The first is the primary delivery
 path; the full list explains mixed architectures.
 
+Keep statically discovered findings after conversion, but mark mechanically
+lowered findings with `resolved: true` plus a concrete `resolution`. Readiness,
+complexity, and disposition use unresolved findings only.
+
 ## Stateful-app decision order
 
 1. Use controls, formulas, supported actions, overlays, and input tables when

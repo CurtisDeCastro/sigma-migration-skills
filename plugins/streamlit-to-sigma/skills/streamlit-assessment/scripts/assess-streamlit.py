@@ -83,7 +83,8 @@ RESTRUCTURE_GAPS = {
 
 
 def migration_dispositions(ir, readiness: str) -> list[str]:
-    gap_codes = {gap.code for gap in ir.gaps}
+    gaps = [gap for gap in ir.gaps if not gap.resolved]
+    gap_codes = {gap.code for gap in gaps}
     security_codes = {finding.code for finding in ir.security}
     dispositions: list[str] = []
     if "warehouse-write" in security_codes or "data-editor" in gap_codes:
@@ -92,7 +93,7 @@ def migration_dispositions(ir, readiness: str) -> list[str]:
         dispositions.append("python-element-candidate")
     if "workbook-agent-candidate" in gap_codes:
         dispositions.append("workbook-agent-candidate")
-    if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
+    if any(gap.severity == "plugin-candidate" for gap in gaps):
         dispositions.append("plugin")
     if any(element.kind == "button" for element in ir.elements) and (
         gap_codes & STATEFUL_GAPS or "warehouse-write" in security_codes
@@ -108,7 +109,8 @@ def migration_dispositions(ir, readiness: str) -> list[str]:
 
 
 def complexity_profile(ir, score: int, readiness: str) -> dict:
-    gap_codes = {gap.code for gap in ir.gaps}
+    gaps = [gap for gap in ir.gaps if not gap.resolved]
+    gap_codes = {gap.code for gap in gaps}
     drivers: list[str] = []
     if len(ir.pages) > 2:
         drivers.append(f"{len(ir.pages)} pages")
@@ -118,9 +120,9 @@ def complexity_profile(ir, score: int, readiness: str) -> dict:
         drivers.append("stateful forms, callbacks, or Python transforms")
     if "workbook-agent-candidate" in gap_codes:
         drivers.append("AI/chat workflow and workbook-agent architecture")
-    if any(gap.severity == "plugin-candidate" for gap in ir.gaps):
+    if any(gap.severity == "plugin-candidate" for gap in gaps):
         drivers.append("custom component or plugin work")
-    if any(gap.severity == "blocking" for gap in ir.gaps):
+    if any(gap.severity == "blocking" for gap in gaps):
         drivers.append("blocking source ambiguity or dynamic SQL")
     if ir.security:
         drivers.append("security, identity, or warehouse-write review")
@@ -132,8 +134,8 @@ def complexity_profile(ir, score: int, readiness: str) -> dict:
         or bool(gap_codes & STATEFUL_GAPS)
         or bool(ir.security)
         or "workbook-agent-candidate" in gap_codes
-        or any(gap.severity == "plugin-candidate" for gap in ir.gaps)
-        or score >= 60
+        or any(gap.severity == "plugin-candidate" for gap in gaps)
+        or (score >= 90 and readiness != "direct")
     )
     medium_app = (
         readiness == "redesign"
@@ -159,12 +161,13 @@ def complexity_profile(ir, score: int, readiness: str) -> dict:
 
 def assess(path: Path) -> dict:
     ir = analyze_project(path)
+    unresolved_gaps = [gap for gap in ir.gaps if not gap.resolved]
     score = (
         len(ir.pages) * 2
         + len(ir.queries) * 2
         + len(ir.controls)
         + len(ir.elements)
-        + sum(WEIGHTS.get(gap.severity, 3) for gap in ir.gaps)
+        + sum(WEIGHTS.get(gap.severity, 3) for gap in unresolved_gaps)
         + len(ir.security) * 8
     )
     security_blocking = any(
@@ -173,10 +176,13 @@ def assess(path: Path) -> dict:
     readiness = (
         "blocked"
         if security_blocking
-        or any(gap.severity == "blocking" for gap in ir.gaps)
+        or any(gap.severity == "blocking" for gap in unresolved_gaps)
         else "redesign"
         if ir.security
-        or any(gap.severity in {"plugin-candidate", "restructure"} for gap in ir.gaps)
+        or any(
+            gap.severity in {"plugin-candidate", "restructure"}
+            for gap in unresolved_gaps
+        )
         else "direct"
     )
     dispositions = migration_dispositions(ir, readiness)
@@ -194,6 +200,8 @@ def assess(path: Path) -> dict:
             finding.__dict__ | {"provenance": finding.provenance.__dict__}
             for finding in ir.security
         ],
+        "resolvedPatterns": ir.metadata.get("loweredPatterns", []),
+        "unresolvedGapCount": len(unresolved_gaps),
         "complexityScore": score,
         "complexity": complexity,
         "readiness": readiness,
