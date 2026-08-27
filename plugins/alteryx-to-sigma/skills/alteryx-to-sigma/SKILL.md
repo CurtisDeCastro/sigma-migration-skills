@@ -118,6 +118,10 @@ client-side ids as the source of truth:
 ruby scripts/post-and-readback.rb --spec dm.json --out dm-map.json
 ```
 
+`folderId` is required on create. The poster auto-picks a writable folder
+(preferring a name matching ALTERYX / MIGRATION / TEST); override with
+`--folder <id>` or `SIGMA_FOLDER_ID`.
+
 Hard gate: `/v2/dataModels/{id}/columns` must contain zero `type=error`
 columns. A 200 POST with a runtime-broken formula is a fail.
 

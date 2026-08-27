@@ -47,6 +47,7 @@ OptionParser.new do |o|
   o.on('--workdir DIR')        { |v| opts[:workdir] = v }
   o.on('--force-new')          { opts[:force_new] = true }
   o.on('--update-id ID')       { |v| opts[:update_id] = v }
+  o.on('--folder ID')          { |v| opts[:folder] = v }
 end.parse!(ARGV)
 
 abort 'missing --yxmd' if opts[:yxmd].to_s.empty?
@@ -103,6 +104,7 @@ begin
   post = ['ruby', File.expand_path('post-and-readback.rb', __dir__),
           '--spec', dm_json, '--out', map, '--workdir', workdir]
   post += ['--update-id', update_id] if update_id
+  post += ['--folder', opts[:folder]] if opts[:folder]
   ok, code = run!(*post)
   fail_phase!('post-dm', "post-and-readback.rb exited #{code}") unless ok
 

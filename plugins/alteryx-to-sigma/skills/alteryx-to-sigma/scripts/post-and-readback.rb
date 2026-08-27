@@ -19,6 +19,7 @@ OptionParser.new do |p|
   p.on('--type T', 'Ignored; this skill only posts data models.') { |v| opts[:type] = v }
   p.on('--workdir P') { |v| opts[:workdir] = v }
   p.on('--update-id ID', 'PUT this existing data model instead of POSTing new.') { |v| opts[:update_id] = v }
+  p.on('--folder ID', 'Writable folder/workspace UUID (else SIGMA_FOLDER_ID, else auto-pick).') { |v| opts[:folder] = v }
   p.on('--skip-layout-lint', 'No-op (no workbook / no layout).') { |_| }
 end.parse!
 %i[spec out].each { |k| abort("missing --#{k}") unless opts[k] }
@@ -37,12 +38,28 @@ spec = raw['dataModel'] || raw['model'] || raw
 POST_PATH = '/v2/dataModels/spec'
 GET_PATH  = '/v2/dataModels/%s/spec'
 
+# POST /v2/dataModels/spec requires a UUID folderId (live-probed 2026-08-27:
+# omitting it 400s with "Expecting UUID at 0.folderId"). PUT updates do not.
+def resolve_folder_id(explicit)
+  return explicit unless explicit.to_s.strip.empty?
+  env = ENV['SIGMA_FOLDER_ID'].to_s.strip
+  return env unless env.empty?
+  files = Sigma.request(:get, '/v2/files?typeFilters=folder&limit=200') rescue {}
+  entries = files['entries'] || files['data'] || []
+  pref = entries.find { |f| (f['name'] || '').upcase =~ /ALTERYX|MIGRATION|TEST/ }
+  hit = pref || entries.first
+  hit && hit['id']
+end
+
 if opts[:update_id]
   warn "UPDATE mode: PUT datamodel #{opts[:update_id]}"
   resp = Sigma.request(:put, format(GET_PATH, opts[:update_id]), body: spec.to_json)
   oid = resp['dataModelId'] || opts[:update_id]
   warn "PUT ok: dataModelId=#{oid}"
 else
+  spec['folderId'] ||= resolve_folder_id(opts[:folder])
+  abort('POST needs a folderId — pass --folder or set SIGMA_FOLDER_ID') if spec['folderId'].to_s.empty?
+  warn "folderId: #{spec['folderId']}"
   resp = Sigma.request(:post, POST_PATH, body: spec.to_json)
   oid = resp['dataModelId'] or abort("POST failed: #{resp.inspect}")
   warn "POST ok: dataModelId=#{oid}"

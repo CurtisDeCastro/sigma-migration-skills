@@ -18,6 +18,8 @@ node converter/cli.mjs fixtures/orders-join.yxmd \
 ruby scripts/migrate-alteryx.rb \
   --yxmd fixtures/orders-join.yxmd \
   --connection-id "$SIGMA_CONNECTION_ID" \
+  [--database CSA --schema TJ] \
+  [--folder "$SIGMA_FOLDER_ID"] \
   --workdir /tmp/alteryx-run
 ```
 
