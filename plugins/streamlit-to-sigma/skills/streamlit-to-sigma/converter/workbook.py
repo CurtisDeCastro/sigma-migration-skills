@@ -75,7 +75,7 @@ def format_for(label: str) -> dict[str, str] | None:
         )
     ):
         return {"kind": "number", "formatString": "$,.0f"}
-    if any(word in lowered for word in ("percent", "rate", "%")):
+    if any(word in lowered for word in ("percent", "rate", "pct", "%")):
         return {"kind": "number", "formatString": ",.1%"}
     if any(
         word in lowered
@@ -508,6 +508,7 @@ def build_workbook(
     elements: list[dict[str, Any]] = []
     source_elements: dict[str, dict[str, Any]] = {}
     source_names: dict[str, str] = {}
+    auxiliary_sources: list[dict[str, Any]] = []
 
     for index, query in enumerate(ir.queries, start=1):
         source_id = f"source-{index}-{slug(query.function)[:24]}"
@@ -760,10 +761,18 @@ def build_workbook(
                     {
                         "id": x_id,
                         "name": x_name,
-                        "formula": semantic_dimension_formula(
-                            x_name,
-                            source_name,
-                            source_columns,
+                        "formula": (
+                            semantic_measure_formula(
+                                x_name,
+                                source_name,
+                                source_columns,
+                            )
+                            if item.kind == "scatter-chart"
+                            else semantic_dimension_formula(
+                                x_name,
+                                source_name,
+                                source_columns,
+                            )
                         ),
                     }
                 )
@@ -784,6 +793,96 @@ def build_workbook(
                 if fmt:
                     column["format"] = fmt
                 chart_columns.append(column)
+            chart_source = {"kind": "table", "elementId": source["id"]}
+            scatter_color: dict[str, Any] | None = None
+            if item.kind == "scatter-chart" and item.dataframe:
+                semantics = dataframe_semantics(assignments.get(item.dataframe))
+                group_by = semantics["groupBy"]
+                aggregates = semantics["aggregates"]
+                if group_by and x in aggregates and all(
+                    value in aggregates for value in y_values
+                ):
+                    grouped_id = f"{item.id}-grouped-source"
+                    grouped_name = f"{CHART_TITLES.get(item.dataframe, item.label)} Source"
+                    grouped_columns: list[dict[str, Any]] = []
+                    grouped_ids: list[str] = []
+                    grouped_calc_ids: list[str] = []
+                    for group_name in group_by:
+                        grouped_column = {
+                            "id": f"{grouped_id}-{slug(group_name)}",
+                            "name": group_name,
+                            "formula": source_ref(
+                                source_name,
+                                source_columns,
+                                group_name,
+                            ),
+                        }
+                        grouped_columns.append(grouped_column)
+                        grouped_ids.append(grouped_column["id"])
+                    for alias in [str(x), *y_values]:
+                        source_column, aggregation = aggregates[alias]
+                        grouped_column = {
+                            "id": f"{grouped_id}-{slug(alias)}",
+                            "name": alias,
+                            "formula": aggregate_formula(
+                                source_name,
+                                source_columns,
+                                source_column,
+                                aggregation,
+                            ),
+                        }
+                        grouped_columns.append(grouped_column)
+                        grouped_calc_ids.append(grouped_column["id"])
+                    grouped_source = {
+                        "id": grouped_id,
+                        "kind": "table",
+                        "name": grouped_name,
+                        "source": {
+                            "kind": "table",
+                            "elementId": source["id"],
+                        },
+                        "columns": grouped_columns,
+                        "groupings": [
+                            {
+                                "id": f"{grouped_id}-grouping",
+                                "groupBy": grouped_ids,
+                                "calculations": grouped_calc_ids,
+                            }
+                        ],
+                        "visibleAsSource": False,
+                    }
+                    elements.append(grouped_source)
+                    auxiliary_sources.append(grouped_source)
+                    chart_source = {
+                        "kind": "table",
+                        "elementId": grouped_id,
+                        "groupingId": f"{grouped_id}-grouping",
+                    }
+                    identity_id = f"{item.id}-identity"
+                    chart_columns = [
+                        {
+                            "id": identity_id,
+                            "name": group_by[0],
+                            "formula": f"[{grouped_name}/{group_by[0]}]",
+                        },
+                        {
+                            "id": x_id,
+                            "name": str(x),
+                            "formula": f"[{grouped_name}/{x}]",
+                        },
+                        *[
+                            {
+                                "id": y_id,
+                                "name": y_name,
+                                "formula": f"[{grouped_name}/{y_name}]",
+                            }
+                            for y_id, y_name in zip(y_ids, y_values)
+                        ],
+                    ]
+                    scatter_color = {
+                        "by": "category",
+                        "column": identity_id,
+                    }
             if not x or not y_ids:
                 warnings.append(
                     {
@@ -797,7 +896,7 @@ def build_workbook(
                 "id": item.id,
                 "kind": item.kind,
                 "name": CHART_TITLES.get(item.dataframe or "", item.label),
-                "source": {"kind": "table", "elementId": source["id"]},
+                "source": chart_source,
                 "columns": chart_columns,
                 "xAxis": {
                     "columnId": x_id,
@@ -805,11 +904,43 @@ def build_workbook(
                 },
                 "yAxis": {"columnIds": y_ids},
             }
+            if item.dataframe in {"by_method", "cat_return", "chan_cancel"}:
+                converted["xAxis"]["sort"] = {
+                    "by": y_ids[0],
+                    "direction": "descending",
+                }
+            if item.dataframe == "returns_trend":
+                returned_id = f"{item.id}-returned-filter"
+                converted["columns"].append(
+                    {
+                        "id": returned_id,
+                        "name": "Returned filter",
+                        "formula": source_ref(
+                            source_name,
+                            source_columns,
+                            "is_returned",
+                        ),
+                        "hidden": True,
+                    }
+                )
+                converted["filters"] = [
+                    {
+                        "id": f"{item.id}-returns-only",
+                        "columnId": returned_id,
+                        "kind": "list",
+                        "mode": "include",
+                        "values": [1],
+                        "includeNulls": "never",
+                    }
+                ]
             if item.kind in {"bar-chart", "area-chart"}:
                 converted["stacking"] = (
                     "stacked" if len(y_ids) > 1 else "none"
                 )
-            converted["color"] = {"by": "single", "value": "#3B82F6"}
+            converted["color"] = scatter_color or {
+                "by": "single",
+                "value": "#3B82F6",
+            }
             converted["legend"] = {"visibility": "hidden"} if len(y_ids) == 1 else {"position": "bottom"}
         elif item.kind == "table" and source:
             query = query_by_id.get(query_id)
@@ -1307,7 +1438,7 @@ def build_workbook(
         'gridTemplateRows="auto" id="data">'
     ]
     data_row = 1
-    for source in source_elements.values():
+    for source in [*source_elements.values(), *auxiliary_sources]:
         data_lines.append(
             f'  <Element elementId="{source["id"]}" gridColumn="1 / 25" '
             f'gridRow="{data_row} / {data_row + 14}"/>'
