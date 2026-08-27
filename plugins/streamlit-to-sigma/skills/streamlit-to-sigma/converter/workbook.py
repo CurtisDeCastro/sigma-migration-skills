@@ -529,6 +529,23 @@ def build_workbook(
     auxiliary_sources: list[dict[str, Any]] = []
 
     for index, query in enumerate(ir.queries, start=1):
+        if re.search(
+            r"\bSNOWFLAKE\.CORTEX\.(?:COMPLETE|AGENT)\b"
+            r"|\bDATA_AGENT_RUN\b",
+            query.sql,
+            re.I,
+        ):
+            warnings.append(
+                {
+                    "code": "ai-runtime-excluded-from-data-sources",
+                    "query": query.function,
+                    "message": (
+                        "AI runtime SQL is not a workbook data source; map its "
+                        "grounding tables to a Sigma workbook agent instead."
+                    ),
+                }
+            )
+            continue
         source_id = f"source-{index}-{slug(query.function)[:24]}"
         source_name = f"Data — {query.function.replace('_', ' ').title()}"
         source, columns = workbook_source(

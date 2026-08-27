@@ -26,7 +26,8 @@ converted”; unresolved lineage always becomes a gap.
 | download button over displayed data | browser export action | direct when target element and format resolve |
 | static form fields | native form | capability-gated; submit/reset effects must be bounded |
 | data editor | input table + row actions | warehouse-backed when schema, connection, keys, and writes are proven |
-| chat input/message and AI client calls | workbook agent + chat | workbook-agent-candidate |
+| chat input/message and true agent runtime | workbook agent + chat | workbook-agent-candidate |
+| `SNOWFLAKE.CORTEX.COMPLETE` chat | workbook agent redesign or plain completion | never classify as Cortex Agent automatically |
 
 ## Controls
 
@@ -88,6 +89,8 @@ or `CHART_TABS` are expanded. Runtime loops over query results produce a
 | `data-editor` | writeback architecture required |
 | `unsupported-dataframe-operation` | lineage outside conservative subset |
 | `dynamic-loop` | runtime-dependent element cardinality |
+| `llm-complete-not-agent` | runtime uses Cortex Complete rather than an agent |
+| `agent-runtime-mismatch` | setup defines an agent that the application never calls |
 
 ## Action and state architecture
 

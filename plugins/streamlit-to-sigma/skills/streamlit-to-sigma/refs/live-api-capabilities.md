@@ -172,6 +172,21 @@ create agents independently of a workbook spec. Streamlit AI/chat apps therefore
 remain capability-gated: create/reuse the workbook agent, publish, and validate
 its data sources, tools, and responses before claiming parity.
 
+A live Streamlit migration created a workbook agent over filtered retail-order
+and policy-document tables. The run endpoint completed a warehouse query
+(`5,009` distinct orders) and separately grounded a policy answer in the named
+return-risk document. This proves agent/chat authoring plus data-source tool use;
+it does not prove every Streamlit agent framework is mechanically equivalent.
+
+Distinguish observed runtime from declared infrastructure:
+
+- `SNOWFLAKE.CORTEX.COMPLETE(...)` is an LLM completion, not a Cortex Agent.
+- A project that contains `CREATE CORTEX AGENT` but calls `COMPLETE` at runtime
+  has an architecture mismatch.
+- Never claim Cortex Analyst/Search tool parity from an unused agent definition.
+- Map the actual grounding tables and instructions to `document.agents`, then
+  run representative structured-data and policy-grounding prompts.
+
 ## Stored procedures remain UI-finish
 
 Procedure permissions and connection sync can make procedures appear in Sigma's

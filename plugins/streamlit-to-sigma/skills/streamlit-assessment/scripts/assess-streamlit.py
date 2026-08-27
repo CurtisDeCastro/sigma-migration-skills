@@ -75,10 +75,12 @@ STATEFUL_GAPS = {
     "python-transform",
 }
 RESTRUCTURE_GAPS = {
+    "agent-runtime-mismatch",
     "dataframe-column-mutation",
     "dataframe-restructure-required",
     "unsupported-dataframe-operation",
     "conditional-status",
+    "llm-complete-not-agent",
 }
 
 

@@ -277,6 +277,69 @@ class AdvancedPatternsTest(unittest.TestCase):
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0].severity, "restructure")
 
+    def test_cortex_complete_is_not_misclassified_as_cortex_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(
+                root,
+                "snowflake.yml",
+                """
+                definition_version: 2
+                entities:
+                  app:
+                    type: streamlit
+                    main_file: streamlit_app.py
+                    artifacts:
+                      - streamlit_app.py
+                      - lib/agent.py
+                      - lib/agent_config.py
+                      - sql/agent_setup.sql
+                """,
+            )
+            self.write(
+                root,
+                "streamlit_app.py",
+                """
+                import streamlit as st
+                prompt = st.chat_input("Ask")
+                with st.chat_message("assistant"):
+                    st.write(prompt)
+                """,
+            )
+            self.write(
+                root,
+                "lib/agent.py",
+                """
+                def call_agent(conn):
+                    return conn.query(
+                        "SELECT SNOWFLAKE.CORTEX.COMPLETE('model', 'prompt')"
+                    )
+                """,
+            )
+            self.write(
+                root,
+                "lib/agent_config.py",
+                """
+                AGENT_FQN = "DB.SCHEMA.AGENT"
+                AGENT_INSTRUCTIONS = "Use governed retail data."
+                SUGGESTED_QUESTIONS = ["How many orders?"]
+                """,
+            )
+            self.write(
+                root,
+                "sql/agent_setup.sql",
+                "CREATE OR REPLACE CORTEX AGENT DB.SCHEMA.AGENT;",
+            )
+            ir = analyze_project(root)
+            codes = {gap.code for gap in ir.gaps}
+            self.assertIn("llm-complete-not-agent", codes)
+            self.assertIn("agent-runtime-mismatch", codes)
+            self.assertEqual(ir.metadata["agentRuntime"], "cortex-complete")
+            self.assertEqual(
+                ir.metadata["agentConfig"]["AGENT_FQN"],
+                "DB.SCHEMA.AGENT",
+            )
+
     def test_external_sql_and_shared_sidebar_filters_expand(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

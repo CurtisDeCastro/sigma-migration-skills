@@ -287,7 +287,14 @@ Additional capability-gated candidates:
   `source.kind: code-output`; only after the workspace, connection, runtime, and
   output readback probes pass.
 - `workbook-agent-candidate` — discover/list/run an existing workbook agent for
-  AI/chat behavior. The current API does not create agents.
+  AI/chat behavior, or author `document.agents` plus a chat element when the
+  grounding sources and instructions are proven.
+
+Treat `SNOWFLAKE.CORTEX.COMPLETE` as a completion runtime, not a Cortex Agent.
+If setup SQL defines an agent that application code never invokes, emit
+`agent-runtime-mismatch` and migrate observed behavior explicitly. For a Sigma
+agent redesign, attach only governed grounding tables, preserve filter context,
+and validate at least one analytical query and one search/policy answer.
 
 Probe the live API before promising action parity. A UI picker is not proof of
 public-spec authorability. Conversely, an OpenAPI discriminator is not enough:

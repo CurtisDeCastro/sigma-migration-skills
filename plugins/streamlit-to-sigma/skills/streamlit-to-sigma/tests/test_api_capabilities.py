@@ -7,6 +7,7 @@ SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL))
 
 from converter import (  # noqa: E402
+    chat_element,
     clear_chat_effect,
     code_output_source,
     delete_rows_effect,
@@ -21,6 +22,7 @@ from converter import (  # noqa: E402
     selected_column_range_value,
     selected_column_value,
     update_rows_effect,
+    workbook_agent,
 )
 
 
@@ -163,6 +165,35 @@ class ApiCapabilitiesTest(unittest.TestCase):
                 "effect": "clear-chat-element-messages",
                 "chatElementId": "chat",
             },
+        )
+
+    def test_workbook_agent_and_chat_shapes(self):
+        self.assertEqual(
+            chat_element("retail-chat", "retail-agent"),
+            {
+                "id": "retail-chat",
+                "kind": "chat",
+                "agentId": "retail-agent",
+            },
+        )
+        agent = workbook_agent(
+            "retail-agent",
+            "Answer only from governed retail data.",
+            ["retail-orders", "policies"],
+            name="Retail Agent",
+            greeting="Ask about retail operations.",
+        )
+        self.assertEqual(agent["id"], "retail-agent")
+        self.assertEqual(
+            agent["dataSources"],
+            [
+                {"kind": "table", "elementId": "retail-orders"},
+                {"kind": "table", "elementId": "policies"},
+            ],
+        )
+        self.assertEqual(
+            agent["greeting"],
+            {"mode": "static", "message": "Ask about retail operations."},
         )
 
 

@@ -1,6 +1,7 @@
 """Static Streamlit project discovery and Sigma conversion."""
 
 from .api_capabilities import (
+    chat_element,
     clear_chat_effect,
     code_output_source,
     delete_rows_effect,
@@ -15,6 +16,7 @@ from .api_capabilities import (
     selected_column_range_value,
     selected_column_value,
     update_rows_effect,
+    workbook_agent,
 )
 from .analyzer import analyze_project
 from .data_model import build_data_model
@@ -24,6 +26,7 @@ __all__ = [
     "analyze_project",
     "build_data_model",
     "build_workbook",
+    "chat_element",
     "clear_chat_effect",
     "code_output_source",
     "delete_rows_effect",
@@ -38,4 +41,5 @@ __all__ = [
     "selected_column_range_value",
     "selected_column_value",
     "update_rows_effect",
+    "workbook_agent",
 ]

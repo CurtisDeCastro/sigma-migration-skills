@@ -107,6 +107,7 @@ SECURITY_PATTERNS = {
 
 AI_APP_PATTERN = re.compile(
     r"\b(?:openai|anthropic|langchain|llama_index|ChatOpenAI|ChatAnthropic)\b"
+    r"|\bSNOWFLAKE\.CORTEX\.(?:COMPLETE|AGENT)\b"
     r"|\bst\.chat_(?:input|message)\b"
     r"|\b(?:chat\.completions|messages\.create)\s*\(",
     re.I,
@@ -1476,8 +1477,49 @@ def analyze_project(source: str | Path) -> ProjectIR:
                 analyzer.visit(statement)
 
     session_state_keys: set[str] = set()
+    cortex_complete_provenance: Provenance | None = None
+    has_cortex_agent_definition = False
+    has_cortex_agent_runtime = False
+    agent_config: dict[str, Any] = {}
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
+        relative_path = str(path.relative_to(root))
+        has_cortex_agent_definition = has_cortex_agent_definition or bool(
+            re.search(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?CORTEX\s+AGENT\b", text, re.I)
+        )
+        if path.suffix == ".py":
+            has_cortex_agent_runtime = has_cortex_agent_runtime or bool(
+                re.search(
+                    r"\bDATA_AGENT_RUN\b|/api/v2/databases/.+?/agents/.+?:run",
+                    text,
+                    re.I,
+                )
+            )
+            complete_match = re.search(
+                r"\bSNOWFLAKE\.CORTEX\.COMPLETE\b", text, re.I
+            )
+            if complete_match and cortex_complete_provenance is None:
+                cortex_complete_provenance = Provenance(
+                    relative_path,
+                    text.count("\n", 0, complete_match.start()) + 1,
+                )
+            tree = trees.get(path)
+            if tree:
+                for statement in tree.body:
+                    if (
+                        isinstance(statement, ast.Assign)
+                        and len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name)
+                        and statement.targets[0].id
+                        in {
+                            "AGENT_FQN",
+                            "AGENT_INSTRUCTIONS",
+                            "SUGGESTED_QUESTIONS",
+                        }
+                    ):
+                        value = literal(statement.value)
+                        if value is not None:
+                            agent_config[statement.targets[0].id] = value
         session_state_keys.update(
             re.findall(
                 r"session_state(?:\.get)?\(\s*[\"']([^\"']+)"
@@ -1494,7 +1536,7 @@ def analyze_project(source: str | Path) -> ProjectIR:
                     "Session-state behavior must be represented with Sigma controls/actions.",
                     "st.session_state",
                     Provenance(
-                        str(path.relative_to(root)),
+                        relative_path,
                         text.count("\n", 0, first) + 1,
                     ),
                 )
@@ -1507,12 +1549,13 @@ def analyze_project(source: str | Path) -> ProjectIR:
                     "restructure",
                     (
                         "AI/chat behavior requires an explicit Sigma workbook-agent "
-                        "reuse or redesign decision; the public API can list and run "
-                        "existing agents but does not create them."
+                        "mapping. Workbook code representation can author agents and "
+                        "chat elements, but data sources, tools, filters, and runtime "
+                        "answers must pass live validation."
                     ),
                     ai_match.group(0),
                     Provenance(
-                        str(path.relative_to(root)),
+                        relative_path,
                         text.count("\n", 0, ai_match.start()) + 1,
                     ),
                 )
@@ -1528,9 +1571,52 @@ def analyze_project(source: str | Path) -> ProjectIR:
                     SecurityFinding(
                         code,
                         f"Review detected security-sensitive pattern: {match.group(0)}",
-                        Provenance(str(path.relative_to(root)), line),
+                        Provenance(relative_path, line),
                     )
                 )
+    if cortex_complete_provenance:
+        ir.gaps.append(
+            Gap(
+                "llm-complete-not-agent",
+                "restructure",
+                (
+                    "The runtime calls SNOWFLAKE.CORTEX.COMPLETE, not a Cortex "
+                    "Agent. Do not claim Cortex Agent tool or policy-search parity "
+                    "from the declared agent setup alone."
+                ),
+                "SNOWFLAKE.CORTEX.COMPLETE",
+                cortex_complete_provenance,
+            )
+        )
+    if (
+        has_cortex_agent_definition
+        and cortex_complete_provenance
+        and not has_cortex_agent_runtime
+    ):
+        ir.gaps.append(
+            Gap(
+                "agent-runtime-mismatch",
+                "restructure",
+                (
+                    "The project defines a Cortex Agent but the application runtime "
+                    "does not invoke it; migrate the observed Complete call or "
+                    "explicitly redesign to a Sigma workbook agent."
+                ),
+                "CORTEX AGENT",
+                cortex_complete_provenance,
+            )
+        )
+    ir.metadata["agentRuntime"] = (
+        "cortex-agent"
+        if has_cortex_agent_runtime
+        else "cortex-complete"
+        if cortex_complete_provenance
+        else "chat-only"
+        if any(gap.code == "workbook-agent-candidate" for gap in ir.gaps)
+        else None
+    )
+    if agent_config:
+        ir.metadata["agentConfig"] = agent_config
 
     for dataframe in ir.dataframes:
         unlowered = [

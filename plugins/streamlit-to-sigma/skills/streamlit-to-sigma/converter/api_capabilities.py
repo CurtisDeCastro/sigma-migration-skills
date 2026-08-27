@@ -226,3 +226,48 @@ def clear_chat_effect(chat_element_id: str) -> dict[str, str]:
         "effect": "clear-chat-element-messages",
         "chatElementId": chat_element_id,
     }
+
+
+def workbook_agent(
+    agent_id: str,
+    instructions: str,
+    data_source_element_ids: list[str],
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    greeting: str | None = None,
+) -> dict[str, Any]:
+    """Build a workbook-spec-authored Sigma agent."""
+    if not agent_id:
+        raise ValueError("agent_id is required")
+    if not instructions:
+        raise ValueError("instructions are required")
+    if not data_source_element_ids:
+        raise ValueError("at least one data source element id is required")
+    agent: dict[str, Any] = {
+        "id": agent_id,
+        "instructions": instructions,
+        "dataSources": [
+            {"kind": "table", "elementId": element_id}
+            for element_id in data_source_element_ids
+        ],
+    }
+    if name:
+        agent["name"] = name
+    if description:
+        agent["description"] = description
+    if greeting:
+        agent["greeting"] = {"mode": "static", "message": greeting}
+    return agent
+
+
+def chat_element(
+    element_id: str,
+    agent_id: str,
+) -> dict[str, str]:
+    """Build a chat element linked to a workbook agent."""
+    if not element_id:
+        raise ValueError("element_id is required")
+    if not agent_id:
+        raise ValueError("agent_id is required")
+    return {"id": element_id, "kind": "chat", "agentId": agent_id}

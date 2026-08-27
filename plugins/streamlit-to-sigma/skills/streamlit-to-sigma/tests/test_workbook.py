@@ -514,6 +514,40 @@ class WorkbookTest(unittest.TestCase):
                 )
             )
 
+    def test_cortex_complete_query_is_not_emitted_as_data_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    conn = st.connection("snowflake")
+                    def call_agent():
+                        return conn.query(
+                            "SELECT SNOWFLAKE.CORTEX.COMPLETE('model', 'prompt') "
+                            "AS response"
+                        )
+                    st.title("Copilot")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            result = build_workbook(
+                analyze_project(root),
+                "connection-1",
+                "folder-1",
+            )
+            self.assertFalse(
+                any(
+                    item.get("source", {}).get("kind") == "sql"
+                    for item in workbook_elements(result["workbook"])
+                )
+            )
+            self.assertIn(
+                "ai-runtime-excluded-from-data-sources",
+                {warning["code"] for warning in result["warnings"]},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
