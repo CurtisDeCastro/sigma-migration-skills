@@ -180,6 +180,39 @@ scenario('2 workbooks POSTed, no cleanup-marker.json -> exit 4', 4) do |dir|
   File.write(File.join(dir, 'posted-workbooks.jsonl'),
              [{ 'id' => 'wb-1' }, { 'id' => 'wb-2' }].map { |h| JSON.generate(h) }.join("\n") + "\n")
 end
+scenario('malformed workbook ledger entry -> exit 4', 4) do |dir|
+  File.write(File.join(dir, 'posted-workbooks.jsonl'),
+             JSON.generate('id' => 'wb-happy-1') + "\nnot-json\n")
+end
+scenario('complete user-confirmed cleanup marker -> exit 0', 0) do |dir|
+  File.write(File.join(dir, 'posted-workbooks.jsonl'),
+             [{ 'id' => 'wb-old' }, { 'id' => 'wb-happy-1' }].map { |h| JSON.generate(h) }.join("\n") + "\n")
+  write_json(dir, 'cleanup-marker.json',
+             'kept' => 'wb-happy-1', 'deleted' => [{ 'id' => 'wb-old', 'status' => 200 }],
+             'failed' => [], 'skipped' => [], 'dry_run' => false)
+end
+scenario('cleanup marker with a user-declined candidate -> exit 4', 4) do |dir|
+  File.write(File.join(dir, 'posted-workbooks.jsonl'),
+             [{ 'id' => 'wb-old' }, { 'id' => 'wb-happy-1' }].map { |h| JSON.generate(h) }.join("\n") + "\n")
+  write_json(dir, 'cleanup-marker.json',
+             'kept' => 'wb-happy-1', 'deleted' => [],
+             'failed' => [], 'skipped' => [{ 'id' => 'wb-old' }], 'dry_run' => false)
+end
+scenario('stale cleanup marker missing a ledger deletion -> exit 4', 4) do |dir|
+  File.write(File.join(dir, 'posted-workbooks.jsonl'),
+             [{ 'id' => 'wb-old-1' }, { 'id' => 'wb-old-2' }, { 'id' => 'wb-happy-1' }].
+               map { |h| JSON.generate(h) }.join("\n") + "\n")
+  write_json(dir, 'cleanup-marker.json',
+             'kept' => 'wb-happy-1', 'deleted' => [{ 'id' => 'wb-old-1', 'status' => 200 }],
+             'failed' => [], 'skipped' => [], 'dry_run' => false)
+end
+scenario('cleanup marker kept id disagrees with wb-ids.json -> exit 4', 4) do |dir|
+  File.write(File.join(dir, 'posted-workbooks.jsonl'),
+             [{ 'id' => 'wb-old' }, { 'id' => 'wb-happy-1' }].map { |h| JSON.generate(h) }.join("\n") + "\n")
+  write_json(dir, 'cleanup-marker.json',
+             'kept' => 'wb-old', 'deleted' => [{ 'id' => 'wb-happy-1', 'status' => 200 }],
+             'failed' => [], 'skipped' => [], 'dry_run' => false)
+end
 
 puts '== gate 3 (live /columns, fail-closed without creds) =='
 # No --skip-column-check passed: wb-ids.json resolves a workbook id and

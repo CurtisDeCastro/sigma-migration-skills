@@ -1384,7 +1384,22 @@ end
 unless opts[:skip_orphan]
   log = File.join(opts[:tab], 'posted-workbooks.jsonl')
   if File.exist?(log)
-    posted = File.readlines(log).map { |l| JSON.parse(l) rescue nil }.compact
+    posted = []
+    invalid_lines = []
+    File.readlines(log).each_with_index do |line, index|
+      next if line.strip.empty?
+      entry = (JSON.parse(line) rescue nil)
+      if entry.is_a?(Hash) && entry['id'].is_a?(String) && !entry['id'].empty?
+        posted << entry
+      else
+        invalid_lines << index + 1
+      end
+    end
+    if invalid_lines.any?
+      warn "[FAIL] gate 2/7: posted-workbooks.jsonl has malformed/unsafe entries at line(s) #{invalid_lines.join(', ')}."
+      warn '       Refusing to infer cleanup state from a partial ledger.'
+      exit 4
+    end
     unique_ids = posted.map { |e| e['id'] }.uniq
     if unique_ids.length > 1
       marker_path = File.join(opts[:tab], 'cleanup-marker.json')
@@ -1392,25 +1407,66 @@ unless opts[:skip_orphan]
         warn "[FAIL] gate 2/7: #{unique_ids.length} workbooks created during this conversion (orphans not cleaned)."
         warn "       posted-workbooks.jsonl entries:"
         unique_ids.each { |id| warn "         - #{id}" }
-        warn "       Run: ruby scripts/cleanup-orphan-workbooks.rb --workdir #{opts[:tab]}"
+        live_id = opts[:wb]
+        if live_id.nil?
+          wb_ids_path = File.join(opts[:tab], 'wb-ids.json')
+          live_id = (JSON.parse(File.read(wb_ids_path))['workbookId'] rescue nil) if File.exist?(wb_ids_path)
+        end
+        warn "       Review: ruby scripts/cleanup-orphan-workbooks.rb --workdir #{opts[:tab]} --keep #{live_id || '<live-workbook-id>'} --dry-run"
+        warn '       Then run without --dry-run in an interactive terminal and confirm each deletion.'
         warn "       See beads-sigma-38a."
         exit 4
       end
       marker = JSON.parse(File.read(marker_path)) rescue {}
+      unless marker.is_a?(Hash) && marker['kept'].is_a?(String)
+        warn '[FAIL] gate 2/7: cleanup-marker.json is malformed or has no explicit kept workbook ID.'
+        exit 4
+      end
       if marker['failed'] && !marker['failed'].empty?
         warn "[FAIL] gate 2/7: cleanup-marker.json reports #{marker['failed'].length} failed delete(s)."
         warn "       Orphan workbooks are still in the customer's My Documents:"
         marker['failed'].each { |f| warn "         - #{f['id']} (HTTP #{f['status']})" }
         exit 4
       end
-      if marker['dry_run']
-        warn "[FAIL] gate 2/7: cleanup-marker.json is from a --dry-run; orphans were not actually deleted."
-        warn "       Re-run cleanup-orphan-workbooks.rb without --dry-run."
+      if marker['skipped'] && !marker['skipped'].empty?
+        warn "[FAIL] gate 2/7: the user kept #{marker['skipped'].length} cleanup candidate(s)."
+        marker['skipped'].each { |entry| warn "         - #{entry['id']}" }
+        warn '       This is safe, but orphan cleanup is incomplete.'
         exit 4
       end
-      kept = marker['kept'] || '(unknown)'
-      deleted = (marker['deleted'] || []).length
-      puts "[OK] gate 2/7: orphan cleanup ran — kept #{kept}, deleted #{deleted}"
+      if marker['dry_run']
+        warn "[FAIL] gate 2/7: cleanup-marker.json is from a --dry-run; orphans were not actually deleted."
+        warn '       Re-run cleanup-orphan-workbooks.rb without --dry-run in an interactive terminal.'
+        exit 4
+      end
+      kept = marker['kept']
+      unless unique_ids.include?(kept)
+        warn "[FAIL] gate 2/7: cleanup-marker.json kept #{kept}, which is not in the current ledger."
+        warn '       The marker is stale or belongs to another workdir/run.'
+        exit 4
+      end
+      live_id = opts[:wb]
+      if live_id.nil?
+        wb_ids_path = File.join(opts[:tab], 'wb-ids.json')
+        live_id = (JSON.parse(File.read(wb_ids_path))['workbookId'] rescue nil) if File.exist?(wb_ids_path)
+      end
+      if live_id && kept != live_id
+        warn "[FAIL] gate 2/7: cleanup kept #{kept}, but the authoritative live workbook is #{live_id}."
+        warn '       Refusing a marker that could describe deletion of the wrong workbook set.'
+        exit 4
+      end
+      deleted_ids = Array(marker['deleted']).map { |entry| entry.is_a?(Hash) ? entry['id'] : entry }.compact.uniq
+      expected_deleted = unique_ids - [kept]
+      missing = expected_deleted - deleted_ids
+      unexpected = deleted_ids - expected_deleted
+      if missing.any? || unexpected.any?
+        warn '[FAIL] gate 2/7: cleanup-marker.json does not exactly cover the current ledger.'
+        warn "       Missing confirmed deletions: #{missing.join(', ')}" if missing.any?
+        warn "       Unexpected deletion records: #{unexpected.join(', ')}" if unexpected.any?
+        warn '       Re-run the interactive cleanup review; stale markers cannot satisfy this gate.'
+        exit 4
+      end
+      puts "[OK] gate 2/7: user-confirmed orphan cleanup — kept #{kept}, deleted #{deleted_ids.length}"
     else
       puts "[OK] gate 2/7: only one workbook POSTed (#{unique_ids.first}) — no orphan check needed"
     end
