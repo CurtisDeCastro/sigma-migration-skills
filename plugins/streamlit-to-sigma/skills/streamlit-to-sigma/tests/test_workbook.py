@@ -11,6 +11,11 @@ sys.path.insert(0, str(SKILL))
 sys.path.insert(0, str(SKILL / "scripts" / "lib"))
 
 from converter import analyze_project, build_data_model, build_workbook  # noqa: E402
+from converter.workbook import (  # noqa: E402
+    dataframe_semantics,
+    semantic_dimension_formula,
+    semantic_measure_formula,
+)
 from code_rep import document, workbook_elements  # noqa: E402
 
 
@@ -62,6 +67,35 @@ class WorkbookTest(unittest.TestCase):
         self.assertIn(f"Sum([{source['name']}/Revenue])", formulas)
         self.assertIn(f"Sum([{source['name']}/Profit])", formulas)
         self.assertIn(f"CountDistinct([{source['name']}/Order Id])", formulas)
+
+    def test_common_pandas_semantics_lower_to_sigma_formulas(self):
+        expression = (
+            "df.groupby('region', as_index=False)"
+            ".agg(revenue=('net_revenue', 'sum'), orders=('order_id', 'nunique'))"
+        )
+        self.assertEqual(
+            dataframe_semantics(expression),
+            {
+                "groupBy": ["region"],
+                "aggregates": {
+                    "revenue": ("net_revenue", "sum"),
+                    "orders": ("order_id", "nunique"),
+                },
+            },
+        )
+        columns = ["order_date", "net_revenue", "order_id", "days_to_ship"]
+        self.assertEqual(
+            semantic_dimension_formula("month", "Orders", columns),
+            'DateTrunc("month", [Orders/order_date])',
+        )
+        self.assertEqual(
+            semantic_measure_formula("revenue", "Orders", columns),
+            "Sum([Orders/net_revenue])",
+        )
+        self.assertEqual(
+            semantic_measure_formula("on_time_pct", "Orders", columns),
+            "Avg(If([Orders/days_to_ship] <= 3, 1, 0))",
+        )
 
     def test_data_model_candidate(self):
         result = build_data_model(self.ir, "connection-1", "folder-1")

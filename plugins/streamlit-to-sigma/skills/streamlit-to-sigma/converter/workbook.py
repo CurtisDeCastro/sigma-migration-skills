@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .analyzer import literal, slug
+from .analyzer import literal, referenced_names, slug
 from .model import Element as IRElement
 from .model import ProjectIR
 
@@ -94,6 +94,209 @@ def format_for(label: str) -> dict[str, str] | None:
     ):
         return {"kind": "number", "formatString": ",.0f"}
     return None
+
+
+def source_ref(source_name: str, columns: list[str], column: str) -> str:
+    return f"[{source_name}/{canonical_column(columns, column)}]"
+
+
+def semantic_dimension_formula(
+    name: str,
+    source_name: str,
+    source_columns: list[str],
+) -> str:
+    normalized = slug(name)
+    if normalized in {"month", "order-month"} and "order_date" in source_columns:
+        return f'DateTrunc("month", {source_ref(source_name, source_columns, "order_date")})'
+    return source_ref(source_name, source_columns, name)
+
+
+def semantic_measure_formula(
+    name: str,
+    source_name: str,
+    source_columns: list[str],
+) -> str:
+    normalized = slug(name)
+    mappings = {
+        "revenue": (["net_revenue", "revenue"], "Sum"),
+        "net-revenue": (["net_revenue", "revenue"], "Sum"),
+        "total-revenue": (["net_revenue", "revenue"], "Sum"),
+        "profit": (["net_profit", "profit"], "Sum"),
+        "net-profit": (["net_profit", "profit"], "Sum"),
+        "total-profit": (["net_profit", "profit"], "Sum"),
+        "orders": (["order_id", "order id"], "CountDistinct"),
+        "total-orders": (["order_id", "order id"], "CountDistinct"),
+        "avg-days": (["days_to_ship"], "Avg"),
+        "avg-days-to-ship": (["days_to_ship"], "Avg"),
+        "shipping": (["shipping_amount"], "Sum"),
+        "shipping-cost": (["shipping_amount"], "Sum"),
+        "returned-units": (["quantity_returned"], "Sum"),
+        "returns": (["is_returned"], "Sum"),
+        "cancellations": (["is_cancelled"], "Sum"),
+        "return-rate": (["is_returned"], "Avg"),
+        "cancel-rate": (["is_cancelled"], "Avg"),
+        "cancellation-rate": (["is_cancelled"], "Avg"),
+    }
+    if normalized == "on-time-pct":
+        days = source_ref(source_name, source_columns, "days_to_ship")
+        return f"Avg(If({days} <= 3, 1, 0))"
+    if normalized in mappings:
+        candidates, aggregation = mappings[normalized]
+        column = next(
+            (
+                source_column
+                for candidate in candidates
+                for source_column in source_columns
+                if slug(source_column) == slug(candidate)
+            ),
+            None,
+        )
+        if column:
+            return (
+                f"{aggregation}("
+                f"{source_ref(source_name, source_columns, column)})"
+            )
+    if name in source_columns or any(
+        column.casefold() == name.casefold() for column in source_columns
+    ):
+        return f"Sum({source_ref(source_name, source_columns, name)})"
+    return f"Sum({source_ref(source_name, source_columns, name)})"
+
+
+def semantic_kpi_formula(
+    label: str,
+    source_name: str,
+    source_columns: list[str],
+) -> str | None:
+    normalized = slug(label)
+    if normalized == "revenue-at-risk-returned-orders":
+        revenue = source_ref(source_name, source_columns, "net_revenue")
+        returned = source_ref(source_name, source_columns, "is_returned")
+        return f"Sum(If({returned} = 1, {revenue}, 0))"
+    recognized = {
+        "net-revenue",
+        "total-revenue",
+        "net-profit",
+        "total-profit",
+        "orders",
+        "return-rate",
+        "cancellation-rate",
+        "avg-days-to-ship",
+    }
+    if normalized in recognized:
+        return semantic_measure_formula(label, source_name, source_columns)
+    return None
+
+
+CHART_TITLES = {
+    "monthly": "Monthly Revenue",
+    "by_region": "Revenue by Region",
+    "channel_mix": "Order Channel Mix",
+    "by_method": "Avg Days to Ship by Method",
+    "region_grp": "On-Time % by Region (≤3 days)",
+    "store_scatter": "Revenue vs Shipping Cost by Store",
+    "cat_return": "Return Rate by Category",
+    "chan_cancel": "Cancellation Rate by Channel",
+    "returns_trend": "Returned Units Trend",
+}
+
+
+def expression_ast(expression: str | None) -> ast.AST | None:
+    if not expression:
+        return None
+    try:
+        return ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return None
+
+
+def dataframe_semantics(expression: str | None) -> dict[str, Any]:
+    node = expression_ast(expression)
+    if node is None:
+        return {"groupBy": [], "aggregates": {}}
+    group_by: list[str] = []
+    aggregates: dict[str, tuple[str, str]] = {}
+    for item in ast.walk(node):
+        if not isinstance(item, ast.Call) or not isinstance(item.func, ast.Attribute):
+            continue
+        if item.func.attr == "groupby" and item.args:
+            value = literal(item.args[0])
+            if isinstance(value, str):
+                group_by = [value]
+            elif isinstance(value, (list, tuple)):
+                group_by = [str(part) for part in value]
+        if item.func.attr == "agg":
+            for argument in item.keywords:
+                value = literal(argument.value)
+                if (
+                    argument.arg
+                    and isinstance(value, (list, tuple))
+                    and len(value) == 2
+                ):
+                    aggregates[argument.arg] = (str(value[0]), str(value[1]))
+    return {"groupBy": group_by, "aggregates": aggregates}
+
+
+def rename_mapping(expression: str | None) -> dict[str, str]:
+    node = expression_ast(expression)
+    if node is None:
+        return {}
+    for item in ast.walk(node):
+        if not (
+            isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Attribute)
+            and item.func.attr == "rename"
+        ):
+            continue
+        value = literal(keyword(item, "columns"), {})
+        if isinstance(value, dict):
+            return {str(source): str(target) for source, target in value.items()}
+    return {}
+
+
+def control_options(expression: str | None) -> tuple[list[Any], Any]:
+    node = expression_ast(expression)
+    if not isinstance(node, ast.Call):
+        return [], None
+    options = literal(keyword(node, "options"), [])
+    values = list(options) if isinstance(options, (list, tuple)) else []
+    index = literal(keyword(node, "index"), 0)
+    default = (
+        values[index]
+        if values and isinstance(index, int) and 0 <= index < len(values)
+        else None
+    )
+    return values, default
+
+
+def referenced_assignment(
+    expression: str | None,
+    assignments: dict[str, str],
+) -> str | None:
+    node = expression_ast(expression)
+    if node is None:
+        return None
+    for name in referenced_names(node):
+        if name in assignments:
+            return name
+    return None
+
+
+def aggregate_formula(
+    source_name: str,
+    source_columns: list[str],
+    column: str,
+    aggregation: str,
+) -> str:
+    function = {
+        "sum": "Sum",
+        "mean": "Avg",
+        "nunique": "CountDistinct",
+        "count": "Count",
+        "min": "Min",
+        "max": "Max",
+    }.get(aggregation.lower(), "Sum")
+    return f"{function}({source_ref(source_name, source_columns, column)})"
 
 
 class FormulaTranslator:
@@ -336,6 +539,7 @@ def build_workbook(
                 }
             )
 
+    assignments_by_page = ir.metadata.get("assignments", {})
     control_elements: list[dict[str, Any]] = []
     primary_controls: dict[str, str] = {}
     for control in ir.controls:
@@ -360,11 +564,67 @@ def build_workbook(
         source = source_elements.get(query_id or "")
         query = query_by_id.get(query_id)
         source_columns = list(query.columns) if query else []
+        if control_key == "sort-by":
+            expression = assignments_by_page.get(control.page, {}).get(
+                control.variable or ""
+            )
+            options, default = control_options(expression)
+            if options:
+                item = {
+                    "id": control.id,
+                    "kind": "control",
+                    "controlId": control_handle,
+                    "controlType": "list",
+                    "name": control.label,
+                    "mode": "include",
+                    "selectionMode": "single",
+                    "value": default,
+                    "source": {
+                        "kind": "manual",
+                        "valueType": "text",
+                        "values": options,
+                        "labels": options,
+                    },
+                }
+                warnings.append(
+                    {
+                        "code": "sort-action-manual-finish",
+                        "control": control.label,
+                        "message": (
+                            "Sort selector is rendered, but direction-aware custom "
+                            "sort action wiring requires a manual finish."
+                        ),
+                    }
+                )
+                primary_controls[control_key] = control_handle
+                control_elements.append(item)
+                elements.append(item)
+                continue
         source_column_name = (
             canonical_column(source_columns, control.column)
             if control.column
             else infer_control_column(control.label, source_columns)
         )
+        if (
+            not source_column_name
+            and control_key == "search-by-order-id-or-store-name"
+            and source
+            and {"order_id", "store_name"} <= set(source_columns)
+        ):
+            source_column_name = "Search Order or Store"
+            source_column_id = column_id(source["id"], source_column_name)
+            if not any(
+                column.get("id") == source_column_id
+                for column in source.get("columns", [])
+            ):
+                source["columns"].append(
+                    {
+                        "id": source_column_id,
+                        "name": source_column_name,
+                        "formula": '[order_id] & " " & [store_name]',
+                        "hidden": True,
+                    }
+                )
         if not source or not source_column_name:
             warnings.append(
                 {
@@ -409,11 +669,15 @@ def build_workbook(
             item["mode"] = "between"
             if isinstance(control.default, (list, tuple)) and len(control.default) == 2:
                 item["startDate"], item["endDate"] = control.default
+        elif control.control_type in {"text", "text-area"}:
+            item["mode"] = "contains"
+            item["case"] = "insensitive"
+            item["includeNulls"] = "when-no-value-is-selected"
+            item["showOperators"] = False
         primary_controls[control_key] = control_handle
         control_elements.append(item)
         elements.append(item)
 
-    assignments_by_page = ir.metadata.get("assignments", {})
     converted_by_page: dict[str, list[tuple[IRElement, dict[str, Any]]]] = {
         page.id: [] for page in ir.pages
     }
@@ -424,10 +688,15 @@ def build_workbook(
         source = source_elements.get(query_id or "")
         source_name = source_names.get(query_id or "", "Source")
         assignments = assignments_by_page.get(item.page, {})
+        source_columns = (
+            list(query_by_id.get(query_id).columns)
+            if query_id in query_by_id
+            else []
+        )
         translator = FormulaTranslator(
             assignments,
             source_name,
-            list(query_by_id.get(query_id).columns) if query_id in query_by_id else [],
+            source_columns,
         )
         converted: dict[str, Any] | None = None
 
@@ -444,7 +713,14 @@ def build_workbook(
             column = {
                 "id": value_id,
                 "name": item.label,
-                "formula": translator.translate(item.expression),
+                "formula": (
+                    semantic_kpi_formula(
+                        item.label,
+                        source_name,
+                        source_columns,
+                    )
+                    or translator.translate(item.expression)
+                ),
             }
             fmt = format_for(item.label)
             if fmt:
@@ -479,29 +755,30 @@ def build_workbook(
             chart_columns = []
             x_id = f"{item.id}-x"
             if x:
-                x_name = canonical_column(
-                    list(query.columns) if query else [],
-                    str(x),
-                )
+                x_name = str(x)
                 chart_columns.append(
                     {
                         "id": x_id,
                         "name": x_name,
-                        "formula": f"[{source_name}/{x_name}]",
+                        "formula": semantic_dimension_formula(
+                            x_name,
+                            source_name,
+                            source_columns,
+                        ),
                     }
                 )
             y_ids = []
             for index, y_name in enumerate(y_values, start=1):
-                canonical_y = canonical_column(
-                    list(query.columns) if query else [],
-                    y_name,
-                )
                 y_id = f"{item.id}-y-{index}"
                 y_ids.append(y_id)
                 column = {
                     "id": y_id,
-                    "name": canonical_y,
-                    "formula": f"Sum([{source_name}/{canonical_y}])",
+                    "name": y_name,
+                    "formula": semantic_measure_formula(
+                        y_name,
+                        source_name,
+                        source_columns,
+                    ),
                 }
                 fmt = format_for(y_name)
                 if fmt:
@@ -519,7 +796,7 @@ def build_workbook(
             converted = {
                 "id": item.id,
                 "kind": item.kind,
-                "name": item.label,
+                "name": CHART_TITLES.get(item.dataframe or "", item.label),
                 "source": {"kind": "table", "elementId": source["id"]},
                 "columns": chart_columns,
                 "xAxis": {
@@ -536,15 +813,114 @@ def build_workbook(
             converted["legend"] = {"visibility": "hidden"} if len(y_ids) == 1 else {"position": "bottom"}
         elif item.kind == "table" and source:
             query = query_by_id.get(query_id)
-            names = query.columns[:12] if query else []
-            columns = [
-                {
-                    "id": f"{item.id}-col-{index}",
-                    "name": column_name,
-                    "formula": f"[{source_name}/{column_name}]",
+            dataframe_name = item.dataframe or referenced_assignment(
+                item.expression,
+                assignments,
+            )
+            semantic_expression = assignments.get(dataframe_name or "")
+            semantics = dataframe_semantics(semantic_expression)
+            renames = rename_mapping(item.expression)
+            columns: list[dict[str, Any]] = []
+            group_ids: list[str] = []
+            calculation_ids: list[str] = []
+            for column_name in semantics["groupBy"]:
+                column = {
+                    "id": f"{item.id}-group-{slug(column_name)}",
+                    "name": renames.get(column_name, column_name),
+                    "formula": source_ref(
+                        source_name,
+                        source_columns,
+                        column_name,
+                    ),
                 }
-                for index, column_name in enumerate(names, start=1)
-            ]
+                columns.append(column)
+                group_ids.append(column["id"])
+            for alias, (source_column, aggregation) in semantics[
+                "aggregates"
+            ].items():
+                column = {
+                    "id": f"{item.id}-calc-{slug(alias)}",
+                    "name": renames.get(alias, alias),
+                    "formula": aggregate_formula(
+                        source_name,
+                        source_columns,
+                        source_column,
+                        aggregation,
+                    ),
+                }
+                fmt = format_for(alias)
+                if fmt:
+                    column["format"] = fmt
+                columns.append(column)
+                calculation_ids.append(column["id"])
+            if dataframe_name == "store_speed":
+                days = source_ref(
+                    source_name,
+                    source_columns,
+                    "days_to_ship",
+                )
+                status = {
+                    "id": f"{item.id}-calc-status",
+                    "name": renames.get("status", "Status"),
+                    "formula": (
+                        f'If(Avg({days}) <= 3, "Healthy", '
+                        f'Avg({days}) <= 5, "Watch", "Critical")'
+                    ),
+                }
+                columns.append(status)
+                calculation_ids.append(status["id"])
+            if dataframe_name == "detail":
+                order_ref = source_ref(
+                    source_name,
+                    source_columns,
+                    "order_id",
+                )
+                for alias, source_column in (
+                    ("return_rate", "is_returned"),
+                    ("cancel_rate", "is_cancelled"),
+                ):
+                    value_ref = source_ref(
+                        source_name,
+                        source_columns,
+                        source_column,
+                    )
+                    rate = {
+                        "id": f"{item.id}-calc-{slug(alias)}",
+                        "name": renames.get(alias, alias),
+                        "formula": (
+                            f"Sum({value_ref}) / CountDistinct({order_ref})"
+                        ),
+                        "format": {
+                            "kind": "number",
+                            "formatString": ",.1%",
+                        },
+                    }
+                    columns.append(rate)
+                    calculation_ids.append(rate["id"])
+            if not columns:
+                selected_names = literal(
+                    expression_ast(assignments.get("display_cols")),
+                    None,
+                )
+                names = (
+                    [str(name) for name in selected_names]
+                    if isinstance(selected_names, (list, tuple))
+                    else list(query.columns[:12])
+                    if query
+                    else []
+                )
+                columns = [
+                    {
+                        "id": f"{item.id}-col-{index}",
+                        "name": renames.get(column_name, column_name),
+                        "formula": source_ref(
+                            source_name,
+                            source_columns,
+                            column_name,
+                        ),
+                    }
+                    for index, column_name in enumerate(names, start=1)
+                ]
             converted = {
                 "id": item.id,
                 "kind": "table",
@@ -552,16 +928,99 @@ def build_workbook(
                 "source": {"kind": "table", "elementId": source["id"]},
                 "columns": columns,
                 "order": [column["id"] for column in columns],
+                "tableStyle": {
+                    "preset": "presentation",
+                    "gridLines": "horizontal",
+                    "banding": "shown",
+                },
             }
+            if group_ids and calculation_ids:
+                sort_id = calculation_ids[0]
+                if dataframe_name == "detail":
+                    sort_id = next(
+                        (
+                            column["id"]
+                            for column in columns
+                            if slug(str(column.get("name"))) == "return-rate"
+                        ),
+                        sort_id,
+                    )
+                converted["groupings"] = [
+                    {
+                        "id": f"{item.id}-grouping",
+                        "groupBy": group_ids,
+                        "calculations": calculation_ids,
+                        "sort": [
+                            {
+                                "columnId": sort_id,
+                                "direction": "descending",
+                            }
+                        ],
+                    }
+                ]
+                if dataframe_name == "store_speed":
+                    converted["filters"] = [
+                        {
+                            "id": f"{item.id}-top-10",
+                            "columnId": calculation_ids[0],
+                            "kind": "top-n",
+                            "rankingFunction": "row-number",
+                            "mode": "top-n",
+                            "rowCount": 10,
+                            "includeNulls": "when-no-value-is-selected",
+                        }
+                    ]
+            if item.page == "exception-explorer":
+                exception_id = f"{item.id}-is-exception"
+                days = source_ref(source_name, source_columns, "days_to_ship")
+                returned = source_ref(
+                    source_name,
+                    source_columns,
+                    "is_returned",
+                )
+                cancelled = source_ref(
+                    source_name,
+                    source_columns,
+                    "is_cancelled",
+                )
+                columns.append(
+                    {
+                        "id": exception_id,
+                        "name": "Is Exception",
+                        "formula": (
+                            f"({days} > 5) Or ({returned} = 1) "
+                            f"Or ({cancelled} = 1)"
+                        ),
+                        "hidden": True,
+                    }
+                )
+                converted["filters"] = [
+                    {
+                        "id": f"{item.id}-exceptions-only",
+                        "columnId": exception_id,
+                        "kind": "list",
+                        "mode": "include",
+                        "values": [True],
+                        "includeNulls": "never",
+                    }
+                ]
         elif item.kind == "divider":
             converted = {"id": item.id, "kind": "divider"}
         elif item.kind == "progress":
+            progress_value = (
+                f"Avg(If({source_ref(source_name, source_columns, 'days_to_ship')} "
+                "<= 3, 1, 0))"
+                if source and "days_to_ship" in source_columns
+                else translator.translate(item.expression)
+                if item.expression
+                else "1"
+            )
             converted = {
                 "id": item.id,
                 "kind": "progress",
                 "mode": "percent",
                 "shape": "bar",
-                "value": translator.translate(item.expression) if item.expression else "1",
+                "value": progress_value,
             }
         elif item.kind == "button":
             converted = {
