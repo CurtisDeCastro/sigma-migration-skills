@@ -154,10 +154,10 @@ class WorkbookTest(unittest.TestCase):
                     df = load_data()
                     left, right = st.columns(2)
                     with left:
-                        st.subheader("Left")
+                        st.caption("Left note")
                         st.bar_chart(df, x="region", y="revenue")
                     with right:
-                        st.subheader("Right")
+                        st.caption("Right note")
                         st.bar_chart(df, x="region", y="revenue")
                     """
                 ),
@@ -166,7 +166,9 @@ class WorkbookTest(unittest.TestCase):
             ir = analyze_project(root)
             result = build_workbook(ir, "connection-1", "folder-1")
             layout = document(result["workbook"])["layout"]
-            left_text = next(item.id for item in ir.elements if item.label == "Left")
+            left_text = next(
+                item.id for item in ir.elements if item.label == "Left note"
+            )
             left_chart = next(
                 item.id
                 for item in ir.elements
