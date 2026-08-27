@@ -62,6 +62,25 @@ Browser CSV download is public-spec authorable:
 This maps a Streamlit `download_button` over a displayed dataframe directly;
 do not substitute a refresh action.
 
+Table custom sort uses the target key `elementId` and:
+
+```json
+{
+  "type": "level",
+  "columns": [
+    {
+      "columnId": "table-column-id",
+      "direction": "descending",
+      "nulls": "last"
+    }
+  ]
+}
+```
+
+For a Streamlit sort selector whose direction varies by option, attach an
+`on-change` action to the control and branch to one `custom-sort` effect per
+option with `if-else`.
+
 ## Python and `code-output`
 
 The OpenAPI now exposes a downstream source for one named `sigma.output()`:

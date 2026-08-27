@@ -17,6 +17,7 @@ converted”; unresolved lineage always becomes a gap.
 | progress | progress | direct for resolvable/static value |
 | columns | proportional grid | direct |
 | tabs | tabbed container | direct |
+| navigation/pages | page metadata plus vertical navigation element | direct |
 | popover/expander/status | popover overlay | mechanical |
 | button | button | direct visually; classify action host as spec-native or manual-ui-finish |
 | download button over displayed data | browser export action | direct when target element and format resolve |
@@ -101,6 +102,11 @@ do not invent one.
 Current selected-row action values use `columnId`, `minColumnId`, and
 `maxColumnId`; Run Python uses `codeElementId`. Use the live-verified builders in
 `converter/api_capabilities.py`.
+
+A literal sort selector over known table columns maps to `custom-sort` effects.
+Use `elementId` for the target and a table-level sort object:
+`{type: level, columns: [{columnId, direction, nulls}]}`. Branch with `if-else`
+when different options require different directions.
 
 ## Plugin candidates
 

@@ -604,16 +604,6 @@ def build_workbook(
                         "labels": options,
                     },
                 }
-                warnings.append(
-                    {
-                        "code": "sort-action-manual-finish",
-                        "control": control.label,
-                        "message": (
-                            "Sort selector is rendered, but direction-aware custom "
-                            "sort action wiring requires a manual finish."
-                        ),
-                    }
-                )
                 primary_controls[control_key] = control_handle
                 control_elements.append(item)
                 elements.append(item)
@@ -1306,6 +1296,107 @@ def build_workbook(
             elements.append(converted)
             converted_by_page.setdefault(item.page, []).append((item, converted))
 
+    sort_control = next(
+        (
+            element
+            for element in control_elements
+            if element.get("name") == "Sort by"
+        ),
+        None,
+    )
+    exception_table = next(
+        (
+            element
+            for element in elements
+            if element.get("name") == "Exception Rows"
+        ),
+        None,
+    )
+    if sort_control and exception_table:
+        sort_fields = {
+            "days_to_ship": "descending",
+            "net_revenue": "descending",
+            "order_date": "ascending",
+            "store_name": "ascending",
+        }
+        column_ids = {}
+        for raw_name in sort_fields:
+            column_ids[raw_name] = next(
+                (
+                    column["id"]
+                    for column in exception_table.get("columns", [])
+                    if str(column.get("formula", "")).endswith(
+                        f"/{raw_name}]"
+                    )
+                ),
+                None,
+            )
+
+        def sort_effect(raw_name: str) -> dict[str, Any]:
+            return {
+                "effect": "custom-sort",
+                "elementId": exception_table["id"],
+                "sort": {
+                    "type": "level",
+                    "columns": [
+                        {
+                            "columnId": column_ids[raw_name],
+                            "direction": sort_fields[raw_name],
+                            "nulls": "last",
+                        }
+                    ],
+                },
+            }
+
+        available_fields = [
+            name for name, column in column_ids.items() if column
+        ]
+        if len(available_fields) == len(sort_fields):
+            first, *remaining = list(sort_fields)
+            sort_control["actions"] = [
+                {
+                    "id": f"{sort_control['id']}-sort",
+                    "trigger": "on-change",
+                    "effects": [
+                        {
+                            "effect": "if-else",
+                            "if": {
+                                "condition": {
+                                    "type": "formula",
+                                    "formula": (
+                                        f"[{sort_control['controlId']}] "
+                                        f'= "{first}"'
+                                    ),
+                                },
+                                "effects": [sort_effect(first)],
+                            },
+                            "elseif": [
+                                {
+                                    "condition": {
+                                        "type": "formula",
+                                        "formula": (
+                                            f"[{sort_control['controlId']}] "
+                                            f'= "{raw_name}"'
+                                        ),
+                                    },
+                                    "effects": [sort_effect(raw_name)],
+                                }
+                                for raw_name in remaining[:-1]
+                            ],
+                            "else": {
+                                "effects": [sort_effect(remaining[-1])]
+                            },
+                        }
+                    ],
+                }
+            ]
+            exception_table["sort"] = [
+                {
+                    "columnId": column_ids["days_to_ship"],
+                    "direction": "descending",
+                }
+            ]
+
     # Add controls to page placement lists.
     controls_by_page = {
         page.id: [
@@ -1424,14 +1515,39 @@ def build_workbook(
 
         if sidebar_pairs:
             sidebar_id = f"sidebar-{page.id}"
+            navigation_id = f"navigation-{page.id}"
             sidebar_element = {
                 "id": sidebar_id,
                 "kind": "container",
                 "style": {"backgroundColor": "#F5F6F8", "borderRadius": "square"},
             }
+            navigation_element = {
+                "id": navigation_id,
+                "kind": "navigation",
+                "mode": "manual",
+                "options": [
+                    {
+                        "label": destination.name,
+                        "destination": {
+                            "type": "page",
+                            "pageId": destination.id,
+                        },
+                    }
+                    for destination in ir.pages
+                ],
+                "showIcons": False,
+                "optionStyle": {
+                    "orientation": "vertical",
+                    "alignment": "left",
+                },
+            }
             elements.append(sidebar_element)
-            child_lines = []
-            child_row = 1
+            elements.append(navigation_element)
+            child_lines = [
+                f'    <Element elementId="{navigation_id}" '
+                'gridColumn="2 / 24" gridRow="1 / 13"/>'
+            ]
+            child_row = 13
             for _, converted in sidebar_pairs:
                 span = height(converted["kind"])
                 child_lines.append(

@@ -353,6 +353,18 @@ class WorkbookTest(unittest.TestCase):
                 {"type": "control", "controlId": "ctl-region-applied"},
                 scopes,
             )
+            navigation = [
+                item for item in elements if item["kind"] == "navigation"
+            ]
+            self.assertEqual(len(navigation), 2)
+            self.assertEqual(
+                navigation[0]["optionStyle"]["orientation"],
+                "vertical",
+            )
+            self.assertEqual(
+                [option["label"] for option in navigation[0]["options"]],
+                ["One", "Two"],
+            )
             self.assertRegex(
                 document(result["workbook"])["layout"],
                 rf'<Page[^>]+id="data">[\s\S]*elementId="{target["id"]}"',
