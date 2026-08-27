@@ -1573,7 +1573,8 @@ def analyze_project(source: str | Path) -> ProjectIR:
             "unsupported-dataframe-operation",
             "dataframe-column-mutation",
         } and any(
-            f"`{name}" in gap.message for name in lowered_dataframes
+            f"`{name}`" in gap.message or f": {name}[" in gap.message
+            for name in lowered_dataframes
         ):
             gap.resolved = True
             gap.resolution = (
