@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .analyzer import literal, referenced_names, slug
+from .analyzer import keyword, literal, referenced_names, slug
 from .model import Element as IRElement
 from .model import ProjectIR
 
