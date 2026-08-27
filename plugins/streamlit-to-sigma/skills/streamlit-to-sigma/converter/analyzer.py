@@ -1119,8 +1119,11 @@ class ModuleAnalyzer(ast.NodeVisitor):
             if leaf == "download_button":
                 self.add_gap(
                     "download-action",
-                    "review",
-                    "Download behavior maps to Sigma export, not a spec-authored file payload.",
+                    "info",
+                    (
+                        "Download maps to a browser export action; verify the "
+                        "displayed source element and requested file format."
+                    ),
                     leaf,
                     call,
                 )

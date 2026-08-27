@@ -2,6 +2,7 @@
 
 from .api_capabilities import (
     code_output_source,
+    download_element_effect,
     run_python_effect,
     selected_column_range_value,
     selected_column_value,
@@ -15,6 +16,7 @@ __all__ = [
     "build_data_model",
     "build_workbook",
     "code_output_source",
+    "download_element_effect",
     "run_python_effect",
     "selected_column_range_value",
     "selected_column_value",

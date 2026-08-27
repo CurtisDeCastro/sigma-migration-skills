@@ -249,6 +249,115 @@ class WorkbookTest(unittest.TestCase):
                 2,
             )
 
+    def test_deferred_shared_filter_uses_hidden_target_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app_pages").mkdir()
+            (root / "lib").mkdir()
+            (root / "streamlit_app.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    from lib.filters import render_filters
+                    render_filters(df)
+                    page = st.navigation([
+                        st.Page("app_pages/one.py", title="One"),
+                        st.Page("app_pages/two.py", title="Two"),
+                    ])
+                    page.run()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            for page in ("one", "two"):
+                (root / "app_pages" / f"{page}.py").write_text(
+                    "import streamlit as st\nst.title('Page')\n",
+                    encoding="utf-8",
+                )
+            (root / "lib" / "data.py").write_text(
+                textwrap.dedent(
+                    """
+                    def load_data(conn):
+                        return conn.query(
+                            "SELECT region, revenue FROM db.s.orders"
+                        )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / "lib" / "filters.py").write_text(
+                textwrap.dedent(
+                    """
+                    import streamlit as st
+                    def render_filters(df):
+                        regions = sorted(df["region"].unique().tolist())
+                        with st.sidebar:
+                            with st.form("filters"):
+                                st.multiselect("Region", options=regions)
+                                st.form_submit_button("Apply Filters")
+                            if st.sidebar.button("Reset"):
+                                st.rerun()
+                    """
+                ),
+                encoding="utf-8",
+            )
+            ir = analyze_project(root)
+            result = build_workbook(ir, "connection-1", "folder-1")
+            elements = workbook_elements(result["workbook"])
+            controls = [item for item in elements if item["kind"] == "control"]
+            target = next(
+                item
+                for item in controls
+                if item["controlId"] == "ctl-region-applied"
+            )
+            staging = next(
+                item
+                for item in controls
+                if item["controlId"] == "ctl-region-staged"
+                and item["controlType"] == "list"
+            )
+            synced = next(
+                item for item in controls if item["controlType"] == "synced"
+            )
+            self.assertIn("filters", target)
+            self.assertNotIn("filters", staging)
+            self.assertEqual(synced["controlId"], staging["controlId"])
+            apply_button = next(
+                item
+                for item in elements
+                if item.get("text") == "Apply Filters"
+            )
+            self.assertEqual(
+                apply_button["actions"][0]["effects"][0],
+                {
+                    "effect": "set-control-value",
+                    "control": "ctl-region-applied",
+                    "value": {
+                        "type": "control",
+                        "control": "ctl-region-staged",
+                    },
+                },
+            )
+            reset_button = next(
+                item for item in elements if item.get("text") == "Reset"
+            )
+            scopes = [
+                effect["scope"]
+                for effect in reset_button["actions"][0]["effects"]
+            ]
+            self.assertIn(
+                {"type": "control", "controlId": "ctl-region-staged"},
+                scopes,
+            )
+            self.assertIn(
+                {"type": "control", "controlId": "ctl-region-applied"},
+                scopes,
+            )
+            self.assertRegex(
+                document(result["workbook"])["layout"],
+                rf'<Page[^>]+id="data">[\s\S]*elementId="{target["id"]}"',
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

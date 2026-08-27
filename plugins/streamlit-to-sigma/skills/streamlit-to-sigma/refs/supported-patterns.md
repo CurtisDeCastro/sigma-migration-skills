@@ -19,6 +19,7 @@ converted”; unresolved lineage always becomes a gap.
 | tabs | tabbed container | direct |
 | popover/expander/status | popover overlay | mechanical |
 | button | button | direct visually; classify action host as spec-native or manual-ui-finish |
+| download button over displayed data | browser export action | direct when target element and format resolve |
 | data editor | input table/writeback | warehouse-backed/redesign until explicitly designed |
 | chat input/message and AI client calls | existing workbook agent | workbook-agent-candidate |
 

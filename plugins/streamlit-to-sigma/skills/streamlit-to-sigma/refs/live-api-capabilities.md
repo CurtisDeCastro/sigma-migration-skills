@@ -34,6 +34,34 @@ and:
 
 Use `converter/api_capabilities.py`; do not transcribe older shapes.
 
+## Deferred filters and browser downloads
+
+Live readback confirmed the deferred form pattern:
+
+- visible staging control has a value-list source but no `filters`;
+- hidden target control has the real `filters` binding;
+- Apply uses `set-control-value` with
+  `value: {type: control, control: <staging-controlId>}`;
+- Reset clears both with
+  `scope: {type: control, controlId: <controlId>}`.
+
+The `controlId` key is significant. An older `{type: control, control: ...}`
+clear-scope shape is not the current readback contract.
+
+Browser CSV download is public-spec authorable:
+
+```json
+{
+  "effect": "export",
+  "channel": "download",
+  "source": {"type": "element", "element": "table-element-id"},
+  "format": {"type": "csv"}
+}
+```
+
+This maps a Streamlit `download_button` over a displayed dataframe directly;
+do not substitute a refresh action.
+
 ## Python and `code-output`
 
 The OpenAPI now exposes a downstream source for one named `sigma.output()`:

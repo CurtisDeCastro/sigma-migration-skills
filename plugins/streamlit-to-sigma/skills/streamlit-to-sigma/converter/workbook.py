@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import copy
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from .analyzer import keyword, literal, referenced_names, slug
+from .api_capabilities import download_element_effect
 from .model import Element as IRElement
 from .model import ProjectIR
 
@@ -542,10 +544,25 @@ def build_workbook(
 
     assignments_by_page = ir.metadata.get("assignments", {})
     control_elements: list[dict[str, Any]] = []
+    target_control_elements: list[dict[str, Any]] = []
+    control_counts = {
+        slug(control.label): sum(
+            1
+            for candidate in ir.controls
+            if slug(candidate.label) == slug(control.label)
+        )
+        for control in ir.controls
+    }
     primary_controls: dict[str, str] = {}
+    applied_controls: dict[str, str] = {}
     for control in ir.controls:
         control_key = slug(control.label)
-        control_handle = f"ctl-{control_key[:28]}"
+        deferred = control_counts[control_key] > 1
+        control_handle = (
+            f"ctl-{control_key[:20]}-staged"
+            if deferred
+            else f"ctl-{control_key[:28]}"
+        )
         if control_key in primary_controls:
             item = {
                 "id": control.id,
@@ -675,6 +692,16 @@ def build_workbook(
             item["case"] = "insensitive"
             item["includeNulls"] = "when-no-value-is-selected"
             item["showOperators"] = False
+        if deferred:
+            applied_handle = f"ctl-{control_key[:20]}-applied"
+            target_item = copy.deepcopy(item)
+            target_item["id"] = f"target-control-{control_key[:32]}"
+            target_item["controlId"] = applied_handle
+            target_item["name"] = f"Applied {control.label}"
+            target_control_elements.append(target_item)
+            elements.append(target_item)
+            applied_controls[control_key] = applied_handle
+            item.pop("filters", None)
         primary_controls[control_key] = control_handle
         control_elements.append(item)
         elements.append(item)
@@ -1198,32 +1225,77 @@ def build_workbook(
                 "value": progress_value,
             }
         elif item.kind == "button":
+            button_text = str(
+                item.bindings.get("label")
+                or item.label
+                or "Continue"
+            )
+            if slug(button_text) == "apply-filters" and applied_controls:
+                button_effects = [
+                    {
+                        "effect": "set-control-value",
+                        "control": applied_handle,
+                        "value": {
+                            "type": "control",
+                            "control": primary_controls[control_key],
+                        },
+                    }
+                    for control_key, applied_handle in applied_controls.items()
+                ]
+            elif slug(button_text) == "reset" and applied_controls:
+                button_effects = [
+                    {
+                        "effect": "clear-control",
+                        "scope": {
+                            "type": "control",
+                            "controlId": handle,
+                        },
+                        "usePublishedValue": True,
+                    }
+                    for control_key in applied_controls
+                    for handle in (
+                        primary_controls[control_key],
+                        applied_controls[control_key],
+                    )
+                ]
+            elif item.bindings.get("file_name"):
+                export_element = next(
+                    (
+                        element["id"]
+                        for element in elements
+                        if element.get("name") == "Exception Rows"
+                    ),
+                    None,
+                )
+                button_effects = (
+                    [download_element_effect(export_element)]
+                    if export_element
+                    else []
+                )
+            else:
+                button_effects = (
+                    [
+                        {
+                            "effect": "refresh-element",
+                            "target": {
+                                "type": "element",
+                                "element": source["id"],
+                            },
+                        }
+                    ]
+                    if source
+                    else []
+                )
             converted = {
                 "id": item.id,
                 "kind": "button",
-                "text": str(
-                    item.bindings.get("label")
-                    or item.label
-                    or "Continue"
-                ),
+                "text": button_text,
                 "appearance": "outline",
                 "actions": [
                     {
                         "id": f"{item.id}-refresh",
                         "trigger": "on-click",
-                        "effects": (
-                            [
-                                {
-                                    "effect": "refresh-element",
-                                    "target": {
-                                        "type": "element",
-                                        "element": source["id"],
-                                    },
-                                }
-                            ]
-                            if source
-                            else []
-                        ),
+                        "effects": button_effects,
                     }
                 ],
             }
@@ -1549,6 +1621,12 @@ def build_workbook(
         'gridTemplateRows="auto" id="data">'
     ]
     data_row = 1
+    for target_control in target_control_elements:
+        data_lines.append(
+            f'  <Element elementId="{target_control["id"]}" '
+            f'gridColumn="1 / 9" gridRow="{data_row} / {data_row + 5}"/>'
+        )
+        data_row += 5
     for source in [*source_elements.values(), *auxiliary_sources]:
         data_lines.append(
             f'  <Element elementId="{source["id"]}" gridColumn="1 / 25" '

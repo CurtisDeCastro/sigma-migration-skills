@@ -52,3 +52,21 @@ def selected_column_range_value(
     if max_column_id:
         value["maxColumnId"] = max_column_id
     return value
+
+
+def download_element_effect(
+    element_id: str,
+    *,
+    file_format: str = "csv",
+) -> dict[str, Any]:
+    """Build a browser download action for one workbook element."""
+    if not element_id:
+        raise ValueError("element_id is required")
+    if file_format not in {"csv", "excel", "json", "pdf", "png"}:
+        raise ValueError(f"unsupported download format: {file_format}")
+    return {
+        "effect": "export",
+        "channel": "download",
+        "source": {"type": "element", "element": element_id},
+        "format": {"type": file_format},
+    }

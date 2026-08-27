@@ -8,6 +8,7 @@ sys.path.insert(0, str(SKILL))
 
 from converter import (  # noqa: E402
     code_output_source,
+    download_element_effect,
     run_python_effect,
     selected_column_range_value,
     selected_column_value,
@@ -58,6 +59,22 @@ class ApiCapabilitiesTest(unittest.TestCase):
             selected_column_value("")
         with self.assertRaises(ValueError):
             selected_column_range_value()
+
+    def test_browser_download_targets_one_element(self):
+        self.assertEqual(
+            download_element_effect("exceptions"),
+            {
+                "effect": "export",
+                "channel": "download",
+                "source": {
+                    "type": "element",
+                    "element": "exceptions",
+                },
+                "format": {"type": "csv"},
+            },
+        )
+        with self.assertRaises(ValueError):
+            download_element_effect("")
 
 
 if __name__ == "__main__":
