@@ -28,6 +28,15 @@ require 'open3'
 require 'tmpdir'
 require 'rbconfig'
 require_relative 'lib/blind_fixture'
+require 'fileutils'
+
+# Offline: a blank SIGMA_BASE_URL makes the shared client ask its token provider
+# for a host (a signed-in Sigma CLI or exported client credentials would answer),
+# so every credential-less run also pins a provider that reports no credentials.
+OFFLINE_PROVIDER_DIR = Dir.mktmpdir('offline-provider')
+at_exit { FileUtils.rm_rf(OFFLINE_PROVIDER_DIR) }
+OFFLINE_PROVIDER = File.join(OFFLINE_PROVIDER_DIR, 'provider.py')
+File.write(OFFLINE_PROVIDER, "raise SystemExit('offline test: no Sigma credentials')\n")
 
 SCRIPT = File.join(__dir__, 'assert-phase6-ran.rb')
 VERIFY = File.join(__dir__, 'verify-complete.rb')
@@ -68,7 +77,7 @@ def base_workdir(dir, parity_extra: {})
 end
 
 def run_gate(dir, *args)
-  env = { 'SIGMA_BASE_URL' => nil, 'SIGMA_API_TOKEN' => nil }
+  env = { 'SIGMA_BASE_URL' => nil, 'SIGMA_API_TOKEN' => nil, 'SIGMA_TOKEN_PROVIDER' => OFFLINE_PROVIDER }
   out, err, st = Open3.capture3(env, RbConfig.ruby, SCRIPT, '--workdir', dir, *args)
   [out, err, st]
 end
@@ -362,8 +371,8 @@ Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
   out, _err, st = run_gate_audited(dir)
   check(st.success?, "Tier-S factory green → exit 0 (got #{st.exitstatus})", fails)
-  check(out.include?("VERDICT: #{FACTORY_LABEL}"), 'RESULT line carries the labeled verdict', fails)
-  check(!out.match?(/VERDICT: GREEN \(degradation ledger empty/), 'bare-GREEN result line is unmintable on the factory path', fails)
+  check(out.include?("gate verdict: #{FACTORY_LABEL}"), 'RESULT line carries the labeled verdict', fails)
+  check(!out.match?(/gate verdict: GREEN \(degradation ledger empty/), 'bare-GREEN result line is unmintable on the factory path', fails)
   pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
   sj = JSON.parse(File.read(File.join(dir, 'phase6-success.json')))
   check(pf['verdict'] == FACTORY_LABEL && sj['verdict'] == FACTORY_LABEL,
@@ -391,8 +400,13 @@ Dir.mktmpdir do |dir|
   File.write(File.join(dir, 'migrate-state.json'),
              JSON.generate('tier' => 'M', 'tier_basis' => 'auto-predicate'))
   out, _err, st = run_gate_audited(dir)
-  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+  check(st.success? && out.include?('gate verdict: GREEN (degradation ledger empty'),
         'Tier-M self-attested keeps the bare GREEN line (no label)', fails)
+  # 2026-11-10: the gate runs before the source census / migration report, so
+  # its own line must not read as the run's final verdict.
+  check(!out.include?('VERDICT: GREEN') && out.include?('Gate verdict only') &&
+        out.include?('is what finalize / verify-complete print'),
+        'gate line says "gate verdict" and points at the final VERDICT (never a bare "VERDICT: GREEN")', fails)
   pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
   check(pf['verdict'] == 'GREEN' && pf['verdict_by'] == 'builder-self-attested',
         'Tier-M stamps bare verdict + self-attested provenance', fails)
@@ -403,7 +417,7 @@ Dir.mktmpdir do |dir|
   base_workdir(dir, parity_extra: { 'visual_notes' => 'VERIFIER: source vs render compared tile-by-tile' })
   File.write(File.join(dir, 'migrate-state.json'), JSON.generate(TIER_S_STATE))
   out, _err, st = run_gate_audited(dir)
-  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+  check(st.success? && out.include?('gate verdict: GREEN (degradation ledger empty'),
         'Tier-S countersigned run keeps the bare GREEN', fails)
   pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
   check(pf['verdict'] == 'GREEN' && pf['verdict_by'] == 'verifier',
@@ -414,7 +428,7 @@ end
 Dir.mktmpdir do |dir|
   base_workdir(dir)
   out, _err, st = run_gate_audited(dir)
-  check(st.success? && out.include?('VERDICT: GREEN (degradation ledger empty'),
+  check(st.success? && out.include?('gate verdict: GREEN (degradation ledger empty'),
         'tierless run keeps the shipped GREEN line', fails)
   vout, _verr, vst = run_verify(dir)
   check(vst.success? && vout.include?('VERDICT: GREEN'),
@@ -445,7 +459,7 @@ Dir.mktmpdir do |dir|
   pf = JSON.parse(File.read(File.join(dir, 'parity-final.json')))
   check(st.success? && pf['verdict'] == FACTORY_LABEL && pf['verdict_by'] == 'builder-self-attested',
         'zero-byte verification-result.json is not countersignature evidence (label + self-attested kept)', fails)
-  check(out.include?("VERDICT: #{FACTORY_LABEL}"), 'touch-file run still prints the labeled verdict', fails)
+  check(out.include?("gate verdict: #{FACTORY_LABEL}"), 'touch-file run still prints the labeled verdict', fails)
   File.write(File.join(dir, 'verification-result.json'), JSON.generate('note' => 'no verdict field'))
   _out2, _err2, st2 = run_gate_audited(dir)
   pf2 = JSON.parse(File.read(File.join(dir, 'parity-final.json')))

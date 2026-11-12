@@ -35,6 +35,8 @@ require 'optparse'
 require_relative 'lib/workdir_guard' # refuse a workdir inside the installed plugin
 require_relative 'lib/datasource_filter_check'
 require_relative 'lib/code_rep'
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
 
 opts = {}
 OptionParser.new do |p|
@@ -83,23 +85,32 @@ if wb_id.nil?
   wbp = File.join(work, 'wb-ids.json')
   wb_id = (JSON.parse(File.read(wbp))['workbookId'] rescue nil) if File.exist?(wbp)
 end
-base = ENV['SIGMA_BASE_URL']
-tok  = ENV['SIGMA_API_TOKEN']
 if wb_id.nil? || wb_id.to_s.empty?
   puts "[SKIP] datasource-filter gate: no workbook ID resolvable — cannot verify #{ds.size} data-source filter(s)"
   exit 0
-elsif base.nil? || base.empty? || tok.nil? || tok.empty?
-  puts "[SKIP] datasource-filter gate: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch spec to verify #{ds.size} data-source filter(s)"
+end
+# Host + token come from the shared client: explicit SIGMA_BASE_URL / SIGMA_API_TOKEN
+# win, else a signed-in Sigma CLI profile (or browser / client credentials) answers.
+base = tok = nil
+sigma_why = nil
+begin
+  base = Sigma.base_url
+  tok  = Sigma.auth_token
+rescue StandardError, SystemExit => e
+  sigma_why = e.message.to_s.lines.first.to_s.strip
+end
+if base.to_s.empty? || tok.to_s.empty?
+  puts "[SKIP] datasource-filter gate: no Sigma host/credentials resolvable#{sigma_why.to_s.empty? ? '' : " (#{sigma_why})"} — cannot fetch spec to verify #{ds.size} data-source filter(s)"
   exit 0
 end
 
-uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
+uri = URI("#{base}#{Sigma::CodeRep.read_path(wb_id)}")
 req = Net::HTTP::Get.new(uri)
 req['Authorization'] = "Bearer #{tok}"
 req['Accept'] = 'application/json'
 res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
 unless res.is_a?(Net::HTTPSuccess)
-  puts "[SKIP] datasource-filter gate: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot verify"
+  puts "[SKIP] datasource-filter gate: GET #{Sigma::CodeRep.read_path(wb_id)} returned HTTP #{res.code} — cannot verify"
   exit 0
 end
 raw_spec =
@@ -110,8 +121,8 @@ raw_spec =
     require 'date'
     YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
   end
-# Workbook code-rep GETs nest pages/elements under `document` (live since
-# 2026-08); DatasourceFilterCheck.violations expects a flat `spec['pages']`
+# Workbook code-rep GETs nest pages/elements under `contents` (`document` on
+# the retired /spec readbacks); DatasourceFilterCheck.violations expects a flat `spec['pages']`
 # (its contract stays "give me a plain document" per the shared lint-lib
 # decision — unwrap at the caller, not in the lib).
 spec = Sigma::CodeRep.document(raw_spec)

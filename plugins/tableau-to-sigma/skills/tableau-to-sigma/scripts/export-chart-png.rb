@@ -43,8 +43,13 @@ OptionParser.new do |p|
 end.parse!
 %i[workbook out_dir].each { |k| abort "missing --#{k.to_s.tr('_','-')}" unless opts[k] }
 
-BASE = ENV.fetch('SIGMA_BASE_URL')
-TOK  = ENV.fetch('SIGMA_API_TOKEN')
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
+BASE = begin
+  Sigma.base_url # explicit SIGMA_BASE_URL, else the host a signed-in Sigma CLI profile reports
+rescue Sigma::Error => e
+  abort "export-chart-png.rb: #{e.message}"
+end
 
 CHART_KINDS = %w[bar-chart line-chart area-chart combo-chart scatter-chart
                  pie-chart donut-chart kpi-chart region-map point-map
@@ -56,20 +61,21 @@ def http(method, path, body = nil, accept: 'application/json')
         when :post then r = Net::HTTP::Post.new(uri); r.body = body; r['Content-Type'] = 'application/json'; r
         when :get  then Net::HTTP::Get.new(uri)
         end
-  req['Authorization'] = "Bearer #{TOK}"
+  req['Authorization'] = "Bearer #{Sigma.auth_token}"
   req['Accept']        = accept
-  Net::HTTP.start(uri.host, uri.port, use_ssl: true, read_timeout: 60) { |h| h.request(req) }
+  Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 60) { |h| h.request(req) }
 end
 
 # 1. Discover elements to screenshot
-spec_resp = http(:get, "/v2/workbooks/#{opts[:workbook]}/spec", accept: 'application/json')
+spec_resp = http(:get, Sigma::CodeRep.read_path(opts[:workbook]), accept: 'application/json')
 abort "GET spec failed: #{spec_resp.code} #{spec_resp.body[0..200]}" unless spec_resp.code.to_i == 200
 spec = begin
   JSON.parse(spec_resp.body)
 rescue JSON::ParserError
   YAML.safe_load(spec_resp.body, permitted_classes: [Date, Time])
 end
-# Workbook code-rep GETs nest pages under `document` (live since 2026-08) — a
+# Workbook code-rep GETs nest pages under `contents` (`document` on the retired
+# /spec readbacks) — a
 # bare spec['pages'] read here was always nil, so `elements` came back empty
 # and every run hit the "no matching elements" abort below.
 spec = Sigma::CodeRep.document(spec)

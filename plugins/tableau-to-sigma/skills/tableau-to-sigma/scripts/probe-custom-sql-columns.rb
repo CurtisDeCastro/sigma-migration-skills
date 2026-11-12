@@ -38,6 +38,7 @@ require 'net/http'
 require 'uri'
 require 'json'
 require 'csv'
+require_relative 'lib/code_rep'
 require 'optparse'
 require_relative 'lib/workdir_guard' # refuse a workdir inside the installed plugin
 require 'securerandom'
@@ -59,8 +60,13 @@ parts = opts[:path].split('.', 3)
 abort "--table-path must be DB.SCHEMA.TABLE (got #{opts[:path].inspect})" unless parts.size == 3
 db, schema, table = parts
 
-BASE = ENV.fetch('SIGMA_BASE_URL') { abort 'set SIGMA_BASE_URL' }
-TOK  = ENV.fetch('SIGMA_API_TOKEN') { abort 'set SIGMA_API_TOKEN' }
+$LOAD_PATH.unshift File.expand_path('lib', __dir__)
+require 'sigma_rest'
+BASE = begin
+  Sigma.base_url # explicit SIGMA_BASE_URL, else the host a signed-in Sigma CLI profile reports
+rescue Sigma::Error => e
+  abort "probe-custom-sql-columns.rb: #{e.message}"
+end
 
 def http(method, path, body = nil, accept_json: true)
   uri = URI("#{BASE}#{path}")
@@ -69,9 +75,9 @@ def http(method, path, body = nil, accept_json: true)
         when :get    then Net::HTTP::Get.new(uri)
         when :delete then Net::HTTP::Delete.new(uri)
         end
-  req['Authorization'] = "Bearer #{TOK}"
+  req['Authorization'] = "Bearer #{Sigma.auth_token}"
   req['Accept']        = 'application/json' if accept_json
-  Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
+  Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') { |h| h.request(req) }
 end
 
 # INFORMATION_SCHEMA queries per dialect.
@@ -124,7 +130,7 @@ spec = {
 }
 
 warn "probing: #{opts[:path]} via INFORMATION_SCHEMA (#{opts[:dialect]})"
-res = http(:post, '/v2/workbooks/spec', JSON.generate(spec))
+res = http(:post, Sigma::CodeRep.create_path, JSON.generate(Sigma::CodeRep.create_body(JSON.parse(JSON.generate(spec)))))
 # Response body may be JSON ({"workbookId":"..."}) or YAML; tolerate both.
 parsed = (JSON.parse(res.body) rescue nil)
 wb_id  = parsed && parsed['workbookId']
