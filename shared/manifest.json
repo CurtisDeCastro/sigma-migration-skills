@@ -547,8 +547,7 @@
         "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/probe-controls.rb",
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/probe-controls.rb",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/probe-controls.rb",
-        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/probe-controls.rb",
-        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/probe-controls.rb"
+        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/probe-controls.rb"
       ]
     },
     {
@@ -611,8 +610,7 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/assert-phase6-ran.rb",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/assert-phase6-ran.rb",
-        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/assert-phase6-ran.rb",
-        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/assert-phase6-ran.rb"
+        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/assert-phase6-ran.rb"
       ]
     },
     {
@@ -755,7 +753,8 @@
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/browser-login.sh",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/browser-login.sh",
         "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/browser-login.sh",
-        "plugins/sigma-authoring/skills/sigma-api/scripts/browser-login.sh"
+        "plugins/sigma-authoring/skills/sigma-api/scripts/browser-login.sh",
+        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/browser-login.sh"
       ]
     },
     {
@@ -781,7 +780,8 @@
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/refresh-token.sh",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/refresh-token.sh",
         "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/refresh-token.sh",
-        "plugins/sigma-authoring/skills/sigma-api/scripts/refresh-token.sh"
+        "plugins/sigma-authoring/skills/sigma-api/scripts/refresh-token.sh",
+        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/refresh-token.sh"
       ]
     },
     {
@@ -807,7 +807,8 @@
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/lib/browser-login-platform.sh",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/lib/browser-login-platform.sh",
         "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/browser-login-platform.sh",
-        "plugins/sigma-authoring/skills/sigma-api/scripts/lib/browser-login-platform.sh"
+        "plugins/sigma-authoring/skills/sigma-api/scripts/lib/browser-login-platform.sh",
+        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/lib/browser-login-platform.sh"
       ]
     },
     {
