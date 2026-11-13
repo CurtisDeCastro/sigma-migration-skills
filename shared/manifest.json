@@ -195,8 +195,7 @@
         "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/preflight_lint.rb",
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/lib/preflight_lint.rb",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/lib/preflight_lint.rb",
-        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/preflight_lint.rb",
-        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/lib/preflight_lint.rb"
+        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/preflight_lint.rb"
       ]
     },
     {
@@ -218,8 +217,7 @@
         "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/lib/layout_lint.rb",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/lib/layout_lint.rb",
-        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/layout_lint.rb",
-        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/lib/layout_lint.rb"
+        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/layout_lint.rb"
       ]
     },
     {
@@ -277,8 +275,7 @@
         "plugins/streamlit-to-sigma/skills/streamlit-to-sigma/scripts/lib/control_lint.rb",
         "plugins/metabase-to-sigma/skills/metabase-to-sigma/scripts/lib/control_lint.rb",
         "plugins/spotfire-to-sigma/skills/spotfire-to-sigma/scripts/lib/control_lint.rb",
-        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/control_lint.rb",
-        "plugins/solver-to-sigma/skills/solver-to-sigma/scripts/lib/control_lint.rb"
+        "plugins/omni-to-sigma/skills/omni-to-sigma/scripts/lib/control_lint.rb"
       ]
     },
     {
@@ -911,7 +908,8 @@
         "plugins/sisense-to-sigma/skills/sisense-to-sigma/refs/layout-visual-qa.md",
         "plugins/tableau-to-sigma/skills/tableau-to-sigma/refs/layout-visual-qa.md",
         "plugins/thoughtspot-to-sigma/skills/thoughtspot-to-sigma/refs/layout-visual-qa.md",
-        "plugins/metabase-to-sigma/skills/metabase-to-sigma/refs/layout-visual-qa.md"
+        "plugins/metabase-to-sigma/skills/metabase-to-sigma/refs/layout-visual-qa.md",
+        "plugins/solver-to-sigma/skills/solver-to-sigma/refs/layout-visual-qa.md"
       ]
     },
     {

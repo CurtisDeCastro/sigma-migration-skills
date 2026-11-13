@@ -56,7 +56,10 @@ values `Value1…` and their own `UDF` columns. What `d_dim3` or `UDF007` *means
 - **Conditions** are comma lists of: a value, a range `lo:hi`, a wildcard `ab*` or `*` (everything), a parameter
   `{@Name}`, or (Period only) a period function `{PeriodCalc.GetFunction(FN, @Period)}`. Comparisons are
   case-insensitive; ranges on codes compare as text (they are codes, not numbers). `Contains` takes a quoted
-  string. A parameter value may itself be a comma list (`BUD,ADJ`) or `*`.
+  string. A parameter value may itself be a comma list (`BUD,ADJ`) or `*`. A missing attribute compares as `''`.
+  Only a trailing wildcard is translated. Conditions on the `Date` dimension (`'{Date.AddDays(-7).SqlDate}':{@Date}`)
+  and date-range parameters on attributes (`ParameterType="PeriodSelection"`, `DataType="OneStop.PeriodInterval"`,
+  default `'2010-01-01':'2024-10-31'`, tested on the stored datetime at both ends) are reported as gaps.
 - **Period functions** (YYYYMM periods, month arithmetic, fiscal year start configurable):
 
   | Function | Window ending at the selected period P |

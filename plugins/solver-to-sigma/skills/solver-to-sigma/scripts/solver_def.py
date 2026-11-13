@@ -22,7 +22,7 @@ import json
 import re
 import sys
 import zipfile
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
 XSI_TYPE = "{http://www.w3.org/2001/XMLSchema-instance}type"
 MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -98,6 +98,26 @@ def num_to_col(n):
     return s
 
 
+REF_RX = re.compile(r"(?<![A-Za-z0-9_.])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(])")
+
+
+def shift_formula(f, dr, dc):
+    """Move a formula's relative A1 references by (dr rows, dc columns), as Excel does when filling down or
+    across; $-anchored parts and string literals are left alone."""
+    def sh(m):
+        c = m.group(2) if m.group(1) else num_to_col(col_to_num(m.group(2)) + dc)
+        r = m.group(4) if m.group(3) else str(int(m.group(4)) + dr)
+        return f"{m.group(1)}{c}{m.group(3)}{r}"
+    parts = re.split(r'("[^"]*")', f)
+    return "".join(p if i % 2 else REF_RX.sub(sh, p) for i, p in enumerate(parts))
+
+
+def _cells_in(rng):
+    a, _, b = rng.replace("$", "").partition(":")
+    (ca, ra), (cb, rb) = _col_letters(a), _col_letters(b or a)
+    return [(num_to_col(c), r) for c in range(col_to_num(ca), col_to_num(cb) + 1) for r in range(ra, rb + 1)]
+
+
 def read_xlsx_cells(path):
     """{sheet name: {"A1": {"v": value, "f": formula or None, "fmt": format or None}}} — values, formulas, formats."""
     out = {}
@@ -127,8 +147,17 @@ def read_xlsx_cells(path):
             part = target if target.startswith("xl/") else "xl/" + target
             if part not in names:
                 continue
+            raw = list(ET.fromstring(z.read(part)).iter(MAIN_NS + "c"))
+            masters, arrays = {}, []
+            for c in raw:                                       # pass 1: shared-formula masters, array formulas
+                f = c.find(MAIN_NS + "f")
+                if f is not None and f.text:
+                    if f.attrib.get("t") == "shared" and f.attrib.get("si") is not None:
+                        masters[f.attrib["si"]] = (c.attrib.get("r"), f.text)
+                    elif f.attrib.get("t") == "array" and ":" in (f.attrib.get("ref") or ""):
+                        arrays.append(f.attrib["ref"])
             cells = {}
-            for c in ET.fromstring(z.read(part)).iter(MAIN_NS + "c"):
+            for c in raw:
                 ref, t = c.attrib.get("r"), c.attrib.get("t")
                 v, f = c.find(MAIN_NS + "v"), c.find(MAIN_NS + "f")
                 val = None
@@ -150,9 +179,21 @@ def read_xlsx_cells(path):
                 s = c.attrib.get("s")
                 fmt = xf_fmt[int(s)] if s is not None and int(s) < len(xf_fmt) else None
                 ftxt = ("=" + f.text) if (f is not None and f.text) else None
+                if f is not None and not f.text and f.attrib.get("t") == "shared":
+                    # a filled-down formula: Excel stores the text once, on the master; children carry only si
+                    m = masters.get(f.attrib.get("si"))
+                    if m:
+                        (mc, mr), (cc, cr) = _col_letters(m[0]), _col_letters(ref)
+                        ftxt = "=" + shift_formula(m[1], cr - mr, col_to_num(cc) - col_to_num(mc))
+                    else:
+                        ftxt = "=UNRESOLVED_SHARED_FORMULA()"         # compiles to a gap, never to the cached value
                 if val is None and ftxt is None:
                     continue
                 cells[ref] = {"v": val, "f": ftxt, "fmt": fmt}
+            for rng in arrays:                                  # a multi-cell array formula is not translated
+                for col, row in _cells_in(rng):
+                    if f"{col}{row}" in cells:
+                        cells[f"{col}{row}"]["f"] = "=UNRESOLVED_ARRAY_FORMULA()"
             out[sh.attrib.get("name")] = cells
     return out
 

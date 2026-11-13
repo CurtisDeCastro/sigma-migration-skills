@@ -60,6 +60,8 @@ def build(plan, source_map, name, folder_id, connection_id=None):
             except (Q.MappingError, C.Unsupported) as e:
                 problems.append(f"{s['name']}: {e}")
         for d in s["details"]:
+            if "gap" in d:
+                continue                                   # listed in warnings and counted in gap_cells
             try:
                 sql = r.detail_sql(d)
                 cols = []
@@ -77,7 +79,7 @@ def build(plan, source_map, name, folder_id, connection_id=None):
     controls = [dm_control(c) for c in Q.controls(plan)]
     spec = {"name": name, "folderId": folder_id, "schemaVersion": 1,
             "pages": [{"id": "page-1", "name": "Solver report", "elements": elements + controls}]}
-    gaps = sum(1 for s in plan["sheets"] for ln in s["lines"] for c in ln["cells"].values() if "gap" in c)
+    gaps = C.gap_count(plan)
     stats = {"sheets": len(plan["sheets"]), "elements": len(elements), "lines": sum(len(s["lines"]) for s in plan["sheets"]),
              "bases": sum(len(s["bases"]) for s in plan["sheets"]), "details": sum(len(s["details"]) for s in plan["sheets"]),
              "controls": len(controls), "gap_cells": gaps, "text_cells": sum(s.get("text_cells", 0) for s in plan["sheets"])}
@@ -143,6 +145,11 @@ def main():
         if not ir["sheets"]:
             sys.exit(f"no sheet named {sorted(keep)}")
     plan = C.compile_report(ir, sm)
+    if plan["failed_sheets"]:
+        print("sheets that could not be compiled -- nothing written:", file=sys.stderr)
+        for f in plan["failed_sheets"]:
+            print(f"  - {f['name']}: {f['error']}", file=sys.stderr)
+        sys.exit(2)
     env, problems = build(plan, sm, a.name, a.folder_id, a.connection_id)
     if problems:
         print("source map incomplete -- nothing written:", file=sys.stderr)

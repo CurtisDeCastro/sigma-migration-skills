@@ -33,12 +33,15 @@ Read before Phase 1: `refs/solver-definition-format.md` (what the definition hol
   `AuthenticationToken` (edit rights), not metadata. The scripts refuse it by name. Ask the sender to delete it
   and to send the Download instead.
 
-Run every command from this skill's directory. Python 3 stdlib only; no installs.
+Run every command from this skill's directory. Python 3 stdlib only, plus Ruby for the shared data-model matcher
+in Phase 1.5; no installs.
 
 ## Phase 0 — Assess (C1)
 Use the sibling **`solver-assessment`** skill to inventory a folder of downloads, bucket each report
 (automatable / iterate / complex), find near-duplicate report families (migrate once, not N times) and produce
-the list of questions to ask. Pick one report to start.
+the list of questions to ask. Pick one report to start. When scoping, read `refs/field-notes.md`: what else switches
+off with Solver (budget entry, hand-kept master data, manual loads), report families worth consolidating, and the
+reports that are import files rather than statements.
 
 ## Phase 1 — Discover (C2)
 1. Extract and read the definition:
@@ -82,9 +85,20 @@ or in a new one. Record the decision.
 - **One data-model control per parameter** the SQL reads (`{{ControlId}}`), number for periods, text otherwise.
   Every reference is wrapped in `COALESCE(<control>, <report default>)`: a bound workbook control with no value
   sends NULL, not the model's default. Comma-separated parameter values (`BUD,ADJ`) and `*` work as in Solver.
-- Label and presentation cells (`OSRGet` of an attribute, `TEXT`, `&`, arrow/sign formatting) are skipped as
-  text, not values. Anything else the compiler cannot translate is a **gap cell**: listed in `warnings`, never
-  approximated. Exit 2 lists every unmapped fact or field at once; fix the source map and rerun.
+- Label and presentation cells (`OSRGet` of an attribute, `TEXT`, `&`, an `IF` whose branches are all text) are
+  skipped as text, not values. Anything else the compiler cannot translate is a **gap cell**: listed in `warnings`,
+  counted in `stats.gap_cells`, never approximated. In particular:
+  - an unsupported filter (an unknown operator or `PeriodCalc` function) makes a gap of every cell that item filters;
+    the rest of the sheet still compiles;
+  - a value cell that reads a text cell (`=IF(D6>0,D6-D7,"n/a")` and everything that sums it) is a gap;
+  - date filters are gaps: the `Date` dimension, `Date.AddDays(...)` windows, and date-range parameters on an
+    attribute (Solver tests the stored datetime at both ends). Build them by hand and test both edges;
+  - only a trailing wildcard (`ab*`, or `*`) is translated; `*ab` and `a*b` are gaps;
+  - a sheet that cannot be compiled at all stops the run (exit 2), like an incomplete source map.
+- Filled-down (shared) Excel formulas are expanded cell by cell; a multi-cell array formula is a gap.
+- A parameter whose default is another parameter (`{@Location}`) keeps following it in Sigma
+  (`COALESCE({{B}}, {{A}}, <default>)`). A missing attribute compares as `''`, as in the local evaluator.
+  Exit 2 also lists every unmapped fact or field at once; fix the source map and rerun.
 
 The SQL lives in the data model on purpose: business builders often lack the Write SQL permission and cannot
 edit Custom SQL elements in a workbook, but can build on a data model.
@@ -103,24 +117,39 @@ python3 scripts/build-solver-workbook.py --plan plan.json --dm-readback dm-readb
 python3 scripts/post-solver.py workbook --spec wb.json --dry-run      # validation only
 python3 scripts/post-solver.py workbook --spec wb.json --readback wb-readback.json
 ```
-One page per sheet: the title, one control per parameter bound to the data-model control of the same id
-(`parameters: [{kind: data-model, …}]`; number controls need `mode`), the report table sorted by `Row`, and one
-table per expanded row. Per-line number formats (percent lines inside a currency statement) are not carried;
-apply them with conditional formatting or split the line out.
+One page per sheet: the title, the report table sorted by `Row`, and one table per expanded row. The parameter
+controls go on the **first page only** (a control id is unique in a workbook, and its value applies on every page),
+each bound to the data-model control of the same id (`parameters: [{kind: data-model, …}]`; number controls need
+`mode`). Per-line number formats (percent lines inside a currency statement) are not carried; apply them with
+conditional formatting or split the line out.
+
+**A create always makes a new workbook.** Iterate with `post-solver.py workbook --spec wb.json --update
+<workbookId>` (replaces the contents at the version it just read). Move any stray copy to Trash with
+`DELETE /v2/files/{workbookId}` so the customer's folder holds one rebuild.
 
 ## Phase 5 — Layout (C7)
 The layout travels in the **same create write**, with every element placed. Any later spec PUT must re-send the
 read-back layout as its **last write**: a PUT without it wipes the layout. Then render each page
-(`scripts/sigma-export-png.py`) and compare it with the executed run, per `refs/layout-visual-qa.md`.
+(`scripts/sigma-export-png.py`) and compare it with the executed run, per `refs/solver-visual-qa.md`
+(`refs/layout-visual-qa.md` is the shared rendering playbook the export script points to).
 
 ## Phase 6 — Verify parity (C8) ← HARD GATE, never skip
-Export the rebuilt report table (JSON) with the executed run's parameter values, then:
+Export the rebuilt tables (JSON) with the executed run's parameter values (keyed by `controlId`; a multi-value
+text parameter is one comma-separated string), then compare. Element ids are in `wb-readback.json`:
+`page-<sheet>-report` for the report table, `page-<sheet>-detail-<row>` for each expanded row.
 ```bash
-python3 scripts/compare-solver-parity.py --plan plan.json --run executed-run.xlsx \
-    --sigma-export export.json --sheet "<sheet>" --out parity.json
+python3 scripts/post-solver.py export --workbook-id <id> --element-id page-<sheet>-report \
+    --param Period=<yyyymm> --param "BudgetScenario=<codes>" --out export.json
+python3 scripts/post-solver.py export --workbook-id <id> --element-id page-<sheet>-detail-<row> \
+    --param Period=<yyyymm> --out detail-<row>.json            # once per expanded row
+python3 scripts/compare-solver-parity.py --plan plan.json --run executed-run.xlsx --sheet "<sheet>" \
+    --sigma-export export.json --detail-export <row>=detail-<row>.json --out parity.json
 ```
-Lines are matched by label in order (expanded blocks push rows down in a run), members by their attribute
-values. GREEN needs every compared cell inside tolerance and nothing unmatched; exit 1 otherwise. "Done" is
+Lines are matched by label in order on both sides (expanded blocks push rows down in a run); a line missing from
+either side, an extra exported row, or a missing column is reported, never paired by position. Expanded rows are
+compared member by member both ways. GREEN needs every compared cell inside tolerance, nothing unmatched, no gap
+cells (`--allow-gaps` records them as accepted, with a reason in the notes) and a run that is not all zeros (a run
+whose leftover parameters selected nothing); exit 1 otherwise. "Done" is
 GREEN on every sheet and parameter set the customer uses, **every remaining difference explained** and agreed
 with the report owner, a visual check, and sign-off. `refs/parity.md` lists the differences seen in the field.
 

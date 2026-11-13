@@ -2,7 +2,7 @@
 """Evaluate a compiled Solver plan over a local, Solver-shaped extract (creds-free).
 
     python3 scripts/evaluate-solver-local.py --plan plan.json --facts GL_F_Trans=gl.csv \
-        [--param Period=202609 --param "Budget Scenario=BUD,ADJ"] [--fy-start 1] --out values.json
+        [--param Period=202609 --param "Budget Scenario=BUD,ADJ"] [--fy-start <month>] --out values.json
 
 Use it twice: as the data-readiness pre-flight (does the extract reproduce the executed run's anchors before
 anything is built?) and as an offline parity oracle. The CSV header names columns the way Solver does:
@@ -23,7 +23,8 @@ def main():
     ap.add_argument("--plan", required=True)
     ap.add_argument("--facts", action="append", required=True, metavar="FACT=CSV")
     ap.add_argument("--param", action="append", default=[], metavar="NAME=VALUE")
-    ap.add_argument("--fy-start", type=int, default=1, help="fiscal year start month (1-12)")
+    ap.add_argument("--fy-start", type=int, help="fiscal year start month (1-12); default: the plan's, which "
+                    "convert-solver.py takes from the source map's fiscal_year_start_month, as the SQL does")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     with open(a.plan) as fh:

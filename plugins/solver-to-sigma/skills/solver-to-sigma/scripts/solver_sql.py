@@ -13,7 +13,9 @@ The source map (refs/source-map.md) says where each Solver fact and attribute li
 Every predicate is evaluated inside the SELECT that owns the source map's FROM clause, so its table aliases resolve.
 Solver parameters become data-model controls referenced as ``{{ControlId}}``; each reference is wrapped in
 COALESCE(<control>, <report default>) because a bound workbook control with no value sends NULL, not the
-data-model default. Text comparisons are case-insensitive, as in Solver.
+data-model default. A parameter whose default is another parameter (``{@A}``) becomes COALESCE({{B}}, <A's reference>)
+so it keeps following A in Sigma, as it does in Solver. Text comparisons are case-insensitive, as in Solver, and a
+missing attribute compares as '' (NULL never silently drops a row under NOT).
 """
 import re
 from fractions import Fraction
@@ -53,8 +55,15 @@ def _walk_params(p, names):
                 names.add(part["param"].lower())
 
 
+def follows(plan, name):
+    """The parameter that ``name``'s default refers to ({@Other}), or None."""
+    p = next((x for x in plan["parameters"] if (x["name"] or "").lower() == name.lower()), None)
+    m = C.PARAM_REF.match((p or {}).get("default") or "")
+    return m.group(1).strip() if m else None
+
+
 def params_used(plan):
-    """Parameter names referenced by any predicate, in definition order."""
+    """Parameter names referenced by any predicate (and the parameters their defaults follow), in definition order."""
     names = set()
     for s in plan["sheets"]:
         groups = [g for b in s["bases"].values() for g in b["groups"].values()]
@@ -62,6 +71,13 @@ def params_used(plan):
             groups += list(d["where"].values()) + [g for b in d["bases"].values() for g in b["groups"].values()]
         for g in groups:
             _walk_params(g, names)
+    for n in list(names):
+        seen = {n}
+        nxt = follows(plan, n)
+        while nxt and nxt.lower() not in seen:
+            names.add(nxt.lower())
+            seen.add(nxt.lower())
+            nxt = follows(plan, nxt)
     order = [p["name"] for p in plan["parameters"] if (p["name"] or "").lower() in names]
     missing = sorted(names - {o.lower() for o in order})
     if missing:
@@ -79,13 +95,22 @@ def controls(plan):
         while cid in seen:
             cid, n = f"{base}{n}", n + 1
         seen.add(cid)
+        chained = follows(plan, name)
         default = C.param_value(plan["parameters"], name)
-        if is_numeric_param(p):
+        numeric = is_numeric_param(p)
+        if numeric and default is not None and "," in str(default):
+            if p.get("is_period"):
+                raise MappingError(f"period parameter {name!r} defaults to a list ({default!r}); "
+                                   "a period parameter takes one period")
+            numeric = False                       # a list of numeric codes is matched as text, like any list
+        if chained:
+            default = None                        # no saved value of its own: it follows the other parameter
+        elif numeric:
             try:
                 default = int(Fraction(str(default)))
             except (ValueError, TypeError):
                 default = None
-        out.append({"param": name, "controlId": cid, "numeric": is_numeric_param(p), "default": default})
+        out.append({"param": name, "controlId": cid, "numeric": numeric, "default": default, "follows": chained})
     return out
 
 
@@ -136,6 +161,8 @@ class Renderer:
 
     def ctl_ref(self, param):
         c = self.ctl[param.lower()]
+        if c.get("follows") and c["follows"].lower() in self.ctl:
+            return f"COALESCE({{{{{c['controlId']}}}}}, {self.ctl_ref(c['follows'])})"
         d = c["default"]
         dflt = ("NULL" if d is None else str(d)) if c["numeric"] else q("" if d is None else d)
         return f"COALESCE({{{{{c['controlId']}}}}}, {dflt})"
@@ -143,7 +170,7 @@ class Renderer:
     # -------------------------------------------------------------- predicates
     @staticmethod
     def norm(e):
-        return f"UPPER(TRIM(TO_VARCHAR({e})))"
+        return f"UPPER(TRIM(COALESCE(TO_VARCHAR({e}), '')))"
 
     @staticmethod
     def pidx(e):
@@ -185,7 +212,8 @@ class Renderer:
             ors.append(f"{col} IN ({', '.join(q(e) for e in eqs)})")
         for x in p["parts"]:
             if "eq" in x and "*" in x["eq"]:
-                ors.append("TRUE" if x["eq"].strip() == "*" else f"{col} LIKE {q(x['eq'].upper().replace('*', '%'))}")
+                # only a trailing * reaches here (solver_compile.leaf); STARTSWITH needs no LIKE escaping of _ or %
+                ors.append("TRUE" if x["eq"].strip() == "*" else f"STARTSWITH({col}, {q(x['eq'].upper()[:-1])})")
             elif "lo" in x:
                 ors.append(f"{col} BETWEEN {q(x['lo'].upper())} AND {q(x['hi'].upper())}")
             elif "param" in x:

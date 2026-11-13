@@ -31,4 +31,4 @@ uses (month, quarter, year-to-date, trailing twelve months; each scenario set).
 ## What parity does not cover
 
 Formatting, drill-through, Solver commentary and distribution. Check the layout visually
-(`layout-visual-qa.md`) and list anything the customer used that the rebuild does not have.
+(`solver-visual-qa.md`) and list anything the customer used that the rebuild does not have.

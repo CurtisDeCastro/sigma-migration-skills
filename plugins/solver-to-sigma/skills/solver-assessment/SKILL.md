@@ -30,7 +30,11 @@ and a bucket:
 
 - **automatable**: every value cell translates; one fact table; no expanded rows.
 - **iterate**: a few untranslated cells or expanded rows for a person to check.
-- **complex**: several fact tables, expanding columns, bursting, or more than 10% untranslated cells.
+- **complex**: several fact tables, expanding columns, bursting, a sheet that cannot be compiled, or more than
+  10% untranslated cells.
+
+Untranslated cells include every cell an unsupported filter touches, value cells that read a text cell, date
+filters and expanded rows that cannot be compiled; a sheet that fails outright counts all its formula cells.
 
 ## Phase 1.5 — Near-duplicates
 Solver estates grow by copying a report and changing one filter. Find the families and migrate each once:
@@ -52,6 +56,9 @@ Always raise these with the customer:
   oracle.
 - Solver's dimension security rules (not in the downloads).
 - Which near-duplicate families should become one Sigma workbook with a control instead of N reports?
+- Is Solver also the budgeting tool, or the only home of some master data or manual loads? Those switch off with
+  it (`../solver-to-sigma/refs/field-notes.md`).
+- Does any report produce an import file for the ERP? Plan it as a workflow app, not a report.
 
 ## Privacy
 Downloads carry the customer's chart of accounts, entity and scenario codes, and labels, but no amounts.

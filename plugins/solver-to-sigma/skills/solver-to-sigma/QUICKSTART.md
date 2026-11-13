@@ -3,16 +3,16 @@
 ## Offline, on the synthetic fixture (no credentials)
 
 ```bash
-cd plugins/solver-to-sigma/skills/solver-to-sigma
-python3 scripts/convert-solver.py --definition fixtures/pnl-smoke/pnl-template.xlsx \
-    --source-map fixtures/pnl-smoke/source-map.json --name "Location P&L summary - Data" \
-    --folder-id <folder-id> --out /tmp/solver/dm.json --plan-out /tmp/solver/plan.json
-python3 scripts/evaluate-solver-local.py --plan /tmp/solver/plan.json \
-    --facts GL_F_Trans=fixtures/pnl-smoke/gl.csv --out /tmp/solver/values.json
-python3 scripts/compare-solver-parity.py --plan /tmp/solver/plan.json \
-    --run fixtures/pnl-smoke/pnl-executed-run.xlsx --values /tmp/solver/values.json --out /tmp/solver/parity.json
-# parity GREEN: 39 cells compared, 0 mismatches, 0 unmatched
-python3 tests/test_solver.py
+# from any scratch directory outside the repo; SKILL = the path to plugins/solver-to-sigma/skills/solver-to-sigma
+python3 "$SKILL/scripts/convert-solver.py" --definition "$SKILL/fixtures/pnl-smoke/pnl-template.xlsx" \
+    --source-map "$SKILL/fixtures/pnl-smoke/source-map.json" --name "Location P&L summary - Data" \
+    --folder-id <folder-id> --out dm.json --plan-out plan.json
+python3 "$SKILL/scripts/evaluate-solver-local.py" --plan plan.json \
+    --facts GL_F_Trans="$SKILL/fixtures/pnl-smoke/gl.csv" --out values.json
+python3 "$SKILL/scripts/compare-solver-parity.py" --plan plan.json \
+    --run "$SKILL/fixtures/pnl-smoke/pnl-executed-run.xlsx" --values values.json --out parity.json
+# parity GREEN: 39 cells compared, 0 mismatches, 0 unmatched, 0 gaps
+python3 "$SKILL/tests/test_solver.py"
 ```
 
 ## Live
@@ -28,6 +28,7 @@ python3 tests/test_solver.py
    python3 scripts/build-solver-workbook.py --plan plan.json --dm-readback dm-readback.json \
        --name "<Report>" --folder-id <folder-id> --out wb.json
    python3 scripts/post-solver.py workbook --spec wb.json --dry-run
-   python3 scripts/post-solver.py workbook --spec wb.json --readback wb-readback.json
+   python3 scripts/post-solver.py workbook --spec wb.json --readback wb-readback.json   # later: --update <id>
    ```
-5. Export the report table with the run's parameter values and run `compare-solver-parity.py --sigma-export`.
+5. Export the report table (and each expanded row) with the run's parameter values (`post-solver.py export`) and
+   run `compare-solver-parity.py --sigma-export … --detail-export …` (SKILL.md Phase 6).

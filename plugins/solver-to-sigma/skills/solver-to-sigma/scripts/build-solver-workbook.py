@@ -6,7 +6,8 @@
 
 The readback is GET /v2/dataModels/{id}/spec after the POST (Phase 3, C5): every element and control is wired to
 the ids and names Sigma returned, never to client-side ids. One page per report sheet: the title, one control per
-Solver parameter (bound to the data-model control of the same controlId, so the SQL sees it), the report table in
+Solver parameter on the FIRST page only (bound to the data-model control of the same controlId, so the SQL sees
+it; a control id must be unique in a workbook and a control's value applies on every page), the report table in
 report order, and one table per expanded row. The layout travels in the same document, so the create is a single
 write; any later spec PUT must re-send the read-back layout as its LAST write (a bare PUT wipes it).
 
@@ -70,21 +71,23 @@ def build(plan, rb, name, folder_id):
             warnings.append(f"{s['name']}: no data-model element in the readback; page skipped")
             continue
         pid = f"page-{slug(s['name'])}"
+        first = not pages
         pages.append({"id": pid, "name": s["name"]})
+        note = "" if first or not controls else f" Set the parameters on the {pages[0]['name']} page; they apply here too."
         rows = [f'<Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="{pid}">']
         title = {"id": f"{pid}-title", "kind": "text",
-                 "body": f"# {plan.get('title') or name}\n\n{s['name']} (rebuilt from Solver; see the parity report before use)"}
+                 "body": f"# {plan.get('title') or name}\n\n{s['name']} (rebuilt from Solver; see the parity report before use).{note}"}
         elements.append(title)
         rows.append(f'  <Element elementId="{title["id"]}" gridColumn="1 / 25" gridRow="1 / 3"/>')
         r = 3
-        for i, c in enumerate(controls):
+        for i, c in enumerate(controls if first else []):
             ce = control(c, dm_id, pid)
             elements.append(ce)
             col0 = 1 + (i % 4) * 6
             if i and i % 4 == 0:
                 r += 2
             rows.append(f'  <Element elementId="{ce["id"]}" gridColumn="{col0} / {col0 + 6}" gridRow="{r} / {r + 2}"/>')
-        r += 2
+        r += 2 if first and controls else 0
         if dm_el is not None:
             cname = {c["name"]: c for c in dm_el.get("columns", [])}
             _, display = Q.column_names(s)
@@ -124,7 +127,7 @@ def build(plan, rb, name, folder_id):
     if not pages:
         sys.exit("nothing to build: no sheet had a data-model element in the readback")
     doc = {"schemaVersion": 1, "kind": "workbook", "pages": pages, "layout": "\n".join(layout), "elements": elements}
-    stats = {"pages": len(pages), "tables": n_tables, "controls": len(controls) * len(pages)}
+    stats = {"pages": len(pages), "tables": n_tables, "controls": len(controls)}
     return {"workbook": {"name": name, "folderId": folder_id, "document": doc}, "stats": stats, "warnings": warnings}
 
 

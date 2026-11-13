@@ -61,19 +61,23 @@ def profile(path):
         for d in s["details"]:
             for b in d["bases"].values():
                 facts.add(b["fact"])
+                for g in b["groups"].values():             # filters that only an expanded row's cells carry
+                    walk_pred(g, acc)
             for g in d["where"].values():
                 walk_pred(g, acc)
-            gaps += sum(1 for c in d["cells"].values() if "gap" in c)
+            cells += max(1, len(d["cells"]))
         for ln in s["lines"]:
             cells += len(ln["cells"])
-            gaps += sum(1 for c in ln["cells"].values() if "gap" in c)
+    failed = plan.get("failed_sheets", [])
+    gaps = C.gap_count(plan)
+    cells += sum(f.get("formula_cells", 1) or 1 for f in failed)
     params = ir["parameters"]
     expanding_cols = sum(1 for w in plan["warnings"] if "expands (one column per member)" in w)
     bursting = [p["name"] for p in params if p.get("loop")]
     score = (len(plan["sheets"]) * 2 + lines // 10 + details * 3 + len(params) + len(bursting) * 5
              + max(0, len(facts) - 1) * 10 + expanding_cols * 10 + gaps * 2 + len(acc["period_fns"]))
     gap_rate = gaps / cells if cells else 0
-    if len(facts) > 1 or expanding_cols or bursting or gap_rate > 0.10:
+    if len(facts) > 1 or expanding_cols or bursting or failed or gap_rate > 0.10:
         bucket = "complex"
     elif gaps or details:
         bucket = "iterate"
@@ -82,6 +86,7 @@ def profile(path):
     return {"file": os.path.basename(path), "title": ir.get("title"), "author": ir.get("author"),
             "sheets": [s["name"] for s in ir["sheets"]], "lines": lines, "expanded_rows": details,
             "expanding_columns": expanding_cols, "value_cells": cells, "untranslated_cells": gaps, "text_cells": text,
+            "failed_sheets": [f["name"] for f in failed],
             "parameters": [{"name": p["name"], "hidden": p.get("hidden"), "bursting": bool(p.get("loop")),
                             "period": p.get("is_period")} for p in params],
             "facts": sorted(facts), "fields": sorted(acc["fields"]), "period_functions": sorted(acc["period_fns"]),
@@ -114,7 +119,11 @@ def readout(inv, refused, errors):
             "- For each fact table: where does the same data live in the warehouse today, and which copy is the "
             "source of truth (the ERP's GL, or a replicated Solver feed)? Is it loaded daily?",
             "- One executed run per report for a recent closed period, with its parameter values, for parity.",
-            "- Which reports are near-duplicates that should become one Sigma workbook (see the duplicate groups)?"]
+            "- Which reports are near-duplicates that should become one Sigma workbook (see the duplicate groups)?",
+            "- Is Solver also where budgets are entered, or where any master data (tags, re-codes, manual loads) is "
+            "maintained by hand? Each needs a new home and an owner before Solver is switched off.",
+            "- Do any reports produce a file for another system (an ERP import) rather than a statement? Those become "
+            "workflow apps, not reports (see `../solver-to-sigma/refs/field-notes.md`)."]
     if refused:
         out += ["", "## Refused files", "", "These are `.manifest` files: they carry a Solver session token. They were "
                 "not opened. Ask the sender to delete them and send the Live Reporting **Download** instead.", ""]

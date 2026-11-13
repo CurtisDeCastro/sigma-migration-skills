@@ -16,10 +16,11 @@ compiler's output with them are a real check. All names, codes and amounts are s
 import csv
 import io
 import json
+import math
 import os
 import random
 import zipfile
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PERIOD = 202609
@@ -61,7 +62,7 @@ def gl_rows():
 def oracle(rows):
     """Expected report values computed directly (independent of the converter)."""
     def s(pred):
-        return sum(r["GL_F_Trans.Value1"] for r in rows if pred(r))
+        return math.fsum(r["GL_F_Trans.Value1"] for r in rows if pred(r))     # exact on every Python version
     act = lambda r: r["d_Scenario.Code"] == "ACT"
     bud = lambda r: r["d_Scenario.Code"] in ("BUD", "ADJ")
     mtd = lambda r: r["Period.PeriodId"] == PERIOD
@@ -87,7 +88,7 @@ def oracle(rows):
     for acct in sorted(a for a in ACCOUNTS if a.startswith("4")):
         D = -s(lambda r: act(r) and mtd(r) and r["d_Account.Code"] == acct)
         E = -s(lambda r: bud(r) and mtd(r) and r["d_Account.Code"] == acct)
-        detail.append({"B": ACCOUNTS[acct], "C": acct, "D": D, "E": E})
+        detail.append({"B": ACCOUNTS[acct], "C": acct, "D": round(D, 6), "E": round(E, 6)})
     return lines, detail
 
 
@@ -193,10 +194,12 @@ def write_xlsx(path, cells, definition=None):
           '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>']
     if definition:
         ct.append('<Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/>')
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+    # ZIP_STORED: members stay plain bytes, so tools/hygiene-sweep.sh can scan them, and zlib's version never
+    # reaches the output; fixed timestamps keep it byte-stable
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
         def put(name, data):
-            zi = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))       # fixed timestamps -> byte-stable output
-            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            zi.compress_type = zipfile.ZIP_STORED
             z.writestr(zi, data)
         put("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' + "".join(ct) + "</Types>")

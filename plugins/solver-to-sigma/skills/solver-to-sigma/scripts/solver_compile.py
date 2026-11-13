@@ -31,17 +31,36 @@ PERIOD_FN = re.compile(r"^\{\s*PeriodCalc\.GetFunction\(\s*(\w+)\s*,\s*@([^)]+?)
 PARAM_REF = re.compile(r"^\{\s*@([^}]+?)\s*\}$")
 PERIOD_DIM = "Period"
 NUMERIC_TYPES = ("System.Decimal", "System.Int32", "System.Int64", "System.Double")
+DATE_DIMS = ("Date",)
+DATE_PARAM_TYPES = ("OneStop.PeriodInterval", "System.DateTime", "System.DateTimeOffset")
+DATE_PARAM_KINDS = ("PeriodSelection", "DatePicker")
 
 
 class Unsupported(Exception):
     """A construct the compiler does not translate. Surfaces as a gap; never silently approximated."""
 
 
-class TextCell(Unsupported):
-    """A label or presentation cell (attribute read, string concatenation, TEXT/DOLLAR/IF formatting). Not a value."""
-
-
 TEXT_FN = re.compile(r"^\s*=?\s*(TRIM|MID|LEFT|RIGHT|UPPER|LOWER|PROPER|TEXT|DOLLAR|CONCATENATE|CONCAT)\s*\(", re.I)
+
+
+def _top_args(s):
+    """Top-level arguments of a call whose opening parenthesis was just consumed."""
+    out, buf, depth, quoted = [], "", 0, False
+    for ch in s:
+        if ch == '"':
+            quoted = not quoted
+        elif not quoted and ch == "(":
+            depth += 1
+        elif not quoted and ch == ")":
+            if depth == 0:
+                return out + [buf]
+            depth -= 1
+        elif not quoted and ch == "," and depth == 0:
+            out.append(buf)
+            buf = ""
+            continue
+        buf += ch
+    return out + [buf]
 
 
 def is_text_formula(f, fact_tables=()):
@@ -49,8 +68,10 @@ def is_text_formula(f, fact_tables=()):
     g = OSR_PREFIX.sub("", f or "")
     if TEXT_FN.match(g) or "&" in re.sub(r'"[^"]*"', "", g) or re.match(r'^\s*=?\s*"', g):
         return True
-    if re.match(r"^\s*=?\s*IF\s*\(", g, re.I) and re.search(r'"[^"]*"', g):
-        return True
+    m = re.match(r"^\s*=?\s*IF\s*\(", g, re.I)
+    if m:
+        branches = _top_args(g[m.end():])[1:3]
+        return bool(branches) and all(re.fullmatch(r'\s*"[^"]*"\s*', b) or is_text_formula(b) for b in branches)
     gets = re.findall(r'OSRGet\(\s*"([^"]+)"', g, re.I)
     return bool(gets) and not any(t in fact_tables or t.endswith("_F_Trans") for t in gets)
 
@@ -112,8 +133,18 @@ def split_tokens(cond):
     return out
 
 
-def leaf(dim, field, op, cond):
-    """One Expression -> predicate leaf (a dict). Values are kept raw; matching is case-insensitive."""
+def _param_meta(params, name):
+    return next((x for x in (params or []) if (x.get("name") or "").lower() == name.lower()), None)
+
+
+def is_date_param(meta):
+    return bool(meta) and (bool(meta.get("is_period")) or meta.get("data_type") in DATE_PARAM_TYPES
+                           or meta.get("type") in DATE_PARAM_KINDS)
+
+
+def leaf(dim, field, op, cond, params=None):
+    """One Expression -> predicate leaf (a dict). Values are kept raw; matching is case-insensitive.
+    ``params`` (the report's parameters) lets a date-range parameter on an attribute be reported as a gap."""
     if op not in ("In", "Contains"):
         raise Unsupported(f"filter operator {op!r} on {dim}.{field}")
     if op == "Contains":
@@ -134,13 +165,22 @@ def leaf(dim, field, op, cond):
             lo, _, hi = t.partition(":")
             return {"k": "period_lit", "dim": dim, "field": field, "lo": int(lo), "hi": int(hi or lo)}
         raise Unsupported(f"period condition {cond!r}")
+    if dim in DATE_DIMS:
+        raise Unsupported(f"date filter on {dim}.{field} ({cond!r}): Solver compares stored datetimes, both ends "
+                          "inclusive; not translated")
     parts = []
     for t in toks:
         m = PARAM_REF.match(t)
         if m:
-            parts.append({"param": m.group(1).strip()})
-        elif t.startswith("{"):
+            name = m.group(1).strip()
+            if is_date_param(_param_meta(params, name)):
+                raise Unsupported(f"date-range parameter {{@{name}}} on {dim}.{field}: Solver tests the stored datetime "
+                                  "against both ends of the range; not translated")
+            parts.append({"param": name})
+        elif "{" in t or "'" in t:
             raise Unsupported(f"condition expression {t!r} on {dim}.{field}")
+        elif "*" in t and (":" in t or t.count("*") > 1 or not t.endswith("*")):
+            raise Unsupported(f"wildcard {t!r} on {dim}.{field}: only a trailing * (prefix match) is translated")
         elif ":" in t:
             lo, hi = [x.strip() for x in t.split(":", 1)]
             parts.append({"lo": lo, "hi": hi})
@@ -149,11 +189,11 @@ def leaf(dim, field, op, cond):
     return {"k": "in", "dim": dim, "field": field, "parts": parts}
 
 
-def group_pred(exprs):
+def group_pred(exprs, params=None):
     """A FilterGroup -> predicate tree, evaluated left to right."""
     acc = None
     for e in exprs:
-        lf = leaf(e["dim"], e["field"], e["op"], e["cond"])
+        lf = leaf(e["dim"], e["field"], e["op"], e["cond"], params)
         lo = e.get("logic")
         if acc is None:
             acc = {"k": "not", "x": lf} if lo == "Not" else lf
@@ -170,11 +210,11 @@ def group_pred(exprs):
     return acc
 
 
-def element_groups(el):
+def element_groups(el, params=None):
     """{group name (dimension): predicate} for one DefinitionElement."""
     out = {}
     for fg in el.get("filters", []):
-        p = group_pred(fg["exprs"])
+        p = group_pred(fg["exprs"], params)
         if p is not None:
             g = fg["group"]
             out[g] = {"k": "and", "xs": [out[g], p]} if g in out else p
@@ -429,13 +469,22 @@ class SheetCompiler:
         self.ir, self.sh, self.sm = ir, sheet, source_map or {}
         self.report_groups, self.col_groups, self.row_groups, self.cell_groups = {}, {}, {}, {}
         self.cell_formula, self.row_items, self.results = {}, {}, {}
-        self.warnings_init = []
+        self.warnings_init, self.item_errors = [], {}
         for it in sheet["items"]:
             g = {}
-            for el in it["elements"]:
-                for k, v in element_groups(el).items():
-                    g[k] = {"k": "and", "xs": [g[k], v]} if k in g else v
             t = it["type"]
+            try:
+                for el in it["elements"]:
+                    for k, v in element_groups(el, ir.get("parameters")).items():
+                        g[k] = {"k": "and", "xs": [g[k], v]} if k in g else v
+            except Unsupported as e:
+                # the cells this item filters become gaps (context() raises); the rest of the sheet still compiles
+                key = {"Report": ("Report",), "Column": ("Column", it["col"]), "Row": ("Row", it["row"]),
+                       "Cell": ("Cell", it["row"], it["col"])}.get(t, (t, it["row"], it["col"]))
+                where = {"Report": "", "Column": f" column {solver_def.num_to_col(it['col'] or 1)}",
+                         "Row": f" row {it['row']}"}.get(t, f" {solver_def.num_to_col(it['col'] or 1)}{it['row']}")
+                self.item_errors[key] = f"{t} item{where}: {e}"
+                g = {}
             if t == "Report":
                 self.report_groups.update(g)
             elif t == "Column":
@@ -456,6 +505,9 @@ class SheetCompiler:
 
     # ---------------------------------------------------------------- context
     def context(self, r, c):
+        for key in (("Report",), ("Column", c), ("Row", r), ("Cell", r, c)):
+            if key in self.item_errors:
+                raise Unsupported(self.item_errors[key])
         g = dict(self.report_groups)
         g.update(self.col_groups.get(c, {}))
         g.update(self.row_groups.get(r, {}))
@@ -496,7 +548,7 @@ class SheetCompiler:
         if f is None:
             return K(0)
         if is_text_formula(f, _fact_tables(self.sm)):
-            raise TextCell(f"{col}{row} is a text cell")
+            raise Unsupported(f"reads {col}{row}, a text cell (label or formatted text), as a number")
         self.stack.add(key)
         try:
             c = solver_def.col_to_num(col)
@@ -567,18 +619,26 @@ class SheetCompiler:
         lines, details = [], []
         first_value_col = min(cols) if cols else 1
         first_row = min(rows) if rows else 1
+        facts = _fact_tables(self.sm)
         for r in sorted(r for r in expanded if any(rr == r for rr, _ in self.cell_formula)):
-            details.append(self.detail(r, first_value_col))
+            try:
+                details.append(self.detail(r, first_value_col))
+            except Unsupported as e:
+                details.append({"row": r, "label": self.label(r, first_value_col), "gap": str(e), "group_by": [],
+                                "cells": {}, "bases": {}, "where": {}, "labels": {}})
+                self.warnings.append(f"{self.sh['name']}: expanded row {r}: {e}")
         for r in rows:
             cells = {}
             for c in cols:
                 L = solver_def.num_to_col(c)
-                if self.formula_at(L, r) is None:
+                f = self.formula_at(L, r)
+                if f is None:
+                    continue
+                if is_text_formula(f, facts):            # the cell itself is a label: not a value, not a gap
+                    self.text_cells += 1
                     continue
                 try:
                     cells[L] = {"expr": self.cell_value(L, r)}
-                except TextCell:
-                    self.text_cells += 1
                 except Unsupported as e:
                     cells[L] = {"gap": str(e)}
                     self.warnings.append(f"{self.sh['name']}!{L}{r}: {e}")
@@ -647,16 +707,31 @@ class SheetCompiler:
 
 
 def compile_report(ir, source_map=None):
-    sheets, warnings = [], []
+    """-> plan. ``failed_sheets`` lists sheets that could not be compiled at all (convert exits 2 on any);
+    gaps inside a sheet are cells or expanded rows carrying ``gap`` and are listed in ``warnings``."""
+    sheets, warnings, failed = [], [], []
     for sh in ir["sheets"]:
         try:
             s = SheetCompiler(ir, sh, source_map).compile()
         except Unsupported as e:
-            warnings.append(f"{sh['name']}: {e}")
+            warnings.append(f"{sh['name']}: sheet not compiled: {e}")
+            failed.append({"name": sh["name"], "error": str(e),
+                           "formula_cells": sum(1 for it in sh["items"] if it.get("formula"))
+                           + sum(1 for c in sh.get("cells", {}).values() if c.get("f"))})
             continue
         warnings += s["warnings"]
         sheets.append(s)
-    return {"title": ir.get("title"), "parameters": ir["parameters"], "sheets": sheets, "warnings": warnings}
+    fy = int((source_map or {}).get("fiscal_year_start_month", 1))
+    return {"title": ir.get("title"), "parameters": ir["parameters"], "fiscal_year_start_month": fy,
+            "sheets": sheets, "failed_sheets": failed, "warnings": warnings}
+
+
+def gap_count(plan):
+    """Untranslated cells and expanded rows in a plan, plus every formula cell of a sheet that failed outright."""
+    n = sum(1 for s in plan["sheets"] for ln in s["lines"] for c in ln["cells"].values() if "gap" in c)
+    n += sum(1 for s in plan["sheets"] for d in s["details"] for c in d["cells"].values() if "gap" in c)
+    n += sum(1 for s in plan["sheets"] for d in s["details"] if "gap" in d)
+    return n + sum(f.get("formula_cells", 1) or 1 for f in plan.get("failed_sheets", []))
 
 
 # ============================================================================================ parameters
@@ -695,7 +770,7 @@ def _match_in(val, parts, params, overrides, numeric=False):
                 return True
         elif "eq" in p:
             e = p["eq"].upper()
-            if e == "*" or v == e or (e.endswith("*") and v.startswith(e[:-1])):
+            if e == "*" or v == e or (e.endswith("*") and e.count("*") == 1 and v.startswith(e[:-1])):
                 return True
         else:
             lo, hi = p["lo"].upper(), p["hi"].upper()
@@ -742,10 +817,12 @@ def _num(x):
     return None if x is None else float(x)
 
 
-def evaluate(plan, facts, overrides=None, fy_start=1):
+def evaluate(plan, facts, overrides=None, fy_start=None):
     """facts: {fact table: [rows keyed "<dim>.<field>" and "<fact>.<value>"]} (a Solver-shaped extract).
-    -> {sheet: {"lines": {row: {col: value}}, "details": {row: [{col: value}]}}}"""
+    -> {sheet: {"lines": {row: {col: value}}, "details": {row: [{col: value}]}}}. The fiscal year start comes from
+    the plan (the source map's ``fiscal_year_start_month``, the same value the SQL uses) unless overridden."""
     params = plan["parameters"]
+    fy_start = int(fy_start or plan.get("fiscal_year_start_month") or 1)
     out = {}
     for s in plan["sheets"]:
         bv = _sum_bases(s["bases"], facts, params, overrides, fy_start)
@@ -753,6 +830,8 @@ def evaluate(plan, facts, overrides=None, fy_start=1):
                  for ln in s["lines"]}
         details = {}
         for d in s["details"]:
+            if "gap" in d:
+                continue
             keyed = {}
             for fact, rows in facts.items():
                 for row in rows:
